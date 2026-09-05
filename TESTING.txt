@@ -95,12 +95,27 @@ we will not keep tens of GB in source control. The split:
   gitignored (configurable path, defaults to something like ./.corpus). It is
   opt-in: nothing downloads unless you ask. Fast tests never touch it.
 
-- Corpus tiers by size so people can choose their commitment:
-    small  - the checked-in fixtures; always available; runs in CI on every
-             commit.
-    medium - a few hundred megabytes; quick perf smoke test; opt-in.
-    large  - dozens of GB; full performance runs; opt-in, for nightly or
-             pre-release, not per-commit.
+- Downloaded corpus tiers (separate from the checked-in correctness fixtures),
+  so people pick their commitment:
+    small  - one compact repo, tens of MB; quick perf smoke; for example a
+             pinned release of psf/requests (Python) or nlohmann/json (C++).
+    medium - one large repo, hundreds of MB up to a couple of GB; for example a
+             pinned release of dotnet/roslyn (C#), microsoft/TypeScript (TS), or
+             godotengine/godot (C++).
+    big    - dozens of GB, aggregated from several pinned large repos (for
+             example llvm-project plus linux plus dotnet/runtime), because no
+             single public source tree is reliably that large. The harness also
+             supports pointing at a real local repo - your actual codebase - as
+             the truest big-scale test.
+
+- Public repos change, so we never track "latest." Every manifest entry is
+  pinned to an immutable release tag or exact commit SHA, fetched as a source
+  tarball from the host's codeload endpoint (stable per tag/commit and needs no
+  git client), then verified against a checksum stored in the manifest. If an
+  upstream tag ever disappears or is force-moved, the checksum mismatch fails
+  loudly rather than silently benchmarking against different code; the manifest
+  can then be repointed at a mirror or an archived tarball. Downloads land in
+  the gitignored corpus cache so reruns never re-fetch.
 
 - The manifest also stores expected performance baselines so runs are
   comparable. Because absolute numbers vary by hardware, baselines are recorded
