@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CodeCompass.Core.Changes;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Text;
 using CodeCompass.Semantics;
@@ -8,22 +9,26 @@ return args.Length == 0
     : args[0].ToLowerInvariant() switch
     {
         "index" => CmdIndex(args),
+        "update" => CmdUpdate(args),
         "search" => CmdSearch(args),
         "def" => CmdDef(args),
         "symbols" => CmdSymbols(args),
         "refs" => CmdRefs(args),
+        "watch" => CmdWatch(args),
         _ => Usage(),
     };
 
 static int Usage()
 {
-    Console.Error.WriteLine("CodeCompass (Phase 4)");
+    Console.Error.WriteLine("CodeCompass (Phase 5)");
     Console.Error.WriteLine("usage:");
-    Console.Error.WriteLine("  codecompass index   <path>");
+    Console.Error.WriteLine("  codecompass index   <path>               (re)build the full index");
+    Console.Error.WriteLine("  codecompass update  <path>               incremental reindex of changes");
+    Console.Error.WriteLine("  codecompass watch   <path>               auto-reindex on file changes");
     Console.Error.WriteLine("  codecompass search  <path> <query>       literal text search");
     Console.Error.WriteLine("  codecompass def     <path> <name>        exact symbol definition(s)");
     Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
-    Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#, lexical elsewhere)");
+    Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#/C++, lexical elsewhere)");
     return 1;
 }
 
@@ -46,6 +51,49 @@ static int CmdIndex(string[] args)
     Console.WriteLine($"Indexed {s.Files:N0} files ({mb:F1} MB) in {s.Seconds:F2}s  ({throughput:F1} MB/s)");
     Console.WriteLine($"Trigrams: {s.Trigrams:N0}   Symbols: {s.Symbols:N0}");
     Console.WriteLine($"Text index: {s.IndexBytes / (1024.0 * 1024.0):F1} MB ({ratio:F2}x corpus)");
+    return 0;
+}
+
+static int CmdUpdate(string[] args)
+{
+    if (args.Length < 2) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
+
+    var (_, _, s) = RepositoryIndexer.Update(root);
+    if (s.FullRebuild)
+        Console.WriteLine($"Full rebuild ({s.Added} files) in {s.Seconds:F2}s");
+    else
+        Console.WriteLine($"Updated in {s.Seconds:F2}s: +{s.Added} added, ~{s.Modified} modified, -{s.Removed} removed");
+    return 0;
+}
+
+static int CmdWatch(string[] args)
+{
+    if (args.Length < 2) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
+
+    if (!RepositoryIndexer.TryLoad(root, out _, out _))
+    {
+        Console.Error.WriteLine("building initial index...");
+        var b = RepositoryIndexer.Build(root);
+        Console.Error.WriteLine($"indexed {b.Stats.Files} files");
+    }
+
+    using var watcher = new RepositoryWatcher(root, () =>
+    {
+        var (_, _, s) = RepositoryIndexer.Update(root);
+        if (s.Added != 0 || s.Modified != 0 || s.Removed != 0)
+            Console.Error.WriteLine($"reindexed: +{s.Added} ~{s.Modified} -{s.Removed}" +
+                                    (s.FullRebuild ? " (full rebuild)" : ""));
+    });
+    watcher.Start();
+
+    Console.Error.WriteLine($"watching {root} - press Ctrl+C to stop");
+    using var exit = new ManualResetEventSlim(false);
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; exit.Set(); };
+    exit.Wait();
     return 0;
 }
 

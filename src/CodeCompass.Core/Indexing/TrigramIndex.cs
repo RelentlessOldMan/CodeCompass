@@ -8,57 +8,87 @@ public readonly record struct SearchMatch(string Path, int Line, int Column, str
 
 /// <summary>
 /// Trigram inverted index for fast literal substring search. Each distinct 3-char
-/// sequence maps to the sorted list of documents that contain it. A query's trigram
-/// posting lists are intersected to get candidate documents, then each candidate is
-/// scanned to confirm exact matches ("candidate + verify"). File contents are NOT
-/// held in memory - only the postings and paths - so memory stays bounded and the
-/// bytes live on disk, the same trade-off zoekt makes.
+/// sequence maps to the sorted list of documents that contain it; a query's posting
+/// lists are intersected to get candidate documents, which are then scanned to confirm
+/// exact matches. File contents are NOT held in memory - only postings and paths.
 ///
-/// Phase 1 scope: literal, case-sensitive substring search. Positional trigrams,
-/// regex, and case-folding come later.
+/// Supports incremental updates: replacing or removing a file tombstones its old
+/// document id (search skips tombstones) and appends a fresh one. Tombstones are
+/// reclaimed by a full rebuild.
 /// </summary>
 public sealed class TrigramIndex
 {
     private const uint Magic = 0x49544343; // "CCTI"
-    private const int Version = 1;
+    private const int Version = 2;
 
     public string RepoRoot { get; private set; } = "";
 
-    private readonly List<string> _docPaths = new();               // docId -> relative path
-    private readonly Dictionary<long, List<int>> _postings = new(); // trigram key -> sorted docIds
+    private readonly List<string> _docPaths = new();                // docId -> relative path
+    private readonly Dictionary<long, List<int>> _postings = new(); // trigram key -> ascending docIds
+    private readonly Dictionary<string, int> _pathToDoc = new(StringComparer.Ordinal); // live path -> docId
+    private readonly HashSet<int> _deleted = new();                 // tombstoned docIds
 
-    public int DocumentCount => _docPaths.Count;
+    public int DocumentCount => _docPaths.Count - _deleted.Count;
     public int TrigramCount => _postings.Count;
+
+    public static TrigramIndex Create(string repoRoot) =>
+        new() { RepoRoot = Path.GetFullPath(repoRoot) };
 
     public static TrigramIndex Build(string repoRoot, IEnumerable<(string relPath, string fullPath)> docs)
     {
-        var idx = new TrigramIndex { RepoRoot = Path.GetFullPath(repoRoot) };
-
+        var idx = Create(repoRoot);
         foreach (var (relPath, fullPath) in docs)
-        {
-            string text;
-            try
-            {
-                var bytes = File.ReadAllBytes(fullPath);
-                if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) continue;
-                text = Encoding.UTF8.GetString(bytes);
-            }
-            catch { continue; }
-
-            int docId = idx._docPaths.Count;
-            idx._docPaths.Add(relPath);
-
-            foreach (var tri in DistinctTrigrams(text))
-            {
-                if (!idx._postings.TryGetValue(tri, out var list))
-                {
-                    list = new List<int>();
-                    idx._postings[tri] = list;
-                }
-                list.Add(docId); // docIds are handed out in increasing order, so the list stays sorted
-            }
-        }
+            if (TryReadText(fullPath, out var text))
+                idx.AddDocumentText(relPath, text);
         return idx;
+    }
+
+    /// <summary>Add a document from already-read text (no file I/O). Caller ensures it isn't binary.</summary>
+    public void AddDocumentText(string relPath, string text)
+    {
+        int docId = _docPaths.Count;
+        _docPaths.Add(relPath);
+        _pathToDoc[relPath] = docId;
+
+        foreach (var tri in DistinctTrigrams(text))
+        {
+            if (!_postings.TryGetValue(tri, out var list))
+            {
+                list = new List<int>();
+                _postings[tri] = list;
+            }
+            list.Add(docId); // docIds handed out in increasing order, so lists stay sorted
+        }
+    }
+
+    /// <summary>Incrementally replace a file's contribution (tombstone old, add new).</summary>
+    public void UpdatePath(string relPath, string fullPath)
+    {
+        RemovePath(relPath);
+        if (TryReadText(fullPath, out var text))
+            AddDocumentText(relPath, text);
+    }
+
+    public void RemovePath(string relPath)
+    {
+        if (_pathToDoc.TryGetValue(relPath, out var docId))
+        {
+            _deleted.Add(docId);
+            _pathToDoc.Remove(relPath);
+        }
+    }
+
+    private static bool TryReadText(string fullPath, out string text)
+    {
+        text = "";
+        try
+        {
+            var bytes = File.ReadAllBytes(fullPath);
+            if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return false;
+            text = Encoding.UTF8.GetString(bytes);
+            return true;
+        }
+        catch { return false; }
     }
 
     private static long TriKey(char a, char b, char c) => ((long)a << 32) | ((long)b << 16) | c;
@@ -82,7 +112,6 @@ public sealed class TrigramIndex
         IEnumerable<int> candidates;
         if (query.Length < 3)
         {
-            // Too short to trigram; every document is a candidate. (Rare in practice.)
             candidates = Enumerable.Range(0, _docPaths.Count);
         }
         else
@@ -98,7 +127,7 @@ public sealed class TrigramIndex
             List<int>? acc = null;
             foreach (var t in tris)
             {
-                if (!_postings.TryGetValue(t, out var list)) return results; // a required trigram is absent -> no match
+                if (!_postings.TryGetValue(t, out var list)) return results; // required trigram absent
                 acc = acc is null ? new List<int>(list) : Intersect(acc, list);
                 if (acc.Count == 0) return results;
             }
@@ -107,6 +136,7 @@ public sealed class TrigramIndex
 
         foreach (var docId in candidates)
         {
+            if (_deleted.Contains(docId)) continue; // skip tombstones
             var rel = _docPaths[docId];
             var full = Path.Combine(RepoRoot, rel.Replace('/', Path.DirectorySeparatorChar));
             string text;
@@ -134,11 +164,9 @@ public sealed class TrigramIndex
 
     private static void ScanFile(string rel, string text, string query, List<SearchMatch> results, int maxResults)
     {
-        int line = 1, lineStart = 0, scanned = 0;
-        int idx;
+        int line = 1, lineStart = 0, scanned = 0, idx;
         while ((idx = text.IndexOf(query, scanned, StringComparison.Ordinal)) >= 0)
         {
-            // advance the running line counter up to the match rather than rescanning from 0
             for (int k = scanned; k < idx; k++)
                 if (text[k] == '\n') { line++; lineStart = k + 1; }
 
@@ -148,7 +176,6 @@ public sealed class TrigramIndex
 
             results.Add(new SearchMatch(rel, line, idx - lineStart + 1, lineText));
             if (results.Count >= maxResults) return;
-
             scanned = idx + query.Length;
         }
     }
@@ -169,8 +196,11 @@ public sealed class TrigramIndex
             w.Write(key);
             w.Write(list.Count);
             int prev = 0;
-            foreach (var d in list) { w.Write(d - prev); prev = d; } // delta-encoded, monotonically increasing
+            foreach (var d in list) { w.Write(d - prev); prev = d; }
         }
+
+        w.Write(_deleted.Count);
+        foreach (var d in _deleted) w.Write(d);
     }
 
     public static TrigramIndex Load(Stream stream)
@@ -196,6 +226,15 @@ public sealed class TrigramIndex
             for (int j = 0; j < n; j++) { prev += r.ReadInt32(); list.Add(prev); }
             idx._postings[key] = list;
         }
+
+        int delCount = r.ReadInt32();
+        for (int i = 0; i < delCount; i++) idx._deleted.Add(r.ReadInt32());
+
+        // Rebuild live path -> docId (ascending, so the newest live doc for a path wins).
+        for (int docId = 0; docId < idx._docPaths.Count; docId++)
+            if (!idx._deleted.Contains(docId))
+                idx._pathToDoc[idx._docPaths[docId]] = docId;
+
         return idx;
     }
 }

@@ -1,0 +1,9 @@
+# Normalize line endings: LF in the repository, checked out natively.
+* text=auto eol=lf
+
+# Windows-specific text files keep CRLF.
+*.sln text eol=crlf
+
+# Binary / index artifacts (belt-and-suspenders; these are gitignored anyway).
+*.idx binary
+*.bin binary

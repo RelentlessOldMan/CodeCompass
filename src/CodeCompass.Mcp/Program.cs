@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 // The repository this server serves: first non-flag arg, else the current directory.
 var root = args.FirstOrDefault(a => !a.StartsWith('-')) ?? Directory.GetCurrentDirectory();
 ServerContext.Init(root);
+ServerContext.EnableLiveIndex(); // keep the index fresh as files change
 
 var builder = Host.CreateApplicationBuilder(args);
 

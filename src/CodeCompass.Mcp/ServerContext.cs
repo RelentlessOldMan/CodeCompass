@@ -1,3 +1,4 @@
+using CodeCompass.Core.Changes;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Symbols;
 using CodeCompass.Semantics;
@@ -16,6 +17,7 @@ public static class ServerContext
     private static SymbolIndex? _symbols;
     private static RoslynCSharpAnalyzer? _csharp;
     private static ClangCppAnalyzer? _cpp;
+    private static RepositoryWatcher? _watcher;
 
     public static string Root { get; private set; } = "";
 
@@ -88,6 +90,29 @@ public static class ServerContext
             _csharp = null; // force semantic rebuild on next use
             _cpp = null;
             return built.Stats;
+        }
+    }
+
+    /// <summary>Start watching the workspace so the index stays fresh as files change.</summary>
+    public static void EnableLiveIndex(int debounceMs = 1000)
+    {
+        lock (Gate)
+        {
+            if (_watcher is not null) return;
+            _watcher = new RepositoryWatcher(Root, RefreshFromDisk, debounceMs);
+            _watcher.Start();
+        }
+    }
+
+    private static void RefreshFromDisk()
+    {
+        lock (Gate)
+        {
+            var (text, symbols, _) = RepositoryIndexer.Update(Root);
+            _text = text;
+            _symbols = symbols;
+            _csharp = null; // semantic analyzers rebuild lazily against the new state
+            _cpp = null;
         }
     }
 }
