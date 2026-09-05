@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\src\CodeCompass.Core\CodeCompass.Core.csproj" />
     <ProjectReference Include="..\..\src\CodeCompass.Mcp\CodeCompass.Mcp.csproj" />
     <ProjectReference Include="..\..\src\CodeCompass.Semantics\CodeCompass.Semantics.csproj" />
+    <ProjectReference Include="..\..\src\CodeCompass.Bench\CodeCompass.Bench.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1,10 +1,10 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
-using System.Text;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Storage;
 using CodeCompass.Core.Symbols;
+using CodeCompass.Core.Text;
 using CodeCompass.Core.Walking;
 
 namespace CodeCompass.Core.Indexing;
@@ -53,7 +53,7 @@ public static class RepositoryIndexer
 
                 if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return extractor;
 
-                var content = Encoding.UTF8.GetString(bytes);
+                var content = TextDecoder.FromBytes(bytes);
                 var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
                 var hash = Convert.ToHexString(SHA256.HashData(bytes));
                 var trigrams = TrigramIndex.ComputeTrigrams(content);
@@ -141,7 +141,7 @@ public static class RepositoryIndexer
                     continue;
                 }
 
-                var content = Encoding.UTF8.GetString(bytes);
+                var content = TextDecoder.FromBytes(bytes);
                 text.RemovePath(rel);
                 text.AddDocumentText(rel, content);
                 symbols.RemovePath(rel);

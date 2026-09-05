@@ -1,5 +1,6 @@
 using System.Text;
 using CodeCompass.Core.Ignore;
+using CodeCompass.Core.Text;
 
 namespace CodeCompass.Core.Indexing;
 
@@ -110,7 +111,7 @@ public sealed class TrigramIndex
         {
             var bytes = File.ReadAllBytes(fullPath);
             if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return false;
-            text = Encoding.UTF8.GetString(bytes);
+            text = TextDecoder.FromBytes(bytes);
             return true;
         }
         catch { return false; }
