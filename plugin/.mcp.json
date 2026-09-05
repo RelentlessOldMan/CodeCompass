@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "codecompass": {
+      "type": "stdio",
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/CodeCompass.Mcp.exe",
+      "args": ["${CLAUDE_PROJECT_DIR}"]
+    }
+  }
+}

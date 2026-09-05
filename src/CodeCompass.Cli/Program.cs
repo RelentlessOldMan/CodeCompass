@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using CodeCompass.Core.Changes;
+using CodeCompass.Core.Hooks;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Text;
 using CodeCompass.Semantics;
@@ -15,6 +16,8 @@ return args.Length == 0
         "symbols" => CmdSymbols(args),
         "refs" => CmdRefs(args),
         "watch" => CmdWatch(args),
+        "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
+        "hook-context" => CmdHookContext(), // SessionStart hook: inject guidance
         _ => Usage(),
     };
 
@@ -175,6 +178,30 @@ static int CmdRefs(string[] args)
     }
 
     Console.Error.WriteLine($"-- {cs.Count} C# + {cpp.Count} C/C++ semantic + {lexical} lexical reference(s)");
+    return 0;
+}
+
+// PreToolUse hook: block Grep/Glob and redirect the agent to CodeCompass.
+// The plugin's matcher already limits this to Grep|Glob, so we always deny when
+// enforcement is on. Set CODECOMPASS_ENFORCE=0 to disable (grep fallback).
+static int CmdHookBlock()
+{
+    try { _ = Console.In.ReadToEnd(); } catch { /* consume hook stdin */ }
+
+    var enforce = Environment.GetEnvironmentVariable("CODECOMPASS_ENFORCE");
+    if (enforce is "0" || string.Equals(enforce, "off", StringComparison.OrdinalIgnoreCase))
+        return 0; // enforcement disabled: let the normal permission flow proceed
+
+    Console.WriteLine(HookPayloads.DenySearch());
+    return 0;
+}
+
+// SessionStart hook: tell the agent to prefer CodeCompass for search/navigation.
+static int CmdHookContext()
+{
+    try { _ = Console.In.ReadToEnd(); } catch { /* consume hook stdin */ }
+
+    Console.WriteLine(HookPayloads.SessionContext());
     return 0;
 }
 

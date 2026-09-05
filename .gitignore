@@ -482,3 +482,6 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# CodeCompass built plugin binaries (produced by build-plugin.ps1)
+plugin/bin/

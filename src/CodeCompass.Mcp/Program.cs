@@ -4,7 +4,12 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 // The repository this server serves: first non-flag arg, else the current directory.
-var root = args.FirstOrDefault(a => !a.StartsWith('-')) ?? Directory.GetCurrentDirectory();
+// Repository to serve: first non-flag arg if it's a real directory, else the cwd.
+// (This tolerates an unexpanded ${CLAUDE_PROJECT_DIR} when launched as a plugin.)
+var argRoot = args.FirstOrDefault(a => !a.StartsWith('-'));
+var root = !string.IsNullOrEmpty(argRoot) && Directory.Exists(argRoot)
+    ? argRoot
+    : Directory.GetCurrentDirectory();
 ServerContext.Init(root);
 ServerContext.EnableLiveIndex(); // keep the index fresh as files change
 
