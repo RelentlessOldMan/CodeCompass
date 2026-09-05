@@ -61,7 +61,9 @@ foreach ($c in $targets) {
     }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
-    $url = "https://codeload.github.com/$($c.owner)/$($c.repo)/tar.gz/$($c.ref)"
+    # Pin to the immutable commit SHA when present, else the tag.
+    $fetchRef = if ($c.commit) { $c.commit } else { $c.ref }
+    $url = "https://codeload.github.com/$($c.owner)/$($c.repo)/tar.gz/$fetchRef"
     $tgz = Join-Path $CorpusDir ("{0}.tar.gz" -f $c.id)
 
     try {
@@ -70,12 +72,14 @@ foreach ($c in $targets) {
         $wc.Headers.Add("User-Agent", "CodeCompass-fetch/0.1")
         $wc.DownloadFile($url, $tgz)   # streams to disk (handles large tarballs)
 
+        # Content is pinned by commit SHA; the tarball hash is advisory (GitHub can
+        # regenerate tarball bytes), so a mismatch warns rather than fails.
         $sha = (Get-FileHash -Algorithm SHA256 -Path $tgz).Hash.ToLower()
         if ($c.sha256 -and ($c.sha256.ToLower() -ne $sha)) {
-            Remove-Item $tgz -Force
-            throw "checksum mismatch: manifest $($c.sha256) vs downloaded $sha (upstream tag may have moved)"
+            Write-Warning "[$($c.id)] tarball sha256 $sha != manifest $($c.sha256) (content still pinned by commit)"
+        } else {
+            Write-Host "[$($c.id)] sha256=$sha"
         }
-        Write-Host "[$($c.id)] sha256=$sha"
 
         Write-Host "[$($c.id)] extracting"
         tar -xzf $tgz -C $dest

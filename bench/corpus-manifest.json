@@ -1,5 +1,5 @@
 {
-  "_comment": "Public repos to benchmark against. Pinned to immutable tags and fetched as checksummed tarballs from GitHub codeload (no git needed). sha256 is null until you pin it: the first fetch prints the hash; paste it back here to lock the corpus. Downloads land in .corpus/ (gitignored). Sizes are approximate uncompressed source.",
+  "_comment": "Public repos to benchmark against. 'commit' is the IMMUTABLE pin - the exact tree is fetched from GitHub codeload by commit SHA, so the corpus never changes even if the upstream tag moves or is deleted. 'ref' is the human-readable tag the commit came from. 'sha256' is the tarball hash and is ADVISORY only: GitHub may regenerate tarball bytes over time, so a mismatch warns but does not fail (the commit already guarantees the content). Downloads land in .corpus/ (gitignored). Sizes are approximate uncompressed source.",
   "corpora": [
     {
       "id": "requests",
@@ -7,6 +7,7 @@
       "owner": "psf",
       "repo": "requests",
       "ref": "v2.32.3",
+      "commit": "61e2240f283f15780ac2d0e2cfefb0fd6fdab627",
       "language": "python",
       "sha256": null,
       "note": "~5 MB. Quick Python smoke."
@@ -17,6 +18,7 @@
       "owner": "fmtlib",
       "repo": "fmt",
       "ref": "10.2.1",
+      "commit": "e69e5f977d458f2650bb346dadf2ad30c5320281",
       "language": "cpp",
       "sha256": null,
       "note": "~10 MB. Small, clean C++."
@@ -27,6 +29,7 @@
       "owner": "dotnet",
       "repo": "efcore",
       "ref": "v8.0.8",
+      "commit": "90d079985f33ae91c05b98ecf65e0ce38270ba55",
       "language": "csharp",
       "sha256": null,
       "note": "~150 MB. Real-world C# codebase (Entity Framework Core)."
@@ -37,6 +40,7 @@
       "owner": "microsoft",
       "repo": "TypeScript",
       "ref": "v5.6.2",
+      "commit": "a7e3374f13327483fbe94e32806d65785b0b6cda",
       "language": "typescript",
       "sha256": null,
       "note": "~600 MB incl. large generated files; exercises the walker's filters."
@@ -47,6 +51,7 @@
       "owner": "godotengine",
       "repo": "godot",
       "ref": "4.3-stable",
+      "commit": "77dcf97d82cbfe4e4615475fa52ca03da645dbd8",
       "language": "cpp",
       "sha256": null,
       "note": "~350 MB. Large C++ engine; good clang stress test."
@@ -56,7 +61,8 @@
       "tier": "large",
       "owner": "dotnet",
       "repo": "roslyn",
-      "ref": "v4.11.0",
+      "ref": "Visual-Studio-2022-Version-17.14.12",
+      "commit": "3c11f2f715a8a7d90d48b6459eed544d02bac0a5",
       "language": "csharp",
       "sha256": null,
       "note": "~1 GB. Big C# solution; heavy Roslyn find-references load."
@@ -67,6 +73,7 @@
       "owner": "llvm",
       "repo": "llvm-project",
       "ref": "llvmorg-18.1.8",
+      "commit": "76caf4176cd7877ad5952737d56da6f515ee4602",
       "language": "cpp",
       "sha256": null,
       "note": "~2 GB. Large C/C++ monorepo."
@@ -77,6 +84,7 @@
       "owner": "torvalds",
       "repo": "linux",
       "ref": "v6.10",
+      "commit": "d04e483db22823c13c0313b7c43a52529a2e2672",
       "language": "c",
       "sha256": null,
       "note": "~1.5 GB. Huge C tree; scale/throughput test."
@@ -87,6 +95,7 @@
       "owner": "dotnet",
       "repo": "runtime",
       "ref": "v8.0.8",
+      "commit": "08338fcaa5c9b9a8190abb99222fed12aaba956c",
       "language": "mixed",
       "sha256": null,
       "note": "~2 GB. Polyglot (C#, C/C++, asm) - closest to a real dozens-of-GB mixed shop when combined with the others."

@@ -10,13 +10,18 @@ public sealed class CorpusEntry
     public string Owner { get; set; } = "";
     public string Repo { get; set; } = "";
     public string Ref { get; set; } = "";
+    public string? Commit { get; set; }
     public string Language { get; set; } = "";
     public string? Sha256 { get; set; }
     public string? Note { get; set; }
 
-    /// <summary>Stable GitHub codeload tarball URL for a tag, branch, or commit SHA.</summary>
+    /// <summary>The immutable ref used to fetch: the commit SHA when pinned, else the tag.</summary>
     [JsonIgnore]
-    public string TarballUrl => $"https://codeload.github.com/{Owner}/{Repo}/tar.gz/{Ref}";
+    public string FetchRef => string.IsNullOrEmpty(Commit) ? Ref : Commit;
+
+    /// <summary>GitHub codeload tarball URL, pinned to the commit SHA for reproducibility.</summary>
+    [JsonIgnore]
+    public string TarballUrl => $"https://codeload.github.com/{Owner}/{Repo}/tar.gz/{FetchRef}";
 }
 
 public sealed class CorpusManifest
