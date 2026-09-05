@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodeCompass.Core\CodeCompass.Core.csproj" />
+    <ProjectReference Include="..\CodeCompass.Semantics\CodeCompass.Semantics.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -2,11 +2,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodeCompass.Core\CodeCompass.Core.csproj" />
-    <ProjectReference Include="..\CodeCompass.Semantics\CodeCompass.Semantics.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.9.2" />
   </ItemGroup>
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

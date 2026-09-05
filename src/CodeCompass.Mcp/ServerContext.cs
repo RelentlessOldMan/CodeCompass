@@ -1,23 +1,33 @@
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Symbols;
+using CodeCompass.Semantics;
 
 namespace CodeCompass.Mcp;
 
 /// <summary>
 /// Holds the single repository this server instance serves, plus its in-memory
-/// indexes. The MCP server is launched per workspace, so the root is fixed at startup
-/// and tools never need to pass paths around. Indexes load from the on-disk cache and
-/// are built on first use if absent.
+/// indexes and the (lazily built) C# semantic analyzer. The MCP server is launched
+/// per workspace, so the root is fixed at startup and tools never pass paths around.
 /// </summary>
 public static class ServerContext
 {
     private static readonly object Gate = new();
     private static TrigramIndex? _text;
     private static SymbolIndex? _symbols;
+    private static RoslynCSharpAnalyzer? _csharp;
 
     public static string Root { get; private set; } = "";
 
-    public static void Init(string root) => Root = Path.GetFullPath(root);
+    public static void Init(string root)
+    {
+        lock (Gate)
+        {
+            Root = Path.GetFullPath(root);
+            _text = null;
+            _symbols = null;
+            _csharp = null;
+        }
+    }
 
     /// <summary>Returns the loaded indexes, building them once if the cache is empty.</summary>
     public static (TrigramIndex Text, SymbolIndex Symbols) Get()
@@ -42,6 +52,18 @@ public static class ServerContext
         }
     }
 
+    /// <summary>The C# semantic analyzer, built lazily and cached for the session.</summary>
+    public static RoslynCSharpAnalyzer CSharp
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return _csharp ??= new RoslynCSharpAnalyzer(Root);
+            }
+        }
+    }
+
     public static IndexStats Rebuild()
     {
         lock (Gate)
@@ -49,6 +71,7 @@ public static class ServerContext
             var built = RepositoryIndexer.Build(Root);
             _text = built.Text;
             _symbols = built.Symbols;
+            _csharp = null; // force semantic rebuild on next use
             return built.Stats;
         }
     }

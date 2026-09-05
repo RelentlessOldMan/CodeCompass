@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using CodeCompass.Core.Indexing;
-using CodeCompass.Core.Symbols;
+using CodeCompass.Core.Text;
+using CodeCompass.Semantics;
 
 return args.Length == 0
     ? Usage()
@@ -10,17 +11,19 @@ return args.Length == 0
         "search" => CmdSearch(args),
         "def" => CmdDef(args),
         "symbols" => CmdSymbols(args),
+        "refs" => CmdRefs(args),
         _ => Usage(),
     };
 
 static int Usage()
 {
-    Console.Error.WriteLine("CodeCompass (Phase 3)");
+    Console.Error.WriteLine("CodeCompass (Phase 4)");
     Console.Error.WriteLine("usage:");
     Console.Error.WriteLine("  codecompass index   <path>");
     Console.Error.WriteLine("  codecompass search  <path> <query>       literal text search");
     Console.Error.WriteLine("  codecompass def     <path> <name>        exact symbol definition(s)");
     Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
+    Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#, lexical elsewhere)");
     return 1;
 }
 
@@ -91,6 +94,35 @@ static int CmdSymbols(string[] args)
     foreach (var symbol in matches)
         Console.WriteLine($"{symbol.RelativePath}:{symbol.Line}:{symbol.Column}: {symbol.Kind} {symbol.Name}");
     Console.Error.WriteLine($"-- {matches.Count} symbol(s)");
+    return 0;
+}
+
+static int CmdRefs(string[] args)
+{
+    if (args.Length < 3) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    var name = args[2];
+
+    // Precise C# references (comments/strings excluded). Note: from the CLI this builds
+    // the Roslyn workspace fresh each run; the MCP server keeps it warm across calls.
+    var semantic = new RoslynCSharpAnalyzer(root).FindReferences(name);
+    foreach (var s in semantic)
+        Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
+
+    // Lexical whole-word references for non-C# files (needs the text index).
+    int lexical = 0;
+    if (RepositoryIndexer.TryLoad(root, out var index, out _))
+    {
+        foreach (var m in index.Search(name, 1000))
+        {
+            if (m.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
+            Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
+            lexical++;
+        }
+    }
+
+    Console.Error.WriteLine($"-- {semantic.Count} semantic C# + {lexical} lexical reference(s)");
     return 0;
 }
 

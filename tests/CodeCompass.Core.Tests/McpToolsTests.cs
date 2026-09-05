@@ -20,7 +20,22 @@ public class McpToolsTests
             }
         }
         """);
-        repo.Write("src/notes.md", "Widget appears here as prose too.");
+        repo.Write("src/Caller.cs", """
+        namespace App
+        {
+            public class Caller
+            {
+                public void Go()
+                {
+                    var w = new Widget();
+                    w.Run();                     // call site
+                    // remember to Run it again
+                    var label = "Run";
+                }
+            }
+        }
+        """);
+        repo.Write("docs/notes.md", "Run appears in prose here.");
         ServerContext.Init(repo.Root);
         CodeCompassTools.Reindex();
         return repo;
@@ -60,12 +75,19 @@ public class McpToolsTests
     }
 
     [Fact]
-    public void FindReferences_IsWholeWord()
+    public void FindReferences_SemanticForCSharp_LexicalForOthers()
     {
         using var repo = NewIndexedRepo();
         var result = CodeCompassTools.FindReferences("Run");
-        // "Run" is used in Widget.cs; the word "prose" contains no "Run", and there is
-        // no partial-word false match to worry about here.
-        Assert.Contains("src/Widget.cs", result);
+
+        // Semantic C#: the real call site is found...
+        Assert.Contains("src/Caller.cs", result);
+        Assert.Contains("w.Run()", result);
+        Assert.Contains("1 semantic C# reference", result);
+        // ...but the comment and the "Run" string in the .cs file are NOT counted.
+        Assert.DoesNotContain("remember to Run", result);
+        Assert.DoesNotContain("var label", result);
+        // Lexical fallback still covers non-C# files (the markdown prose).
+        Assert.Contains("docs/notes.md", result);
     }
 }
