@@ -1,10 +1,6 @@
 using System.Diagnostics;
-using System.Text;
-using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing;
-using CodeCompass.Core.Storage;
 using CodeCompass.Core.Symbols;
-using CodeCompass.Core.Walking;
 
 return args.Length == 0
     ? Usage()
@@ -19,7 +15,7 @@ return args.Length == 0
 
 static int Usage()
 {
-    Console.Error.WriteLine("CodeCompass (Phase 2)");
+    Console.Error.WriteLine("CodeCompass (Phase 3)");
     Console.Error.WriteLine("usage:");
     Console.Error.WriteLine("  codecompass index   <path>");
     Console.Error.WriteLine("  codecompass search  <path> <query>       literal text search");
@@ -38,53 +34,15 @@ static int CmdIndex(string[] args)
         return 1;
     }
 
-    var walker = new FileWalker(new IgnoreRules());
+    var (_, _, s) = RepositoryIndexer.Build(root);
 
-    var sw = Stopwatch.StartNew();
-    long totalBytes = 0;
-    var docs = new List<(string relPath, string fullPath)>();
-    foreach (var f in walker.Walk(root))
-    {
-        docs.Add((f.RelativePath, f.FullPath));
-        totalBytes += f.Size;
-    }
+    double mb = s.Bytes / (1024.0 * 1024.0);
+    double throughput = s.Seconds > 0 ? mb / s.Seconds : 0;
+    double ratio = s.Bytes > 0 ? (double)s.IndexBytes / s.Bytes : 0;
 
-    var index = TrigramIndex.Build(root, docs);
-
-    // Symbol extraction pass (only files with a known grammar).
-    using var extractor = new TreeSitterSymbolExtractor();
-    var symbols = new List<Symbol>();
-    foreach (var (rel, full) in docs)
-    {
-        if (LanguageRegistry.ForPath(rel) is null) continue;
-        string text;
-        try
-        {
-            var bytes = File.ReadAllBytes(full);
-            if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) continue;
-            text = Encoding.UTF8.GetString(bytes);
-        }
-        catch { continue; }
-        symbols.AddRange(extractor.Extract(rel, text));
-    }
-    var symbolIndex = SymbolIndex.Build(symbols);
-    sw.Stop();
-
-    var indexPath = IndexStore.IndexPath(root);
-    using (var fs = File.Create(indexPath)) index.Save(fs);
-    var symbolPath = IndexStore.SymbolIndexPath(root);
-    using (var fs = File.Create(symbolPath)) symbolIndex.Save(fs);
-
-    long indexSize = new FileInfo(indexPath).Length;
-    double mb = totalBytes / (1024.0 * 1024.0);
-    double secs = sw.Elapsed.TotalSeconds;
-    double throughput = secs > 0 ? mb / secs : 0;
-    double ratio = totalBytes > 0 ? (double)indexSize / totalBytes : 0;
-
-    Console.WriteLine($"Indexed {index.DocumentCount:N0} files ({mb:F1} MB) in {secs:F2}s  ({throughput:F1} MB/s)");
-    Console.WriteLine($"Trigrams: {index.TrigramCount:N0}   Symbols: {symbolIndex.Count:N0}");
-    Console.WriteLine($"Text index: {indexSize / (1024.0 * 1024.0):F1} MB ({ratio:F2}x corpus)");
-    Console.WriteLine($"Stored:     {IndexStore.GetCacheDir(root)}");
+    Console.WriteLine($"Indexed {s.Files:N0} files ({mb:F1} MB) in {s.Seconds:F2}s  ({throughput:F1} MB/s)");
+    Console.WriteLine($"Trigrams: {s.Trigrams:N0}   Symbols: {s.Symbols:N0}");
+    Console.WriteLine($"Text index: {s.IndexBytes / (1024.0 * 1024.0):F1} MB ({ratio:F2}x corpus)");
     return 0;
 }
 
@@ -94,16 +52,7 @@ static int CmdSearch(string[] args)
     var root = Path.GetFullPath(args[1]);
     var query = string.Join(' ', args.Skip(2));
 
-    var path = IndexStore.IndexPath(root);
-    if (!File.Exists(path))
-    {
-        Console.Error.WriteLine($"no index for {root}");
-        Console.Error.WriteLine($"run: codecompass index \"{root}\"");
-        return 1;
-    }
-
-    TrigramIndex index;
-    using (var fs = File.OpenRead(path)) index = TrigramIndex.Load(fs);
+    if (!RepositoryIndexer.TryLoad(root, out var index, out _)) return NoIndex(root);
 
     var sw = Stopwatch.StartNew();
     var matches = index.Search(query);
@@ -111,7 +60,6 @@ static int CmdSearch(string[] args)
 
     foreach (var m in matches)
         Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
-
     Console.Error.WriteLine($"-- {matches.Count} match(es) in {sw.Elapsed.TotalMilliseconds:F0} ms");
     return 0;
 }
@@ -122,11 +70,11 @@ static int CmdDef(string[] args)
     var root = Path.GetFullPath(args[1]);
     var name = args[2];
 
-    if (!TryLoadSymbols(root, out var symbols)) return 1;
+    if (!RepositoryIndexer.TryLoad(root, out _, out var symbols)) return NoIndex(root);
 
     var matches = symbols.FindByName(name);
-    foreach (var s in matches)
-        Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
+    foreach (var symbol in matches)
+        Console.WriteLine($"{symbol.RelativePath}:{symbol.Line}:{symbol.Column}: {symbol.Kind} {symbol.Name}");
     Console.Error.WriteLine($"-- {matches.Count} definition(s)");
     return 0;
 }
@@ -137,26 +85,18 @@ static int CmdSymbols(string[] args)
     var root = Path.GetFullPath(args[1]);
     var query = args[2];
 
-    if (!TryLoadSymbols(root, out var symbols)) return 1;
+    if (!RepositoryIndexer.TryLoad(root, out _, out var symbols)) return NoIndex(root);
 
     var matches = symbols.Find(query);
-    foreach (var s in matches)
-        Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
+    foreach (var symbol in matches)
+        Console.WriteLine($"{symbol.RelativePath}:{symbol.Line}:{symbol.Column}: {symbol.Kind} {symbol.Name}");
     Console.Error.WriteLine($"-- {matches.Count} symbol(s)");
     return 0;
 }
 
-static bool TryLoadSymbols(string root, out SymbolIndex symbols)
+static int NoIndex(string root)
 {
-    var path = IndexStore.SymbolIndexPath(root);
-    if (!File.Exists(path))
-    {
-        Console.Error.WriteLine($"no symbol index for {root}");
-        Console.Error.WriteLine($"run: codecompass index \"{root}\"");
-        symbols = new SymbolIndex();
-        return false;
-    }
-    using var fs = File.OpenRead(path);
-    symbols = SymbolIndex.Load(fs);
-    return true;
+    Console.Error.WriteLine($"no index for {root}");
+    Console.Error.WriteLine($"run: codecompass index \"{root}\"");
+    return 1;
 }

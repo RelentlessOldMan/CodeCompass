@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\CodeCompass.Core\CodeCompass.Core.csproj" />
+    <ProjectReference Include="..\..\src\CodeCompass.Mcp\CodeCompass.Mcp.csproj" />
   </ItemGroup>
 
 </Project>

@@ -13,6 +13,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{FE6B5000
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodeCompass.Core.Tests", "tests\CodeCompass.Core.Tests\CodeCompass.Core.Tests.csproj", "{57A198E9-9E15-421A-83BC-D8919EFA792C}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodeCompass.Mcp", "src\CodeCompass.Mcp\CodeCompass.Mcp.csproj", "{A0D3FAC5-FF3E-470C-BCCC-06AA1AD91B1B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -34,10 +36,15 @@ Global
 		{57A198E9-9E15-421A-83BC-D8919EFA792C}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{57A198E9-9E15-421A-83BC-D8919EFA792C}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{57A198E9-9E15-421A-83BC-D8919EFA792C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A0D3FAC5-FF3E-470C-BCCC-06AA1AD91B1B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0D3FAC5-FF3E-470C-BCCC-06AA1AD91B1B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A0D3FAC5-FF3E-470C-BCCC-06AA1AD91B1B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0D3FAC5-FF3E-470C-BCCC-06AA1AD91B1B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{88153712-DC12-4997-A8D8-70F8F70A4E1F} = {C6DA42F8-A5EA-417D-AD82-9DDA5E678991}
 		{6EB23986-95DE-4333-9AD0-4D3734D00F3D} = {C6DA42F8-A5EA-417D-AD82-9DDA5E678991}
 		{57A198E9-9E15-421A-83BC-D8919EFA792C} = {FE6B5000-3A4C-43E7-B891-6A87D6A753C2}
+		{A0D3FAC5-FF3E-470C-BCCC-06AA1AD91B1B} = {C6DA42F8-A5EA-417D-AD82-9DDA5E678991}
 	EndGlobalSection
 EndGlobal
