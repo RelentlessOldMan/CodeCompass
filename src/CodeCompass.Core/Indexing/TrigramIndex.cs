@@ -44,20 +44,45 @@ public sealed class TrigramIndex
     }
 
     /// <summary>Add a document from already-read text (no file I/O). Caller ensures it isn't binary.</summary>
-    public void AddDocumentText(string relPath, string text)
+    public void AddDocumentText(string relPath, string text) =>
+        AddDocument(relPath, ComputeTrigrams(text));
+
+    /// <summary>
+    /// The distinct trigrams of a text, as a compact array. Pure and thread-safe - the
+    /// expensive part of indexing, so it can run lock-free in parallel; the cheap merge
+    /// (<see cref="AddDocument(string, long[])"/>) is then serialized by the caller.
+    /// </summary>
+    public static long[] ComputeTrigrams(string text)
+    {
+        if (text.Length < 3) return Array.Empty<long>();
+        var seen = new HashSet<long>();
+        for (int i = 0; i + 3 <= text.Length; i++)
+            seen.Add(TriKey(text[i], text[i + 1], text[i + 2]));
+
+        var result = new long[seen.Count];
+        seen.CopyTo(result);
+        return result;
+    }
+
+    /// <summary>
+    /// Merge a document's precomputed trigrams into the index. NOT thread-safe: callers
+    /// building in parallel must serialize this (docIds are assigned sequentially, which
+    /// keeps every posting list sorted).
+    /// </summary>
+    public void AddDocument(string relPath, long[] distinctTrigrams)
     {
         int docId = _docPaths.Count;
         _docPaths.Add(relPath);
         _pathToDoc[relPath] = docId;
 
-        foreach (var tri in DistinctTrigrams(text))
+        foreach (var tri in distinctTrigrams)
         {
             if (!_postings.TryGetValue(tri, out var list))
             {
                 list = new List<int>();
                 _postings[tri] = list;
             }
-            list.Add(docId); // docIds handed out in increasing order, so lists stay sorted
+            list.Add(docId);
         }
     }
 

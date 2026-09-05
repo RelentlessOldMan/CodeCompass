@@ -49,9 +49,11 @@ static int CmdIndex(string[] args)
 
     double mb = s.Bytes / (1024.0 * 1024.0);
     double throughput = s.Seconds > 0 ? mb / s.Seconds : 0;
+    double perCore = s.Cores > 0 ? throughput / s.Cores : throughput;
     double ratio = s.Bytes > 0 ? (double)s.IndexBytes / s.Bytes : 0;
 
-    Console.WriteLine($"Indexed {s.Files:N0} files ({mb:F1} MB) in {s.Seconds:F2}s  ({throughput:F1} MB/s)");
+    Console.WriteLine($"Indexed {s.Files:N0} files ({mb:F1} MB) in {s.Seconds:F2}s");
+    Console.WriteLine($"Throughput: {throughput:F1} MB/s across {s.Cores} core(s)  ({perCore:F1} MB/s/core)");
     Console.WriteLine($"Trigrams: {s.Trigrams:N0}   Symbols: {s.Symbols:N0}");
     Console.WriteLine($"Text index: {s.IndexBytes / (1024.0 * 1024.0):F1} MB ({ratio:F2}x corpus)");
     return 0;

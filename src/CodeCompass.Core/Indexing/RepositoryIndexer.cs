@@ -9,7 +9,7 @@ using CodeCompass.Core.Walking;
 
 namespace CodeCompass.Core.Indexing;
 
-public sealed record IndexStats(int Files, long Bytes, int Trigrams, int Symbols, double Seconds, long IndexBytes);
+public sealed record IndexStats(int Files, long Bytes, int Trigrams, int Symbols, double Seconds, long IndexBytes, int Cores);
 
 public sealed record UpdateStats(int Added, int Modified, int Removed, double Seconds, bool FullRebuild);
 
@@ -28,44 +28,66 @@ public static class RepositoryIndexer
     {
         root = Path.GetFullPath(root);
         var walker = new FileWalker(new IgnoreRules());
-        var sw = Stopwatch.StartNew();
+        int cores = DegreeOfParallelism();
 
         var text = TrigramIndex.Create(root);
-        var symbolList = new List<Symbol>();
+        var symbols = new SymbolIndex();
         var snapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
         long totalBytes = 0;
+        var gate = new object();
 
-        using (var extractor = new TreeSitterSymbolExtractor())
-        {
-            foreach (var file in walker.Walk(root))
+        var sw = Stopwatch.StartNew();
+
+        // The heavy per-file work (read, hash, trigram extraction, tree-sitter parse) runs
+        // lock-free across cores; only the small merge into the shared indexes is serialized.
+        // Each worker keeps its own tree-sitter extractor (grammars aren't shared across threads).
+        Parallel.ForEach(
+            walker.Walk(root),
+            new ParallelOptions { MaxDegreeOfParallelism = cores },
+            () => new TreeSitterSymbolExtractor(),
+            (file, _, extractor) =>
             {
                 byte[] bytes;
                 try { bytes = File.ReadAllBytes(file.FullPath); }
-                catch { continue; }
+                catch { return extractor; }
 
-                if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) continue;
+                if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return extractor;
 
                 var content = Encoding.UTF8.GetString(bytes);
                 var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
                 var hash = Convert.ToHexString(SHA256.HashData(bytes));
+                var trigrams = TrigramIndex.ComputeTrigrams(content);
+                var syms = LanguageRegistry.ForPath(file.RelativePath) is not null
+                    ? extractor.Extract(file.RelativePath, content)
+                    : Array.Empty<Symbol>();
 
-                totalBytes += bytes.Length;
-                snapshot[file.RelativePath] = new FileState(bytes.Length, mtime, hash);
-                text.AddDocumentText(file.RelativePath, content);
-                if (LanguageRegistry.ForPath(file.RelativePath) is not null)
-                    symbolList.AddRange(extractor.Extract(file.RelativePath, content));
-            }
-        }
+                lock (gate)
+                {
+                    text.AddDocument(file.RelativePath, trigrams);
+                    foreach (var s in syms) symbols.Add(s);
+                    snapshot[file.RelativePath] = new FileState(bytes.Length, mtime, hash);
+                    totalBytes += bytes.Length;
+                }
+                return extractor;
+            },
+            extractor => extractor.Dispose());
 
-        var symbols = SymbolIndex.Build(symbolList);
         sw.Stop();
 
         SaveAll(root, text, symbols, snapshot);
 
         long indexBytes = new FileInfo(IndexStore.IndexPath(root)).Length;
         var stats = new IndexStats(text.DocumentCount, totalBytes, text.TrigramCount,
-                                   symbols.Count, sw.Elapsed.TotalSeconds, indexBytes);
+                                   symbols.Count, sw.Elapsed.TotalSeconds, indexBytes, cores);
         return (text, symbols, stats);
+    }
+
+    /// <summary>Indexing parallelism: CODECOMPASS_THREADS if set (and valid), else all cores.</summary>
+    public static int DegreeOfParallelism()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_THREADS");
+        if (int.TryParse(env, out var n) && n > 0) return n;
+        return Environment.ProcessorCount;
     }
 
     /// <summary>

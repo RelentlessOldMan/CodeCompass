@@ -13,6 +13,8 @@ public sealed record BenchResult(
     int Symbols,
     double BuildSeconds,
     double BuildMBps,
+    int Cores,
+    double BuildMBpsPerCore,
     long IndexBytes,
     double IndexRatio,
     double QueryP50Ms,
@@ -28,7 +30,7 @@ public sealed record BenchResult(
         w.WriteLine($"Corpus:            {Name}");
         w.WriteLine($"Files indexed:     {Files:N0}  ({mb:N1} MB text)");
         w.WriteLine($"Trigrams / symbols:{Trigrams,12:N0} / {Symbols:N0}");
-        w.WriteLine($"Build:             {BuildSeconds:N2}s   ({BuildMBps:N1} MB/s)");
+        w.WriteLine($"Build:             {BuildSeconds:N2}s   ({BuildMBps:N1} MB/s across {Cores} core(s), {BuildMBpsPerCore:N1} MB/s/core)");
         w.WriteLine($"Index on disk:     {IndexBytes / (1024.0 * 1024.0):N1} MB  ({IndexRatio:N2}x corpus)");
         w.WriteLine($"Query latency:     p50 {QueryP50Ms:N2}ms  p95 {QueryP95Ms:N2}ms  p99 {QueryP99Ms:N2}ms");
         w.WriteLine($"Incremental:       {IncrementalSeconds:N3}s for {IncrementalFiles} added file(s)");
@@ -82,10 +84,11 @@ public static class Benchmark
         latencies.Sort();
 
         var (incSeconds, incFiles) = MeasureIncremental(path);
+        double perCore = stats.Cores > 0 ? mbps / stats.Cores : mbps;
 
         return new BenchResult(
             name, stats.Files, stats.Bytes, stats.Trigrams, stats.Symbols,
-            stats.Seconds, mbps, indexBytes, ratio,
+            stats.Seconds, mbps, stats.Cores, perCore, indexBytes, ratio,
             Percentile(latencies, 0.50), Percentile(latencies, 0.95), Percentile(latencies, 0.99),
             peakMb, incSeconds, incFiles);
     }
