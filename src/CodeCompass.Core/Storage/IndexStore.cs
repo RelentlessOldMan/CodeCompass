@@ -26,4 +26,6 @@ public static class IndexStore
     }
 
     public static string IndexPath(string repoRoot) => Path.Combine(GetCacheDir(repoRoot), "trigram.idx");
+
+    public static string SymbolIndexPath(string repoRoot) => Path.Combine(GetCacheDir(repoRoot), "symbols.idx");
 }
