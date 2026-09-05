@@ -1,0 +1,257 @@
+CodeCompass
+===========
+
+A fully-local code search and retrieval engine that gives AI coding agents
+(Claude Code first) fast, precise "code smarts" over very large polyglot
+codebases, so the agent stops burning tokens reading whole files and grepping
+blindly.
+
+Status: design / pre-build. This document is the north star. Nothing here is
+built yet.
+
+
+The problem
+-----------
+
+When an AI coding agent needs to understand code, its default moves are cheap
+but wasteful: grep for a string, then read entire files to figure out what
+matched. On a small repo that's fine. On ours - dozens of GB, dominated by C#
+and C/C++ with some Python, MATLAB, and other - it is slow and it eats an
+enormous number of tokens. Every full-file read is context the model pays for,
+most of which is irrelevant to the question it was actually asking.
+
+The agent doesn't need the whole file. It needs the right few lines: this
+function's definition, everywhere this symbol is used, the handful of snippets
+that actually match. Delivering exactly that - and nothing more - is the entire
+point of CodeCompass.
+
+Recent public results back this up. A 2026 study (Codebase-Memory) measured
+roughly 10x fewer tokens and about 2.1x fewer tool calls when an agent queried
+a structural code index over MCP instead of reading files directly. Other
+tree-sitter based tools report up to ~99% token reduction versus sending whole
+files. The direction is not in doubt; the exact number will depend on our
+workloads.
+
+
+Goals
+-----
+
+- Cut the tokens an agent spends locating and understanding code, by returning
+  ranked snippets, line ranges, and symbol locations instead of whole files.
+- Be genuinely fast to index at scale. Dozens of GB is the target. Indexing
+  speed is a first-class requirement, not an afterthought.
+- Treat C# and C/C++ as first-class citizens with real semantic understanding
+  (accurate go-to-definition and find-all-references), not just text matching.
+- Support the rest (Python, MATLAB, and others) well enough to be useful, via
+  syntactic parsing.
+- Run entirely on the local machine. No code ever leaves it. No GPU. No cloud
+  API. This must run well on ordinary work laptops.
+- Keep the index fresh automatically. When files change (a "get latest" from
+  source control, a branch switch, an edit), re-index what actually changed -
+  and only what actually changed. Ignore noise.
+- Be trivial to install and use. Someone grabs a binary or runs one install
+  command and it just works, with no knowledge of what's inside.
+- Make the agent prefer CodeCompass over grep automatically, every time, with
+  grep as a fallback only when CodeCompass genuinely can't help.
+
+
+Non-goals (for v1)
+------------------
+
+- No embeddings / vector / semantic-meaning search in v1. The evidence is that
+  vector-only retrieval is both heavier (wants a model, often a GPU) and weaker
+  for real agentic code navigation than people assume - state-of-the-art
+  embedding models lose roughly 70% of their accuracy moving from toy
+  benchmarks to real repository navigation, and Anthropic themselves removed
+  vector search from Claude Code in mid-2025 in favor of plain grep. Embeddings
+  are deliberately deferred to a possible v2, as an optional bolt-on only, and
+  even then would use a small CPU model, never a GPU.
+- No web UI. This is an engine plus an agent integration, not a portal.
+- No multi-user server product. Local, single-machine, single-developer.
+
+
+Locked decisions
+----------------
+
+These are settled and drive everything below.
+
+- Implementation stack: .NET / C#. Reasons: the best C# semantics come from
+  Roslyn, which is native .NET; the best C/C++ semantics come from clang, which
+  is reachable from .NET via ClangSharp or by driving clangd; the official MCP
+  SDK for C# is first-party; .NET publishes single-file, self-contained, native
+  Windows binaries (the "grab it and go" requirement); and it is a stack the
+  author can maintain. .NET's performance with memory-mapped files, fast
+  directory enumeration, parallelism, and spans is more than adequate for
+  trigram indexing at this scale.
+
+- Retrieval approach for v1: lexical + symbolic only. A fast trigram text index
+  plus structural symbol understanding. No model in the hot path.
+
+- Change detection: file-based, source-control-agnostic. We do not special-case
+  Git or Perforce or SVN. We watch the filesystem and diff content hashes. This
+  catches everything - a get-latest, a branch switch, a manual edit, a script
+  that rewrites files - without caring how it happened.
+
+- Enforcement: hard block plus fallback. A Claude Code hook intercepts the
+  agent's grep/glob calls and redirects them to CodeCompass. Grep is only
+  allowed through when CodeCompass legitimately does not apply.
+
+- Distribution: packaged as a Claude Code plugin, so a single install wires up
+  the search engine, the enforcement hook, and the agent instructions together.
+
+
+Architecture
+------------
+
+Think of it as an agent-facing front door, a background brain that owns the
+index, and the intelligence layers underneath.
+
+The agent side. Claude Code talks to CodeCompass over MCP - the standard way to
+give an agent custom tools. CodeCompass exposes a small set of tools such as
+search_code (ranked text matches with line ranges), find_definition (where a
+symbol is defined), find_references (everywhere a symbol is used), and
+get_symbol (pull a specific function/class/type by name). Alongside the MCP
+server, a hook watches for the agent trying to grep or glob and steers it to
+CodeCompass instead.
+
+The brain. A background indexing service owns the on-disk index and keeps it
+current. It walks the tree, filters out junk, watches for changes, detects what
+truly changed, and updates the index incrementally. The MCP server queries this
+brain; the brain does the heavy lifting once and answers many times.
+
+The intelligence layers, cheapest first:
+
+- Lexical layer. A positional trigram index (the same idea Sourcegraph's zoekt
+  uses) for fast substring and regex search across everything. The design
+  target is roughly the corpus size a few times over on disk, but only a small
+  fraction of the corpus in RAM, because the bulk lives in memory-mapped files
+  on the SSD rather than in memory. Pure CPU, no model.
+
+- Syntactic layer (all languages). Tree-sitter parses every supported language
+  into a syntax tree, giving us symbol names, definitions, and clean chunk
+  boundaries. This is what makes Python, MATLAB, and the long tail useful, and
+  it is the baseline for C# and C++ too.
+
+- Semantic layer for C# (Roslyn). Precise, cross-file understanding for C#:
+  real find-all-references, go-to-definition, call hierarchy across a solution.
+
+- Semantic layer for C/C++ (clang). Precise understanding when a compile
+  database (compile_commands.json) is available. When it isn't, we degrade
+  gracefully to the syntactic layer plus trigram heuristics rather than
+  pretending to be exact. C++ is honestly the hardest language here and we treat
+  it with the respect it deserves.
+
+
+Keeping the index fresh without churning on noise
+-------------------------------------------------
+
+This is as important as the search itself, and it is where "smart" is earned.
+
+- A filesystem watcher notices changes as they happen.
+
+- Events are debounced and batched. A get-latest that touches ten thousand
+  files triggers one re-index pass over a short quiet window, not ten thousand
+  frantic passes.
+
+- Change is confirmed by content hashing, organized as a Merkle tree (the same
+  technique Cursor uses). A file that was touched but whose content is identical
+  is skipped. Only files whose actual content changed get re-indexed, and the
+  hash tree lets us find them by walking only the branches that diverged rather
+  than rehashing the world.
+
+- Junk is filtered before it ever enters the index: honor .gitignore, plus a
+  built-in blocklist for build output and noise (bin, obj, node_modules,
+  compiled objects, generated files, binaries). This is what stops the index
+  from filling with garbage.
+
+- The index is persisted on disk (memory-mapped, updated safely) so restarting
+  never means re-indexing dozens of GB from scratch.
+
+- A very large change (say a branch switch that rewrites most of the tree) can
+  fall back to a full rebuild when that is faster than a huge incremental diff.
+
+
+How it saves tokens
+--------------------
+
+The saving does not come from clever search alone - it comes from the shape of
+what we hand back. Instead of the agent reading a 2,000-line file to find one
+function, CodeCompass returns that function's definition and its exact line
+range. Instead of grepping and then opening ten files to see the matches in
+context, it returns the ranked matching snippets directly. Symbol lookups
+replace file reads. The agent gets the signal without the surrounding noise it
+would otherwise pay for.
+
+
+Why not just use something that already exists
+----------------------------------------------
+
+We surveyed the landscape. Three camps exist, none of which meets all the
+requirements:
+
+- Embedding / vector MCP tools (for example zilliztech/claude-context and
+  several local-embedding forks). These use exactly the approach we ruled out:
+  they want a model, and vector-only retrieval underperforms for real agentic
+  code navigation.
+
+- Tree-sitter / syntactic MCP tools (for example CodeSight-mcp and the
+  Codebase-Memory research project). Local, no model, and token-efficient -
+  this is essentially our syntactic layer - but they are syntactic only (no
+  Roslyn/clang cross-file semantics) and are not built for dozens-of-GB trigram
+  scale, smart file-based reindexing, or grep enforcement.
+
+- LSP-based semantic MCP, above all oraios/serena. This is the closest existing
+  thing to the vision: local, MCP, symbol-level semantic tools driven by real
+  language servers (clangd for C/C++, a C# server, twenty-plus languages). It is
+  worth evaluating directly before we build. Its likely gaps for us: language
+  servers are heavy to start and were not designed to index dozens of GB, there
+  is no fast lexical/trigram layer for raw text search at scale, and there is no
+  built-in mechanism to force the agent off grep.
+
+Conclusion: no off-the-shelf tool combines .NET-native Roslyn for C#, clang for
+C++, trigram search at scale, file-based smart incremental reindexing, and
+hard-block grep enforcement in one easy-to-install local package. That
+combination is CodeCompass's reason to exist.
+
+Decision: we build our own, greenfield. We deliberately skip adopting or forking
+an existing tool. We still borrow proven designs where they fit - zoekt's
+positional-trigram index, Cursor's Merkle change detection, tree-sitter for
+parsing - but the codebase is ours.
+
+
+Build phases
+------------
+
+1. Walker, content hashing/Merkle, trigram index, and a plain command-line
+   query. Goal: prove fast indexing and search on a real repo. No agent yet.
+
+2. Tree-sitter syntactic symbols across all languages: definition lookup and
+   symbol search.
+
+3. MCP server exposing search_code, find_definition, find_references,
+   get_symbol. Wire it into Claude Code manually and feel the difference.
+
+4. Semantic layers: Roslyn for C#, then clang/ClangSharp for C/C++.
+
+5. Filesystem watcher with debounced, hash-verified incremental re-indexing.
+
+6. Package as a Claude Code plugin: bundle the MCP server, the hard-block
+   grep-redirect hook, and the agent instructions into a one-command install.
+
+
+Open questions and risks
+------------------------
+
+- Real indexing throughput on a genuine dozens-of-GB polyglot repo on Windows
+  hardware is unmeasured. This is the number that validates the whole premise
+  and should be measured early, in phase 1.
+
+- C/C++ semantic coverage depends on a compile database being present and
+  correct. Where it isn't, quality drops to syntactic. We need to decide how
+  hard to push on obtaining or generating compile_commands.json.
+
+- The hard-block enforcement hook must be careful not to strand the agent when
+  CodeCompass legitimately has no answer; the fallback path has to be reliable.
+
+- Decided: build greenfield rather than adopt/fork an existing tool. We borrow
+  designs (zoekt trigrams, Cursor Merkle diffing, tree-sitter) but own the code.

@@ -1,0 +1,177 @@
+CodeCompass - Testing and Benchmarking Plan
+===========================================
+
+Companion to DESIGN.txt. Covers how we test correctness, catch regressions, and
+measure performance automatically, plus how we get realistic large codebases to
+test against without committing a 50 GB mess to source control.
+
+Guiding idea: everything checked into source control is tiny and deterministic.
+Anything big is downloaded on demand, pinned to exact versions, and never
+stored in the repo. Fast tests run on every commit; heavy tests run on demand
+or on a schedule.
+
+
+The four test tiers
+-------------------
+
+Tier 1 - Unit tests. Pure logic, milliseconds, no corpus. These cover the
+pieces most likely to break quietly:
+
+- Trigram extraction and index build/lookup correctness.
+- Merkle hashing and diffing: a changed file is detected; a touched-but-
+  identical file is skipped; adds, deletes, and renames are classified right.
+- Ignore rules: .gitignore parsing and the built-in blocklist match what they
+  should and nothing they shouldn't.
+- Debounce and coalescing: a burst of N filesystem events collapses into
+  exactly one reindex pass with the correct final state.
+- Chunk boundaries and per-language symbol extraction against small hand-written
+  fixture files.
+- Query parsing and result ranking.
+- MCP tool request/response shapes.
+
+Tier 2 - Correctness on small golden fixtures. A curated mini-repo per language
+(C#, C/C++, Python, MATLAB, and a couple of "other") lives in source control.
+Each is a few kilobytes to a few megabytes, hand-built with known answers. We
+assert exact results:
+
+- find_definition points at the right line.
+- find_references returns the complete, correct set of locations. This is where
+  the Roslyn (C#) and clang (C/C++) semantic layers get validated - the fixture
+  encodes the ground-truth answer key.
+- search_code returns the expected matches with correct line ranges.
+
+These are deterministic and version-controlled, so they can gate every commit.
+
+Tier 3 - Regression tests. Guard against silent drift:
+
+- Snapshot/golden-file testing: a fixed set of queries against the fixtures
+  produces stored expected outputs; any diff fails the build until the change is
+  reviewed and the snapshot deliberately updated.
+- The property that matters most: after any sequence of edits, the incrementally
+  updated index must be byte-for-byte equivalent in its answers to an index
+  built from scratch. We generate random edit sequences (add, modify, delete,
+  rename, touch-without-change) and assert incremental == full rebuild. If this
+  ever fails, incremental indexing is lying, and that is the scariest possible
+  bug in this system.
+- Token-savings guard: for a set of representative agent queries, record how
+  many bytes/tokens CodeCompass returns versus the size of the files a
+  grep-then-read approach would have pulled. Track the ratio over time so the
+  core value proposition can't quietly erode.
+
+Tier 4 - Performance and scale benchmarks. These need real, large codebases and
+therefore the opt-in corpus described below. We measure and track:
+
+- Indexing throughput: GB/hour and files/second for a cold full build.
+- Full-build wall-clock time at each corpus size.
+- Incremental reindex latency: change K files, measure time back to a fresh
+  index (the "get latest" scenario).
+- Query latency: p50, p95, p99 against a loaded index.
+- Memory footprint: peak RSS during indexing and resident size at rest.
+- On-disk index size as a ratio of corpus size.
+
+Each run compares against a stored baseline and flags regressions past a
+threshold (for example, indexing more than ~10% slower, or query p95 up more
+than ~20%).
+
+
+The corpus problem
+------------------
+
+Realistic testing needs realistic code, at scale, in our actual languages - but
+we will not keep tens of GB in source control. The split:
+
+- Small golden fixtures: in source control. Deterministic, hand-authored, own
+  the correctness answer keys. Megabytes at most.
+
+- Large corpora: never in source control. Fetched on demand by a corpus tool
+  that reads a version-controlled manifest. The manifest lists public
+  repositories by URL and pinned commit SHA, so a fetch is reproducible - the
+  same command always produces the same bytes. Good candidates cover our target
+  languages at scale: a large C# codebase (for example dotnet/runtime), a large
+  C/C++ codebase (for example llvm-project or a Chromium subset), CPython for
+  Python, and so on. Combine several to reach the dozens-of-GB target.
+
+- The fetch tool clones/downloads into a local cache directory that is
+  gitignored (configurable path, defaults to something like ./.corpus). It is
+  opt-in: nothing downloads unless you ask. Fast tests never touch it.
+
+- Corpus tiers by size so people can choose their commitment:
+    small  - the checked-in fixtures; always available; runs in CI on every
+             commit.
+    medium - a few hundred megabytes; quick perf smoke test; opt-in.
+    large  - dozens of GB; full performance runs; opt-in, for nightly or
+             pre-release, not per-commit.
+
+- The manifest also stores expected performance baselines so runs are
+  comparable. Because absolute numbers vary by hardware, baselines are recorded
+  per machine (a "record baseline here" step), and CI uses a consistent runner
+  so its numbers are trend-comparable to themselves over time.
+
+
+Oracle-based testing
+--------------------
+
+A cheap way to test search correctness thoroughly is to check CodeCompass
+against a slow-but-obviously-correct reference (an oracle):
+
+- Lexical oracle: for a generated set of random queries, a naive brute-force
+  substring/regex scan over the corpus (or ripgrep) produces the ground-truth
+  match set. CodeCompass must return the same set. This fuzzes the trigram
+  engine against a trivially-correct baseline and catches indexing bugs that
+  fixtures would miss.
+
+- Semantic oracle: for C#, invoking Roslyn directly is ground truth; for C/C++,
+  invoking clangd/clang directly is ground truth. Our index caches and serves
+  their answers, so the test confirms our indexing and caching layer preserves
+  what the compiler would have said, rather than reinventing it.
+
+
+Easy-to-get-wrong cases to cover explicitly
+-------------------------------------------
+
+- Windows line endings (CRLF) versus LF, and mixed.
+- Unicode content and non-ASCII identifiers.
+- Very large single files and very long single lines.
+- Binary files and generated files (must be skipped, not indexed).
+- Symlinks and junctions.
+- Windows path handling (backslashes, drive letters, long paths).
+- Queries issued during an active reindex must return consistent, non-torn
+  results.
+- A branch switch that rewrites most of the tree (does the large-change full-
+  rebuild fallback trigger correctly).
+
+
+Automation and CI
+-----------------
+
+- Fast lane, every commit: Tier 1 unit tests, Tier 2 fixture correctness, Tier 3
+  snapshots and the incremental-equals-full property. No downloads, runs in
+  seconds to a couple of minutes via the standard .NET test runner.
+
+- Heavy lane, on demand or scheduled (nightly / pre-release): fetch the opt-in
+  corpus, run Tier 4 benchmarks and the oracle fuzzing, emit a report, compare
+  to baselines, and flag regressions. Never blocks ordinary commits.
+
+- End-to-end MCP tests: start the real MCP server, drive it over the protocol,
+  and assert tool responses - so the agent-facing surface is tested the way
+  Claude Code actually uses it, not just the internals.
+
+- The hard-block enforcement hook gets its own test: confirm it redirects
+  grep/glob to CodeCompass, and - just as important - confirm the fallback path
+  works and never strands the agent when CodeCompass has no answer.
+
+
+Build-phase alignment
+--------------------
+
+Testing is built alongside the engine, not bolted on:
+
+- Phase 1 (walker, Merkle, trigram): stand up Tier 1, the lexical oracle, the
+  incremental-equals-full property, and the first Tier 4 indexing-throughput
+  benchmark. Measuring throughput here is what validates the whole premise.
+- Phase 2 (tree-sitter symbols): add per-language fixture correctness.
+- Phase 3 (MCP): add end-to-end MCP tests and the token-savings guard.
+- Phase 4 (Roslyn, clang): add the semantic oracle and semantic fixtures.
+- Phase 5 (watcher/incremental): expand debounce, change-detection, and
+  branch-switch tests.
+- Phase 6 (plugin): add the enforcement-hook and fallback tests.
