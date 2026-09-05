@@ -1,0 +1,95 @@
+{
+  "_comment": "Public repos to benchmark against. Pinned to immutable tags and fetched as checksummed tarballs from GitHub codeload (no git needed). sha256 is null until you pin it: the first fetch prints the hash; paste it back here to lock the corpus. Downloads land in .corpus/ (gitignored). Sizes are approximate uncompressed source.",
+  "corpora": [
+    {
+      "id": "requests",
+      "tier": "small",
+      "owner": "psf",
+      "repo": "requests",
+      "ref": "v2.32.3",
+      "language": "python",
+      "sha256": null,
+      "note": "~5 MB. Quick Python smoke."
+    },
+    {
+      "id": "fmt",
+      "tier": "small",
+      "owner": "fmtlib",
+      "repo": "fmt",
+      "ref": "10.2.1",
+      "language": "cpp",
+      "sha256": null,
+      "note": "~10 MB. Small, clean C++."
+    },
+    {
+      "id": "efcore",
+      "tier": "medium",
+      "owner": "dotnet",
+      "repo": "efcore",
+      "ref": "v8.0.8",
+      "language": "csharp",
+      "sha256": null,
+      "note": "~150 MB. Real-world C# codebase (Entity Framework Core)."
+    },
+    {
+      "id": "typescript",
+      "tier": "medium",
+      "owner": "microsoft",
+      "repo": "TypeScript",
+      "ref": "v5.6.2",
+      "language": "typescript",
+      "sha256": null,
+      "note": "~600 MB incl. large generated files; exercises the walker's filters."
+    },
+    {
+      "id": "godot",
+      "tier": "medium",
+      "owner": "godotengine",
+      "repo": "godot",
+      "ref": "4.3-stable",
+      "language": "cpp",
+      "sha256": null,
+      "note": "~350 MB. Large C++ engine; good clang stress test."
+    },
+    {
+      "id": "roslyn",
+      "tier": "large",
+      "owner": "dotnet",
+      "repo": "roslyn",
+      "ref": "v4.11.0",
+      "language": "csharp",
+      "sha256": null,
+      "note": "~1 GB. Big C# solution; heavy Roslyn find-references load."
+    },
+    {
+      "id": "llvm",
+      "tier": "large",
+      "owner": "llvm",
+      "repo": "llvm-project",
+      "ref": "llvmorg-18.1.8",
+      "language": "cpp",
+      "sha256": null,
+      "note": "~2 GB. Large C/C++ monorepo."
+    },
+    {
+      "id": "linux",
+      "tier": "large",
+      "owner": "torvalds",
+      "repo": "linux",
+      "ref": "v6.10",
+      "language": "c",
+      "sha256": null,
+      "note": "~1.5 GB. Huge C tree; scale/throughput test."
+    },
+    {
+      "id": "runtime",
+      "tier": "large",
+      "owner": "dotnet",
+      "repo": "runtime",
+      "ref": "v8.0.8",
+      "language": "mixed",
+      "sha256": null,
+      "note": "~2 GB. Polyglot (C#, C/C++, asm) - closest to a real dozens-of-GB mixed shop when combined with the others."
+    }
+  ]
+}

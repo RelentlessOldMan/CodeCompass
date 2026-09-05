@@ -485,3 +485,7 @@ $RECYCLE.BIN/
 
 # CodeCompass built plugin binaries (produced by build-plugin.ps1)
 plugin/bin/
+
+# Benchmark corpus cache and run results (build artifacts)
+.corpus/
+bench/results/
