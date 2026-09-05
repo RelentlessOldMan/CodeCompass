@@ -73,4 +73,13 @@ public static class CorpusFetcher
         var subs = Directory.GetDirectories(dest);
         return subs.Length == 1 ? subs[0] : dest;
     }
+
+    /// <summary>Resolved root of an already-fetched corpus, or null if it isn't present.</summary>
+    public static string? LocalRoot(string id)
+    {
+        var dest = Path.Combine(CorpusDir, id);
+        if (!Directory.Exists(dest) || !Directory.EnumerateFileSystemEntries(dest).Any())
+            return null;
+        return ResolveRoot(dest);
+    }
 }

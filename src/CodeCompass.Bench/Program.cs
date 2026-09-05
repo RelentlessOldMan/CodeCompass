@@ -10,6 +10,7 @@ switch (args[0].ToLowerInvariant())
     case "run": return CmdRun(args);
     case "bench": return await CmdBench(args);
     case "verify": return await CmdVerify(args);
+    case "all": return CmdAll(args);
     default: return Usage();
 }
 
@@ -23,6 +24,7 @@ static int Usage()
     Console.Error.WriteLine("  bench bench  <id>              fetch (if needed) then benchmark a manifest corpus");
     Console.Error.WriteLine("  bench verify <path|id> [budgetMB] [queries]");
     Console.Error.WriteLine("                                 correctness: trigram search vs brute-force on real files");
+    Console.Error.WriteLine("  bench all    [all|tier|id]     perf + correctness over fetched corpora -> HTML report");
     Console.Error.WriteLine();
     Console.Error.WriteLine("env: CODECOMPASS_MANIFEST (manifest path), CODECOMPASS_CORPUS_DIR (cache dir)");
     return 1;
@@ -117,6 +119,54 @@ static async Task<int> CmdVerify(string[] args)
     Console.WriteLine($"FAIL - {r.Mismatches} mismatch(es):");
     foreach (var ex in r.Examples) Console.WriteLine("  " + ex);
     return 1;
+}
+
+static int CmdAll(string[] args)
+{
+    var selector = args.Length > 1 ? args[1] : "all";
+    var manifest = File.Exists(ManifestPath()) ? CorpusManifest.Load(ManifestPath()) : new CorpusManifest();
+    var targets = manifest.Corpora.Where(c => selector == "all" || c.Tier == selector || c.Id == selector).ToList();
+
+    var rows = new List<ReportRow>();
+    var skipped = new List<string>();
+
+    foreach (var c in targets)
+    {
+        var root = CorpusFetcher.LocalRoot(c.Id);
+        if (root is null) { skipped.Add(c.Id); continue; }
+
+        Console.Error.WriteLine($"[{c.Id}] benchmarking...");
+        var bench = Benchmark.Run(root);
+        Console.Error.WriteLine($"[{c.Id}] verifying...");
+        var oracle = Verifier.LexicalOracle(root, 100L * 1024 * 1024, 40);
+        var correctness = oracle.Mismatches == 0 ? "PASS" : $"FAIL ({oracle.Mismatches})";
+        rows.Add(new ReportRow(c.Id, c.Language, bench, correctness));
+    }
+
+    if (rows.Count == 0)
+    {
+        Console.Error.WriteLine("no fetched corpora to report. Fetch some first (fetch-corpus.ps1 or `bench fetch`).");
+        return 1;
+    }
+
+    var meta = new ReportMeta(
+        DateTime.Now.ToString("yyyy-MM-dd HH:mm"),
+        Environment.MachineName,
+        System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+        Environment.ProcessorCount,
+        System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription);
+
+    var html = HtmlReport.Generate(rows, meta, skipped);
+
+    var benchDir = Path.GetDirectoryName(Path.GetFullPath(ManifestPath()))!;
+    var resultsDir = Path.Combine(benchDir, "results");
+    Directory.CreateDirectory(resultsDir);
+    var outPath = Path.Combine(resultsDir, $"report-{DateTime.Now:yyyyMMdd-HHmmss}.html");
+    File.WriteAllText(outPath, html);
+
+    Console.WriteLine($"report: {outPath}");
+    Console.WriteLine($"  {rows.Count} repo(s) benchmarked, {skipped.Count} skipped (not fetched)");
+    return 0;
 }
 
 static int RunAndReport(string path)
