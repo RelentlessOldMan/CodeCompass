@@ -103,26 +103,30 @@ static int CmdRefs(string[] args)
     var root = Path.GetFullPath(args[1]);
     var name = args[2];
 
-    // Precise C# references (comments/strings excluded). Note: from the CLI this builds
-    // the Roslyn workspace fresh each run; the MCP server keeps it warm across calls.
-    var semantic = new RoslynCSharpAnalyzer(root).FindReferences(name);
-    foreach (var s in semantic)
+    // Precise semantic references (comments/strings excluded). Note: from the CLI these
+    // build fresh each run; the MCP server keeps them warm across calls.
+    var cs = new RoslynCSharpAnalyzer(root).FindReferences(name);
+    foreach (var s in cs)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
-    // Lexical whole-word references for non-C# files (needs the text index).
+    var cpp = new ClangCppAnalyzer(root).FindReferences(name);
+    foreach (var s in cpp)
+        Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
+
+    // Lexical whole-word references for languages without a semantic analyzer.
     int lexical = 0;
     if (RepositoryIndexer.TryLoad(root, out var index, out _))
     {
         foreach (var m in index.Search(name, 1000))
         {
-            if (m.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
+            if (SemanticCoverage.IsCovered(m.Path)) continue;
             if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
             Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
             lexical++;
         }
     }
 
-    Console.Error.WriteLine($"-- {semantic.Count} semantic C# + {lexical} lexical reference(s)");
+    Console.Error.WriteLine($"-- {cs.Count} C# + {cpp.Count} C/C++ semantic + {lexical} lexical reference(s)");
     return 0;
 }
 

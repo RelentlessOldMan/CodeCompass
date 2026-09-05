@@ -5,6 +5,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="ClangSharp" Version="20.1.2" />
+    <PackageReference Include="libclang.runtime.win-x64" Version="20.1.2" />
+    <PackageReference Include="libClangSharp.runtime.win-x64" Version="20.1.2" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.9.2" />
   </ItemGroup>
 
@@ -12,6 +15,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
 </Project>

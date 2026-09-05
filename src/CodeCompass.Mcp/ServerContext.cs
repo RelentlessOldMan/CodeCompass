@@ -15,6 +15,7 @@ public static class ServerContext
     private static TrigramIndex? _text;
     private static SymbolIndex? _symbols;
     private static RoslynCSharpAnalyzer? _csharp;
+    private static ClangCppAnalyzer? _cpp;
 
     public static string Root { get; private set; } = "";
 
@@ -26,6 +27,7 @@ public static class ServerContext
             _text = null;
             _symbols = null;
             _csharp = null;
+            _cpp = null;
         }
     }
 
@@ -64,6 +66,18 @@ public static class ServerContext
         }
     }
 
+    /// <summary>The C/C++ semantic analyzer, built lazily and cached for the session.</summary>
+    public static ClangCppAnalyzer Cpp
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return _cpp ??= new ClangCppAnalyzer(Root);
+            }
+        }
+    }
+
     public static IndexStats Rebuild()
     {
         lock (Gate)
@@ -72,6 +86,7 @@ public static class ServerContext
             _text = built.Text;
             _symbols = built.Symbols;
             _csharp = null; // force semantic rebuild on next use
+            _cpp = null;
             return built.Stats;
         }
     }

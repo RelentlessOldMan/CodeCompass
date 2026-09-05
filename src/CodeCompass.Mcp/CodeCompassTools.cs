@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text;
 using CodeCompass.Core.Text;
+using CodeCompass.Semantics;
 using ModelContextProtocol.Server;
 
 namespace CodeCompass.Mcp;
@@ -50,9 +51,10 @@ public static class CodeCompassTools
     }
 
     [McpServerTool(Name = "find_references")]
-    [Description("Find where a symbol is used across the codebase. For C# this is SEMANTIC - " +
-                 "it resolves the actual symbol and ignores matches in comments and strings. For other " +
-                 "languages it falls back to whole-word lexical matches. Returns ranked 'file:line:col: line'.")]
+    [Description("Find where a symbol is used across the codebase. For C# (Roslyn) and C/C++ (clang) " +
+                 "this is SEMANTIC - it resolves the actual symbol and ignores matches in comments and " +
+                 "strings. For other languages it falls back to whole-word lexical matches. " +
+                 "Returns ranked 'file:line:col: line'.")]
     public static string FindReferences(
         [Description("Symbol/identifier to find references to (case-sensitive).")] string name,
         [Description("Maximum number of results.")] int maxResults = 100)
@@ -60,23 +62,26 @@ public static class CodeCompassTools
         var (text, _) = ServerContext.Get();
         var sb = new StringBuilder();
 
-        // Precise C# references (comments/strings excluded).
-        var semantic = ServerContext.CSharp.FindReferences(name, maxResults);
-        foreach (var s in semantic)
-            sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
+        // Precise semantic references (comments/strings excluded).
+        var cs = ServerContext.CSharp.FindReferences(name, maxResults);
+        foreach (var s in cs) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
-        // Lexical whole-word references for non-C# files.
+        var cpp = ServerContext.Cpp.FindReferences(name, maxResults);
+        foreach (var s in cpp) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
+
+        // Lexical whole-word references for languages without a semantic analyzer.
+        int semantic = cs.Count + cpp.Count;
         int lexical = 0;
         foreach (var m in text.Search(name, maxResults * 5))
         {
-            if (m.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
+            if (SemanticCoverage.IsCovered(m.Path)) continue;
             if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
             sb.AppendLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
-            if (++lexical + semantic.Count >= maxResults) break;
+            if (semantic + ++lexical >= maxResults) break;
         }
 
-        if (semantic.Count == 0 && lexical == 0) return $"No references found for \"{name}\".";
-        sb.Append($"({semantic.Count} semantic C# reference(s); {lexical} lexical reference(s) in other files)");
+        if (semantic == 0 && lexical == 0) return $"No references found for \"{name}\".";
+        sb.Append($"({cs.Count} C# + {cpp.Count} C/C++ semantic reference(s); {lexical} lexical in other files)");
         return sb.ToString();
     }
 
