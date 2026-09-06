@@ -107,6 +107,7 @@ public static class Benchmark
         latencies.Sort();
 
         var (incSeconds, incFiles) = MeasureIncremental(text, symbols, snapshot, path);
+        snapshot.Dispose();
 
         cts.Cancel();
         try { sampler.Wait(); } catch { /* sampler shutting down */ }
@@ -128,7 +129,7 @@ public static class Benchmark
     // add temp files, time ApplyChanges against the in-memory index, then remove them.
     // Non-destructive - never touches existing files and doesn't persist the probe edits.
     private static (double seconds, int files) MeasureIncremental(
-        SegmentedIndex text, SegmentedSymbolIndex symbols, Dictionary<string, FileState> snapshot, string root)
+        SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string root)
     {
         const int count = 10;
         var added = new List<string>();
@@ -163,16 +164,7 @@ public static class Benchmark
         catch { /* non-Windows or not permitted: peak WS will just be less precise */ }
     }
 
-    private static Dictionary<string, FileState> LoadSnapshot(string root)
-    {
-        var path = IndexStore.SnapshotPath(root);
-        if (File.Exists(path))
-        {
-            try { using var fs = File.OpenRead(path); return SnapshotStore.Load(fs); }
-            catch { /* fall through */ }
-        }
-        return new Dictionary<string, FileState>(StringComparer.Ordinal);
-    }
+    private static DiskSnapshot LoadSnapshot(string root) => RepositoryIndexer.LoadSnapshot(root);
 
     private static long IndexCacheBytes(string root)
     {

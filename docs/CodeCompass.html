@@ -124,8 +124,9 @@ machine), and searching it afterward uses only a few hundred MB of RAM &mdash; c
 <div class="card">
 <b>Scale check (10 GB / ~1.1 million files):</b> an aggregated 10.4 GB corpus indexed in <b>7m48s</b> (22 MB/s) on the machine
 above, using <b>792 MB heap / 2.2 GB peak working set</b> during a full build-plus-edit cycle. Queries stayed ~1 ms
-(p95 7.9 ms). Memory stays bounded because the trigram and symbol indexes are memory-mapped, not loaded into RAM &mdash;
-so <b>searching</b> a repo this size uses only a few hundred MB. First-time build memory is tunable via
+(p95 7.9 ms). Memory stays bounded because the trigram and symbol indexes &mdash; and the change-detection ledger &mdash;
+are all memory-mapped on disk, not loaded into RAM, so <b>searching</b> a repo this size uses only a few hundred MB and
+<b>editing</b> it keeps just the changed files in memory. First-time build memory is tunable via
 <code>CODECOMPASS_SEGMENT_MB</code> / <code>CODECOMPASS_THREADS</code>.
 </div>
 

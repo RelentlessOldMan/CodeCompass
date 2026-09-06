@@ -167,6 +167,15 @@ This is as important as the search itself, and it is where "smart" is earned.
 - The index is persisted on disk (memory-mapped, updated safely) so restarting
   never means re-indexing dozens of GB from scratch.
 
+- The change-detection ledger (path -> size/mtime/hash for every file) is itself
+  kept on disk, not in RAM: an immutable, memory-mapped, path-sorted base file
+  answers lookups by binary search, while recent edits live in a small in-memory
+  overlay that is journaled and periodically folded back into a fresh base
+  (compaction). This is what keeps active editing of a dozens-of-GB repo cheap on
+  memory - a handful of changed files never pulls the whole ledger into RAM. Base
+  files use monotonic, never-reused numbers so a rewrite is safe while a previous
+  mmap is still held (the same discipline the trigram/symbol segments use).
+
 - A very large change (say a branch switch that rewrites most of the tree) can
   fall back to a full rebuild when that is faster than a huge incremental diff.
 

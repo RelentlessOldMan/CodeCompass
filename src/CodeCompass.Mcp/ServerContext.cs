@@ -24,7 +24,7 @@ public static class ServerContext
     private static readonly object Gate = new();
     private static SegmentedIndex? _text;
     private static SegmentedSymbolIndex? _symbols;
-    private static Dictionary<string, FileState>? _snapshot;
+    private static DiskSnapshot? _snapshot;
     private static RoslynCSharpAnalyzer? _csharp;
     private static ClangCppAnalyzer? _cpp;
     private static RepositoryWatcher? _watcher;
@@ -51,6 +51,7 @@ public static class ServerContext
             Root = Path.GetFullPath(root);
             _text?.Dispose();
             _symbols?.Dispose();
+            _snapshot?.Dispose();
             _text = null;
             _symbols = null;
             _snapshot = null;
@@ -121,6 +122,7 @@ public static class ServerContext
             Log.For(Root).Info("manual reindex requested");
             _text?.Dispose();
             _symbols?.Dispose();
+            _snapshot?.Dispose();
             _text = null;
             _symbols = null;
             var built = RepositoryIndexer.Build(Root);
@@ -236,6 +238,7 @@ public static class ServerContext
                     Log.For(Root).Info("watcher requested full reconcile; rebuilding");
                     _text!.Dispose();
                     _symbols!.Dispose();
+                    _snapshot?.Dispose();
                     _text = null;
                     _symbols = null;
                     var built = RepositoryIndexer.Build(Root);
@@ -262,18 +265,5 @@ public static class ServerContext
         }
     }
 
-    private static Dictionary<string, FileState> LoadSnapshot()
-    {
-        var path = IndexStore.SnapshotPath(Root);
-        if (File.Exists(path))
-        {
-            try
-            {
-                using var fs = File.OpenRead(path);
-                return SnapshotStore.Load(fs);
-            }
-            catch { /* fall through */ }
-        }
-        return new Dictionary<string, FileState>(StringComparer.Ordinal);
-    }
+    private static DiskSnapshot LoadSnapshot() => RepositoryIndexer.LoadSnapshot(Root);
 }

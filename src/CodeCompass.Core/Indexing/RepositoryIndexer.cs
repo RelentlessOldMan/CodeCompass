@@ -183,65 +183,68 @@ public static class RepositoryIndexer
         root = Path.GetFullPath(root);
         var sw = Stopwatch.StartNew();
 
-        if (!TryLoad(root, out var text, out var symbols) || !TryLoadSnapshot(root, out var old))
-            return FullRebuild(root, text, symbols, sw);
+        if (!TryLoad(root, out var text, out var symbols)) return FullRebuild(root, text, symbols, sw);
+        if (!TryLoadSnapshot(root, out var old)) return FullRebuild(root, text, symbols, sw);
 
-        var walker = new FileWalker(new IgnoreRules());
-        var newSnapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        int added = 0, modified = 0, removed = 0;
-
-        using (var extractor = new TreeSitterSymbolExtractor())
+        using (old)
         {
-            foreach (var file in walker.Walk(root))
+            var walker = new FileWalker(new IgnoreRules());
+            var newSnapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            int added = 0, modified = 0, removed = 0;
+
+            using (var extractor = new TreeSitterSymbolExtractor())
             {
-                var rel = file.RelativePath;
-                seen.Add(rel);
-                var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
-
-                if (old.TryGetValue(rel, out var os) && os.Size == file.Size && os.MTimeTicks == mtime)
+                foreach (var file in walker.Walk(root))
                 {
-                    newSnapshot[rel] = os;
-                    continue;
-                }
+                    var rel = file.RelativePath;
+                    seen.Add(rel);
+                    var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
 
-                byte[] bytes;
-                try { bytes = File.ReadAllBytes(file.FullPath); }
-                catch { continue; }
-                if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) continue;
+                    if (old.TryGetValue(rel, out var os) && os.Size == file.Size && os.MTimeTicks == mtime)
+                    {
+                        newSnapshot[rel] = os;
+                        continue;
+                    }
 
-                var hash = Convert.ToHexString(SHA256.HashData(bytes));
-                if (old.TryGetValue(rel, out var os2) && os2.ContentHash == hash)
-                {
+                    byte[] bytes;
+                    try { bytes = File.ReadAllBytes(file.FullPath); }
+                    catch { continue; }
+                    if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) continue;
+
+                    var hash = Convert.ToHexString(SHA256.HashData(bytes));
+                    if (old.TryGetValue(rel, out var os2) && os2.ContentHash == hash)
+                    {
+                        newSnapshot[rel] = new FileState(bytes.Length, mtime, hash);
+                        continue;
+                    }
+
+                    var content = TextDecoder.FromBytes(bytes);
+                    text.RemovePath(rel);
+                    text.AddDocumentText(rel, content);
+                    symbols.RemovePath(rel);
+                    if (LanguageRegistry.ForPath(rel) is not null)
+                        symbols.AddForPath(rel, extractor.Extract(rel, content));
                     newSnapshot[rel] = new FileState(bytes.Length, mtime, hash);
-                    continue;
+                    if (old.ContainsKey(rel)) modified++; else added++;
                 }
-
-                var content = TextDecoder.FromBytes(bytes);
-                text.RemovePath(rel);
-                text.AddDocumentText(rel, content);
-                symbols.RemovePath(rel);
-                if (LanguageRegistry.ForPath(rel) is not null)
-                    symbols.AddForPath(rel, extractor.Extract(rel, content));
-                newSnapshot[rel] = new FileState(bytes.Length, mtime, hash);
-                if (old.ContainsKey(rel)) modified++; else added++;
             }
+
+            foreach (var rel in old.Keys)
+            {
+                if (seen.Contains(rel)) continue;
+                text.RemovePath(rel);
+                symbols.RemovePath(rel);
+                removed++;
+            }
+
+            if (added + modified + removed > RebuildThreshold)
+                return FullRebuild(root, text, symbols, sw);
+
+            SaveAll(root, text, symbols, newSnapshot);
+            sw.Stop();
+            return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false));
         }
-
-        foreach (var rel in old.Keys)
-        {
-            if (seen.Contains(rel)) continue;
-            text.RemovePath(rel);
-            symbols.RemovePath(rel);
-            removed++;
-        }
-
-        if (added + modified + removed > RebuildThreshold)
-            return FullRebuild(root, text, symbols, sw);
-
-        SaveAll(root, text, symbols, newSnapshot);
-        sw.Stop();
-        return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false));
     }
 
     /// <summary>Disk-based targeted update: apply just the given changed paths.</summary>
@@ -251,14 +254,18 @@ public static class RepositoryIndexer
         root = Path.GetFullPath(root);
         var sw = Stopwatch.StartNew();
 
-        if (!TryLoad(root, out var text, out var symbols) || !TryLoadSnapshot(root, out var snapshot))
-            return FullRebuild(root, text, symbols, sw);
-        if (changedFullPaths.Count > RebuildThreshold)
-            return FullRebuild(root, text, symbols, sw);
+        if (!TryLoad(root, out var text, out var symbols)) return FullRebuild(root, text, symbols, sw);
+        if (!TryLoadSnapshot(root, out var snapshot)) return FullRebuild(root, text, symbols, sw);
 
-        var counts = ApplyChanges(text, symbols, snapshot, root, changedFullPaths);
-        SaveAll(root, text, symbols, snapshot);
-        return (text, symbols, new UpdateStats(counts.Added, counts.Modified, counts.Removed, sw.Elapsed.TotalSeconds, false));
+        using (snapshot)
+        {
+            if (changedFullPaths.Count > RebuildThreshold)
+                return FullRebuild(root, text, symbols, sw);
+
+            var counts = ApplyChanges(text, symbols, snapshot, root, changedFullPaths);
+            SaveAll(root, text, symbols, snapshot);
+            return (text, symbols, new UpdateStats(counts.Added, counts.Modified, counts.Removed, sw.Elapsed.TotalSeconds, false));
+        }
     }
 
     private static (SegmentedIndex, SegmentedSymbolIndex, UpdateStats) FullRebuild(
@@ -273,7 +280,7 @@ public static class RepositoryIndexer
 
     /// <summary>Apply changed paths to already-loaded in-memory indexes (does not persist).</summary>
     public static ChangeCounts ApplyChanges(
-        SegmentedIndex text, SegmentedSymbolIndex symbols, Dictionary<string, FileState> snapshot,
+        SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot,
         string root, IEnumerable<string> changedFullPaths)
     {
         root = Path.GetFullPath(root);
@@ -313,11 +320,11 @@ public static class RepositoryIndexer
 
     /// <summary>Persist in-memory indexes + snapshot to the cache.</summary>
     public static void Persist(string root, SegmentedIndex text, SegmentedSymbolIndex symbols,
-                               IReadOnlyDictionary<string, FileState> snapshot) =>
+                               DiskSnapshot snapshot) =>
         SaveAll(root, text, symbols, snapshot);
 
     private static void ApplyFile(
-        SegmentedIndex text, SegmentedSymbolIndex symbols, Dictionary<string, FileState> snapshot,
+        SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot,
         string rel, string full, IgnoreRules ignore, TreeSitterSymbolExtractor extractor,
         ref int added, ref int modified, ref int removed)
     {
@@ -361,7 +368,7 @@ public static class RepositoryIndexer
     }
 
     private static void RemovePathAndChildren(
-        SegmentedIndex text, SegmentedSymbolIndex symbols, Dictionary<string, FileState> snapshot,
+        SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot,
         string rel, ref int removed)
     {
         if (snapshot.Remove(rel))
@@ -372,7 +379,7 @@ public static class RepositoryIndexer
         }
 
         var prefix = rel + "/";
-        var children = snapshot.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList();
+        var children = snapshot.KeysWithPrefix(prefix).ToList();
         foreach (var k in children)
         {
             snapshot.Remove(k);
@@ -414,24 +421,13 @@ public static class RepositoryIndexer
         }
     }
 
-    /// <summary>Load the change-detection snapshot for a repo (empty if none exists).</summary>
-    public static Dictionary<string, FileState> LoadSnapshot(string root) =>
-        TryLoadSnapshot(root, out var s) ? s : new Dictionary<string, FileState>(StringComparer.Ordinal);
+    /// <summary>Open the change-detection snapshot for a repo (empty if none exists). Caller owns it.</summary>
+    public static DiskSnapshot LoadSnapshot(string root) => DiskSnapshot.Open(IndexStore.GetCacheDir(root));
 
-    private static bool TryLoadSnapshot(string root, out Dictionary<string, FileState> snapshot)
-    {
-        snapshot = null!;
-        try
-        {
-            var path = IndexStore.SnapshotPath(root);
-            if (!File.Exists(path)) return false;
-            using var fs = File.OpenRead(path);
-            snapshot = SnapshotStore.Load(fs);
-            return true;
-        }
-        catch { return false; }
-    }
+    private static bool TryLoadSnapshot(string root, out DiskSnapshot snapshot) =>
+        DiskSnapshot.TryOpen(IndexStore.GetCacheDir(root), out snapshot);
 
+    // Full-snapshot save (build / full reconcile): writes a fresh on-disk base.
     private static void SaveAll(string root, SegmentedIndex text, SegmentedSymbolIndex symbols,
                                IReadOnlyDictionary<string, FileState> snapshot)
     {
@@ -440,9 +436,15 @@ public static class RepositoryIndexer
         SaveSnapshot(root, snapshot);
     }
 
-    private static void SaveSnapshot(string root, IReadOnlyDictionary<string, FileState> snapshot)
+    // Incremental save: journals the overlay (or compacts) without materializing the whole ledger.
+    private static void SaveAll(string root, SegmentedIndex text, SegmentedSymbolIndex symbols,
+                               DiskSnapshot snapshot)
     {
-        using var fs = File.Create(IndexStore.SnapshotPath(root));
-        SnapshotStore.Save(fs, snapshot);
+        text.Flush();
+        symbols.Flush();
+        snapshot.Save();
     }
+
+    private static void SaveSnapshot(string root, IReadOnlyDictionary<string, FileState> snapshot) =>
+        DiskSnapshot.WriteFullBase(IndexStore.GetCacheDir(root), snapshot);
 }

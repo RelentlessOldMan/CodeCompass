@@ -171,6 +171,7 @@ static int CmdWatch(string[] args)
             {
                 text.Dispose();
                 symbols.Dispose();
+                snapshot.Dispose();
                 var b = RepositoryIndexer.Build(root);
                 text = b.Text;
                 symbols = b.Symbols;
@@ -203,6 +204,7 @@ static int CmdWatch(string[] args)
     exit.Wait();
     text.Dispose();
     symbols.Dispose();
+    snapshot.Dispose();
     return 0;
 }
 
