@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
 using CodeCompass.Core.Changes;
+using CodeCompass.Core.Text;
 using Xunit;
 
 namespace CodeCompass.Core.Tests;
@@ -18,7 +18,7 @@ public class DiskSnapshotTests
     }
 
     private static FileState St(int seed) =>
-        new(seed * 10L, seed * 100L, Convert.ToHexString(SHA256.HashData(BitConverter.GetBytes(seed))));
+        new(seed * 10L, seed * 100L, ContentHasher.Hash(BitConverter.GetBytes(seed)));
 
     private static void AssertMatches(DiskSnapshot snap, IReadOnlyDictionary<string, FileState> model)
     {

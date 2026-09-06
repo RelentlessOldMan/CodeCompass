@@ -17,7 +17,7 @@ public static class SnapshotBaseFile
     internal const uint Magic = 0x4E535343; // "CCSN"
     internal const int Version = 1;
     internal const int HeaderSize = 12 + 8 * 5;
-    internal const int HashBytes = 32; // SHA-256
+    internal const int HashBytes = 16; // XxHash128
 
     /// <summary>
     /// Write a base file from a sorted entry sequence. The caller supplies the record count
@@ -29,7 +29,7 @@ public static class SnapshotBaseFile
                              IEnumerable<(string Path, FileState State)> sortedEntries)
     {
         long pathOffsetsOff = HeaderSize;
-        long pathBlobOff = pathOffsetsOff + (long)(count + 1) * 4;
+        long pathBlobOff = pathOffsetsOff + (long)(count + 1) * 8; // int64 offsets: path blob may exceed 2 GB
         long sizesOff = pathBlobOff + pathBlobLen;
         long mtimesOff = sizesOff + (long)count * 8;
         long hashesOff = mtimesOff + (long)count * 8;
@@ -51,12 +51,12 @@ public static class SnapshotBaseFile
         view.Write(44, hashesOff);
 
         int i = 0;
-        int pathAcc = 0;
+        long pathAcc = 0;
         var hashBuf = new byte[HashBytes];
         foreach (var (path, state) in sortedEntries)
         {
             if (i >= count) throw new InvalidOperationException("snapshot base: more entries than declared count");
-            view.Write(pathOffsetsOff + (long)i * 4, pathAcc);
+            view.Write(pathOffsetsOff + (long)i * 8, pathAcc);
 
             var pb = Encoding.UTF8.GetBytes(path);
             if (pb.Length > 0) view.WriteArray(pathBlobOff + pathAcc, pb, 0, pb.Length);
@@ -70,7 +70,7 @@ public static class SnapshotBaseFile
             i++;
         }
         if (i != count) throw new InvalidOperationException($"snapshot base: wrote {i} entries, declared {count}");
-        view.Write(pathOffsetsOff + (long)count * 4, pathAcc); // terminating offset
+        view.Write(pathOffsetsOff + (long)count * 8, pathAcc); // terminating offset
         if (pathAcc != pathBlobLen) throw new InvalidOperationException(
             $"snapshot base: path blob was {pathAcc} bytes, declared {pathBlobLen}");
     }
@@ -115,9 +115,9 @@ public sealed class SnapshotBaseReader : IDisposable
 
     public string GetPath(int i)
     {
-        int o0 = _view.ReadInt32(_pathOffsetsOff + (long)i * 4);
-        int o1 = _view.ReadInt32(_pathOffsetsOff + (long)(i + 1) * 4);
-        int len = o1 - o0;
+        long o0 = _view.ReadInt64(_pathOffsetsOff + (long)i * 8);
+        long o1 = _view.ReadInt64(_pathOffsetsOff + (long)(i + 1) * 8);
+        int len = (int)(o1 - o0);
         if (len == 0) return "";
         var buf = new byte[len];
         _view.ReadArray(_pathBlobOff + o0, buf, 0, len);

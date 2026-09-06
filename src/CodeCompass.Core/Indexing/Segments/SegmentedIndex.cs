@@ -248,24 +248,34 @@ public sealed class SegmentedIndex : IDisposable
 
     private void SaveManifest()
     {
-        using var w = new StreamWriter(Path.Combine(_dir, ManifestName), append: false);
-        w.WriteLine(_root);
-        w.WriteLine(_nextSegmentNumber);
-        foreach (var s in _segments)
-            w.WriteLine(Path.GetFileName(s.FilePath));
+        var path = Path.Combine(_dir, ManifestName);
+        var tmp = path + ".tmp";
+        using (var w = new StreamWriter(tmp, append: false))
+        {
+            w.WriteLine(_root);
+            w.WriteLine(_nextSegmentNumber);
+            foreach (var s in _segments)
+                w.WriteLine(Path.GetFileName(s.FilePath));
+        }
+        File.Move(tmp, path, overwrite: true); // atomic: a crash never leaves a truncated manifest
     }
 
     private void SaveTombstones()
     {
-        using var fs = File.Create(Path.Combine(_dir, TombstoneName));
-        using var w = new BinaryWriter(fs);
-        w.Write(_tombstones.Count);
-        foreach (var (seg, locals) in _tombstones)
+        var path = Path.Combine(_dir, TombstoneName);
+        var tmp = path + ".tmp";
+        using (var fs = File.Create(tmp))
+        using (var w = new BinaryWriter(fs))
         {
-            w.Write(seg);
-            w.Write(locals.Count);
-            foreach (var l in locals) w.Write(l);
+            w.Write(_tombstones.Count);
+            foreach (var (seg, locals) in _tombstones)
+            {
+                w.Write(seg);
+                w.Write(locals.Count);
+                foreach (var l in locals) w.Write(l);
+            }
         }
+        File.Move(tmp, path, overwrite: true);
     }
 
     private void CleanupOrphans()

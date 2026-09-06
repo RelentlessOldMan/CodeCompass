@@ -28,6 +28,8 @@ public sealed class RepositoryWatcher : IDisposable
 
     private readonly object _timerGate = new();
     private readonly object _flushGate = new();
+    private readonly int _maxWaitMs;
+    private long _firstPendingTick; // 0 = nothing pending since last flush
     private System.Threading.Timer? _timer;
     private bool _disposed;
 
@@ -36,6 +38,7 @@ public sealed class RepositoryWatcher : IDisposable
         _root = Path.GetFullPath(root);
         _onFlush = onFlush;
         _debounceMs = debounceMs;
+        _maxWaitMs = Math.Max(debounceMs * 10, 5000); // fire at least this often under a sustained storm
         _ignore = ignore ?? new IgnoreRules();
 
         _fsw = new FileSystemWatcher(_root)
@@ -101,10 +104,16 @@ public sealed class RepositoryWatcher : IDisposable
         lock (_timerGate)
         {
             if (_disposed) return;
+            long now = Environment.TickCount64;
+            if (_firstPendingTick == 0) _firstPendingTick = now;
+            // Normally reset the quiet window on each event; but if we've been continuously
+            // deferring past the max wait (e.g. a long sync), fire now so a storm can't
+            // starve the flush and let _pending grow without bound.
+            int due = now - _firstPendingTick >= _maxWaitMs ? 0 : _debounceMs;
             if (_timer is null)
-                _timer = new System.Threading.Timer(_ => Flush(), null, _debounceMs, Timeout.Infinite);
+                _timer = new System.Threading.Timer(_ => Flush(), null, due, Timeout.Infinite);
             else
-                _timer.Change(_debounceMs, Timeout.Infinite);
+                _timer.Change(due, Timeout.Infinite);
         }
     }
 
@@ -113,6 +122,7 @@ public sealed class RepositoryWatcher : IDisposable
         lock (_flushGate)
         {
             if (_disposed) return;
+            lock (_timerGate) _firstPendingTick = 0; // start a fresh max-wait window
 
             List<string> paths;
             bool overflow;

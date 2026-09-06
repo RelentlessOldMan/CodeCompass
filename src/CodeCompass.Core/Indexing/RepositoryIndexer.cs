@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Security.Cryptography;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
@@ -69,7 +68,7 @@ public static class RepositoryIndexer
 
                 var content = TextDecoder.FromBytes(bytes);
                 var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
-                var hash = Convert.ToHexString(SHA256.HashData(bytes));
+                var hash = ContentHasher.Hash(bytes);
 
                 worker.Text.AddDocument(file.RelativePath, TrigramIndex.ComputeTrigrams(content));
                 if (LanguageRegistry.ForPath(file.RelativePath) is not null)
@@ -212,7 +211,7 @@ public static class RepositoryIndexer
                     catch { continue; }
                     if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) continue;
 
-                    var hash = Convert.ToHexString(SHA256.HashData(bytes));
+                    var hash = ContentHasher.Hash(bytes);
                     if (old.TryGetValue(rel, out var os2) && os2.ContentHash == hash)
                     {
                         newSnapshot[rel] = new FileState(bytes.Length, mtime, hash);
@@ -293,7 +292,9 @@ public static class RepositoryIndexer
             string rel;
             try { rel = Path.GetRelativePath(root, full).Replace('\\', '/'); }
             catch { continue; }
-            if (rel.StartsWith("..", StringComparison.Ordinal) || rel == ".") continue;
+            // Outside the repo: "../" escapes, "." is the root itself, and a different drive
+            // (or a junction pointing off-root) yields a still-rooted path from GetRelativePath.
+            if (rel.StartsWith("..", StringComparison.Ordinal) || rel == "." || Path.IsPathRooted(rel)) continue;
 
             if (Directory.Exists(full))
             {
@@ -348,7 +349,7 @@ public static class RepositoryIndexer
         }
 
         var mtime = File.GetLastWriteTimeUtc(full).Ticks;
-        var hash = Convert.ToHexString(SHA256.HashData(bytes));
+        var hash = ContentHasher.Hash(bytes);
 
         if (snapshot.TryGetValue(rel, out var old) && old.ContentHash == hash)
         {

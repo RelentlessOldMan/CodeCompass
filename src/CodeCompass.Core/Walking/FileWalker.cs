@@ -1,3 +1,4 @@
+using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
 
 namespace CodeCompass.Core.Walking;
@@ -32,9 +33,14 @@ public sealed class FileWalker
                 subdirs = Directory.GetDirectories(dir);
                 files = Directory.GetFiles(dir);
             }
-            catch (UnauthorizedAccessException) { continue; }
-            catch (DirectoryNotFoundException) { continue; }
-            catch (IOException) { continue; }
+            catch (DirectoryNotFoundException) { continue; } // vanished between enqueue and read: fine
+            catch (Exception ex)
+            {
+                // Access denied, a path too long for the OS, etc. Skipping means files under
+                // this directory silently won't be indexed - surface it so it's diagnosable.
+                Log.For(root).Warn($"walk skipped a directory subtree: {dir} ({ex.GetType().Name}: {ex.Message})");
+                continue;
+            }
 
             foreach (var sub in subdirs)
             {

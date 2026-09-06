@@ -298,7 +298,13 @@ public sealed class DiskSnapshot : IDisposable
                 _overlay[path] = new FileState(size, mtime, hash);
             }
             int rems = r.ReadInt32();
-            for (int i = 0; i < rems; i++) _removed.Add(r.ReadString());
+            for (int i = 0; i < rems; i++)
+            {
+                var p = r.ReadString();
+                // Keep the invariant _removed ⊆ base: a tombstone for a path not in the base
+                // is a no-op, and admitting one would desync Compact's count/blob math.
+                if (_base is not null && _base.Contains(p)) _removed.Add(p);
+            }
         }
         catch (Exception ex)
         {
