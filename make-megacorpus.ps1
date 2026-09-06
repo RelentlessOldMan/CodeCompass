@@ -66,3 +66,4 @@ $gb = [math]::Round($copied / 1GB, 2)
 Write-Host ""
 Write-Host "megacorpus ready: $Out  (~$gb GB, $round round(s))"
 Write-Host "benchmark it:  dotnet run -c Release --project src/CodeCompass.Bench -- run `"$Out`""
+exit 0  # robocopy leaves a non-zero bitmask in $LASTEXITCODE even on success; don't propagate it
