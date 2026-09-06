@@ -20,9 +20,11 @@ public class WatcherTests
         SymbolIndex? latest = null;
         using var reindexed = new ManualResetEventSlim(false);
 
-        using var watcher = new RepositoryWatcher(repo.Root, () =>
+        using var watcher = new RepositoryWatcher(repo.Root, batch =>
         {
-            var (_, symbols, _) = RepositoryIndexer.Update(repo.Root);
+            var (_, symbols, _) = batch.FullReconcile
+                ? RepositoryIndexer.Update(repo.Root)
+                : RepositoryIndexer.UpdatePaths(repo.Root, batch.ChangedFullPaths);
             latest = symbols;
             reindexed.Set();
         }, debounceMs: 200);
@@ -44,7 +46,7 @@ public class WatcherTests
         RepositoryIndexer.Build(repo.Root);
 
         using var fired = new ManualResetEventSlim(false);
-        using var watcher = new RepositoryWatcher(repo.Root, () => fired.Set(), debounceMs: 200);
+        using var watcher = new RepositoryWatcher(repo.Root, _ => fired.Set(), debounceMs: 200);
         watcher.Start();
 
         // Writing into an ignored directory (bin/) must NOT trigger a reindex.

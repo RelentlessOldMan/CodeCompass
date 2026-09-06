@@ -86,10 +86,12 @@ static int CmdWatch(string[] args)
         Console.Error.WriteLine($"indexed {b.Stats.Files} files");
     }
 
-    using var watcher = new RepositoryWatcher(root, () =>
+    using var watcher = new RepositoryWatcher(root, batch =>
     {
-        var (_, _, s) = RepositoryIndexer.Update(root);
-        if (s.Added != 0 || s.Modified != 0 || s.Removed != 0)
+        var (_, _, s) = batch.FullReconcile
+            ? RepositoryIndexer.Update(root)                      // events lost: full reconcile
+            : RepositoryIndexer.UpdatePaths(root, batch.ChangedFullPaths); // targeted
+        if (s.Added != 0 || s.Modified != 0 || s.Removed != 0 || s.FullRebuild)
             Console.Error.WriteLine($"reindexed: +{s.Added} ~{s.Modified} -{s.Removed}" +
                                     (s.FullRebuild ? " (full rebuild)" : ""));
     });

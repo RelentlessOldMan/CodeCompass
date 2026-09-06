@@ -68,6 +68,46 @@ public class IncrementalIndexTests
     }
 
     [Fact]
+    public void TargetedUpdate_MatchesFullRebuild()
+    {
+        using var repo = new TempRepo();
+        WriteBumped(repo, "a.cs", "namespace N { class Alpha { void One() { } } }", 1);
+        WriteBumped(repo, "keep.cs", "namespace N { class Keep { } }", 1);
+        WriteBumped(repo, "dir/x.cs", "namespace N { class Ex { } }", 1);
+        WriteBumped(repo, "dir/y.cs", "namespace N { class Why { } }", 1);
+        WriteBumped(repo, "gone.cs", "namespace N { class Gone { } }", 1);
+        RepositoryIndexer.Build(repo.Root);
+
+        // Modify a file, add a file, delete a file, and delete a whole directory.
+        WriteBumped(repo, "a.cs", "namespace N { class Alpha { void OneRenamed() { } } }", 60);
+        WriteBumped(repo, "added.cs", "namespace N { class Added { } }", 60);
+        File.Delete(Path.Combine(repo.Root, "gone.cs"));
+        Directory.Delete(Path.Combine(repo.Root, "dir"), recursive: true);
+
+        string Full(string rel) => Path.Combine(repo.Root, rel.Replace('/', Path.DirectorySeparatorChar));
+        var changed = new[] { Full("a.cs"), Full("added.cs"), Full("gone.cs"), Full("dir") };
+
+        var (incText, incSymbols, _) = RepositoryIndexer.UpdatePaths(repo.Root, changed);
+        var (fullText, fullSymbols, _) = RepositoryIndexer.Build(repo.Root);
+
+        Assert.Equal(fullText.DocumentCount, incText.DocumentCount);
+        Assert.Equal(fullSymbols.Count, incSymbols.Count);
+
+        foreach (var q in new[] { "Alpha", "OneRenamed", "One", "Keep", "Ex", "Why", "Gone", "Added", "class" })
+            Assert.True(SearchSet(incText, q).SetEquals(SearchSet(fullText, q)), $"search mismatch for '{q}'");
+
+        foreach (var n in new[] { "Alpha", "OneRenamed", "Keep", "Ex", "Why", "Gone", "Added" })
+            Assert.True(NameSet(incSymbols, n).SetEquals(NameSet(fullSymbols, n)), $"symbol mismatch for '{n}'");
+
+        // Deleted file, deleted directory's files, and the renamed method are all gone.
+        Assert.Empty(incSymbols.FindByName("Gone"));
+        Assert.Empty(incSymbols.FindByName("Ex"));
+        Assert.Empty(incSymbols.FindByName("Why"));
+        Assert.Empty(incSymbols.FindByName("One"));
+        Assert.NotEmpty(incSymbols.FindByName("Added"));
+    }
+
+    [Fact]
     public void Update_WithNoChanges_IsANoOp()
     {
         using var repo = new TempRepo();

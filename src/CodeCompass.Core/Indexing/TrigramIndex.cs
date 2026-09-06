@@ -104,6 +104,32 @@ public sealed class TrigramIndex
         }
     }
 
+    /// <summary>
+    /// Append another (build-only, tombstone-free) index's documents into this one,
+    /// remapping its docIds into this index's id space. Called sequentially while merging
+    /// per-thread partial indexes; each merged block's ids are strictly greater than all
+    /// existing ids, so every posting list stays sorted regardless of merge order.
+    /// </summary>
+    public void MergeFrom(TrigramIndex other)
+    {
+        int offset = _docPaths.Count;
+        for (int local = 0; local < other._docPaths.Count; local++)
+        {
+            var rel = other._docPaths[local];
+            _docPaths.Add(rel);
+            _pathToDoc[rel] = offset + local;
+        }
+        foreach (var (key, list) in other._postings)
+        {
+            if (!_postings.TryGetValue(key, out var dest))
+            {
+                dest = new List<int>(list.Count);
+                _postings[key] = dest;
+            }
+            foreach (var localId in list) dest.Add(offset + localId);
+        }
+    }
+
     private static bool TryReadText(string fullPath, out string text)
     {
         text = "";
