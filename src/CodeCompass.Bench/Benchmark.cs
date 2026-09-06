@@ -7,6 +7,7 @@ using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Storage;
 using CodeCompass.Core.Symbols;
+using CodeCompass.Core.Symbols.Segments;
 
 namespace CodeCompass.Bench;
 
@@ -114,6 +115,7 @@ public static class Benchmark
         long peakWsMb = peakWs / (1024 * 1024);
         double perCore = stats.Cores > 0 ? mbps / stats.Cores : mbps;
         text.Dispose();
+        symbols.Dispose();
 
         return new BenchResult(
             name, stats.Files, stats.Bytes, stats.Trigrams, stats.Symbols,
@@ -126,7 +128,7 @@ public static class Benchmark
     // add temp files, time ApplyChanges against the in-memory index, then remove them.
     // Non-destructive - never touches existing files and doesn't persist the probe edits.
     private static (double seconds, int files) MeasureIncremental(
-        SegmentedIndex text, SymbolIndex symbols, Dictionary<string, FileState> snapshot, string root)
+        SegmentedIndex text, SegmentedSymbolIndex symbols, Dictionary<string, FileState> snapshot, string root)
     {
         const int count = 10;
         var added = new List<string>();

@@ -4,6 +4,7 @@ using System.Threading;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Symbols;
+using CodeCompass.Core.Symbols.Segments;
 using Xunit;
 
 namespace CodeCompass.Core.Tests;
@@ -17,7 +18,7 @@ public class WatcherTests
         repo.Write("a.cs", "namespace N { class Existing { } }");
         RepositoryIndexer.Build(repo.Root);
 
-        SymbolIndex? latest = null;
+        SegmentedSymbolIndex? latest = null;
         using var reindexed = new ManualResetEventSlim(false);
 
         using var watcher = new RepositoryWatcher(repo.Root, batch =>

@@ -4,6 +4,7 @@ using CodeCompass.Core.Hooks;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Symbols;
+using CodeCompass.Core.Symbols.Segments;
 using CodeCompass.Core.Text;
 using CodeCompass.Semantics;
 
@@ -83,7 +84,7 @@ static int CmdWatch(string[] args)
     if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
 
     SegmentedIndex text;
-    SymbolIndex symbols;
+    SegmentedSymbolIndex symbols;
     if (RepositoryIndexer.TryLoad(root, out text, out symbols))
     {
         Console.Error.WriteLine("loaded existing index");
@@ -104,6 +105,7 @@ static int CmdWatch(string[] args)
         if (batch.FullReconcile)
         {
             text.Dispose();
+            symbols.Dispose();
             var b = RepositoryIndexer.Build(root);
             text = b.Text;
             symbols = b.Symbols;
@@ -125,6 +127,7 @@ static int CmdWatch(string[] args)
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; exit.Set(); };
     exit.Wait();
     text.Dispose();
+    symbols.Dispose();
     return 0;
 }
 

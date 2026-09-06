@@ -3,6 +3,7 @@ using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Storage;
 using CodeCompass.Core.Symbols;
+using CodeCompass.Core.Symbols.Segments;
 using CodeCompass.Semantics;
 
 namespace CodeCompass.Mcp;
@@ -16,7 +17,7 @@ public static class ServerContext
 {
     private static readonly object Gate = new();
     private static SegmentedIndex? _text;
-    private static SymbolIndex? _symbols;
+    private static SegmentedSymbolIndex? _symbols;
     private static Dictionary<string, FileState>? _snapshot;
     private static RoslynCSharpAnalyzer? _csharp;
     private static ClangCppAnalyzer? _cpp;
@@ -30,6 +31,7 @@ public static class ServerContext
         {
             Root = Path.GetFullPath(root);
             _text?.Dispose();
+            _symbols?.Dispose();
             _text = null;
             _symbols = null;
             _snapshot = null;
@@ -38,7 +40,7 @@ public static class ServerContext
         }
     }
 
-    public static (SegmentedIndex Text, SymbolIndex Symbols) Get()
+    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols) Get()
     {
         lock (Gate)
         {
@@ -62,7 +64,9 @@ public static class ServerContext
         lock (Gate)
         {
             _text?.Dispose(); // release mmaps before rebuilding
+            _symbols?.Dispose();
             _text = null;
+            _symbols = null;
             var built = RepositoryIndexer.Build(Root);
             _text = built.Text;
             _symbols = built.Symbols;
@@ -92,7 +96,9 @@ public static class ServerContext
             if (batch.FullReconcile)
             {
                 _text!.Dispose();
+                _symbols!.Dispose();
                 _text = null;
+                _symbols = null;
                 var built = RepositoryIndexer.Build(Root);
                 _text = built.Text;
                 _symbols = built.Symbols;
