@@ -7,9 +7,11 @@ using ModelContextProtocol.Server;
 namespace CodeCompass.Mcp;
 
 /// <summary>
-/// The tools exposed to the agent. Each returns compact, ranked file:line:col results
-/// (or symbol locations) so the agent gets exactly the lines it needs instead of
-/// reading whole files. This is where the token savings come from.
+/// The tools exposed to the agent. Each returns compact, ranked file:line:col results so
+/// the agent gets exactly the lines it needs instead of reading whole files. If the index
+/// isn't ready yet, a tool returns a short status (still indexing, or how to build it) so
+/// the agent can relay progress rather than hang. Deliberately a small surface (5 tools) to
+/// keep the per-session token cost low.
 /// </summary>
 [McpServerToolType]
 public static class CodeCompassTools
@@ -22,13 +24,13 @@ public static class CodeCompassTools
         [Description("Literal substring to find (case-sensitive).")] string query,
         [Description("Maximum number of results.")] int maxResults = 50)
     {
-        var (text, _) = ServerContext.Get();
+        if (!ServerContext.TryGet(out var text, out _, out var status)) return status;
+
         var matches = text.Search(query, maxResults);
         if (matches.Count == 0) return $"No matches for \"{query}\".";
 
         var sb = new StringBuilder();
-        foreach (var m in matches)
-            sb.AppendLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
+        foreach (var m in matches) sb.AppendLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
         sb.Append($"({matches.Count} match(es))");
         return sb.ToString();
     }
@@ -39,13 +41,13 @@ public static class CodeCompassTools
     public static string FindDefinition(
         [Description("Exact symbol name (case-sensitive).")] string name)
     {
-        var (_, symbols) = ServerContext.Get();
+        if (!ServerContext.TryGet(out _, out var symbols, out var status)) return status;
+
         var matches = symbols.FindByName(name);
         if (matches.Count == 0) return $"No definition found for \"{name}\".";
 
         var sb = new StringBuilder();
-        foreach (var s in matches)
-            sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
+        foreach (var s in matches) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
         sb.Append($"({matches.Count} definition(s))");
         return sb.ToString();
     }
@@ -59,17 +61,15 @@ public static class CodeCompassTools
         [Description("Symbol/identifier to find references to (case-sensitive).")] string name,
         [Description("Maximum number of results.")] int maxResults = 100)
     {
-        var (text, _) = ServerContext.Get();
-        var sb = new StringBuilder();
+        if (!ServerContext.TryGet(out var text, out _, out var status)) return status;
 
-        // Precise semantic references (comments/strings excluded).
+        var sb = new StringBuilder();
         var cs = ServerContext.CSharp.FindReferences(name, maxResults);
         foreach (var s in cs) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
         var cpp = ServerContext.Cpp.FindReferences(name, maxResults);
         foreach (var s in cpp) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
-        // Lexical whole-word references for languages without a semantic analyzer.
         int semantic = cs.Count + cpp.Count;
         int lexical = 0;
         foreach (var m in text.Search(name, maxResults * 5))
@@ -92,24 +92,24 @@ public static class CodeCompassTools
         [Description("Substring to match against symbol names (case-insensitive).")] string query,
         [Description("Maximum number of results.")] int maxResults = 50)
     {
-        var (_, symbols) = ServerContext.Get();
+        if (!ServerContext.TryGet(out _, out var symbols, out var status)) return status;
+
         var matches = symbols.Find(query, maxResults);
         if (matches.Count == 0) return $"No symbols matching \"{query}\".";
 
         var sb = new StringBuilder();
-        foreach (var s in matches)
-            sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
+        foreach (var s in matches) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
         sb.Append($"({matches.Count} symbol(s))");
         return sb.ToString();
     }
 
     [McpServerTool(Name = "reindex")]
-    [Description("Rebuild the CodeCompass index for this workspace from scratch. " +
-                 "Run this after large external changes (e.g. a source-control sync) if results seem stale.")]
+    [Description("Rebuild the CodeCompass index for this workspace from scratch. Also reports index " +
+                 "status. Run this after large external changes (e.g. a source-control sync) if results seem stale.")]
     public static string Reindex()
     {
         var s = ServerContext.Rebuild();
         return $"Reindexed {s.Files} files ({s.Bytes / (1024.0 * 1024.0):F1} MB) in {s.Seconds:F2}s; " +
-               $"{s.Trigrams} trigrams, {s.Symbols} symbols.";
+               $"{s.Symbols} symbols.";
     }
 }

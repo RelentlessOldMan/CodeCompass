@@ -1,11 +1,13 @@
 using System.Diagnostics;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Hooks;
+using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Symbols;
 using CodeCompass.Core.Symbols.Segments;
 using CodeCompass.Core.Text;
+using CodeCompass.Core.Walking;
 using CodeCompass.Semantics;
 
 return args.Length == 0
@@ -48,7 +50,28 @@ static int CmdIndex(string[] args)
         return 1;
     }
 
-    var (_, _, s) = RepositoryIndexer.Build(root);
+    // Quick scan for totals so the progress bar can show percent + ETA.
+    Console.Error.Write("scanning tree...");
+    int totalFiles = 0;
+    long totalBytes = 0;
+    foreach (var f in new FileWalker(new IgnoreRules()).Walk(root)) { totalFiles++; totalBytes += f.Size; }
+    Console.Error.Write("\r" + new string(' ', 20) + "\r");
+
+    var progressSw = Stopwatch.StartNew();
+    void Progress(int files, long bytes)
+    {
+        double el = progressSw.Elapsed.TotalSeconds;
+        double mbps = el > 0 ? bytes / 1048576.0 / el : 0;
+        double pct = totalBytes > 0 ? 100.0 * bytes / totalBytes : 0;
+        double eta = mbps > 0 ? (totalBytes - bytes) / 1048576.0 / mbps : 0;
+        Console.Error.Write($"\rindexing {pct,5:F1}%  {files:N0}/{totalFiles:N0} files  " +
+                            $"{bytes / 1073741824.0:F2}/{totalBytes / 1073741824.0:F2} GB  {mbps:F0} MB/s  ETA {FormatEta(eta)}   ");
+    }
+
+    var (ti, sy, s) = RepositoryIndexer.Build(root, Progress);
+    ti.Dispose();
+    sy.Dispose();
+    Console.Error.Write("\r" + new string(' ', 90) + "\r");
 
     double mb = s.Bytes / (1024.0 * 1024.0);
     double throughput = s.Seconds > 0 ? mb / s.Seconds : 0;
@@ -234,6 +257,15 @@ static int CmdHookContext()
 
     Console.WriteLine(HookPayloads.SessionContext());
     return 0;
+}
+
+static string FormatEta(double seconds)
+{
+    if (seconds <= 0 || double.IsInfinity(seconds) || double.IsNaN(seconds)) return "--";
+    var t = TimeSpan.FromSeconds(seconds);
+    if (t.TotalHours >= 1) return $"{(int)t.TotalHours}h{t.Minutes:D2}m";
+    if (t.TotalMinutes >= 1) return $"{t.Minutes}m{t.Seconds:D2}s";
+    return $"{t.Seconds}s";
 }
 
 static int NoIndex(string root)

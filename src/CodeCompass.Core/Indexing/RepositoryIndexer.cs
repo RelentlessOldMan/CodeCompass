@@ -28,13 +28,20 @@ public static class RepositoryIndexer
 {
     private const int RebuildThreshold = 2000;
 
-    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, IndexStats Stats) Build(string root)
+    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, IndexStats Stats) Build(
+        string root, Action<int, long>? onProgress = null)
     {
         root = Path.GetFullPath(root);
         var dir = IndexStore.GetCacheDir(root);
         var walker = new FileWalker(new IgnoreRules());
         int cores = DegreeOfParallelism();
         var (textBudget, symBudget) = SegmentBudgets(cores);
+
+        int progressFiles = 0;
+        long progressBytes = 0;
+        System.Threading.Timer? progressTimer = onProgress is null ? null
+            : new System.Threading.Timer(_ => onProgress(Volatile.Read(ref progressFiles), Interlocked.Read(ref progressBytes)),
+                                         null, 500, 500);
 
         var snapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
         var textSegFiles = new ConcurrentBag<(int Num, string Name)>();
@@ -69,6 +76,8 @@ public static class RepositoryIndexer
                         worker.Symbols.Add(s);
                 worker.Snapshot[file.RelativePath] = new FileState(bytes.Length, mtime, hash);
                 worker.Bytes += bytes.Length;
+                Interlocked.Increment(ref progressFiles);
+                Interlocked.Add(ref progressBytes, bytes.Length);
 
                 if (worker.Text.ApproxBytes >= textBudget) FlushText(worker, dir, ref textSegCounter, textSegFiles);
                 if (worker.Symbols.ApproxBytes >= symBudget) FlushSymbols(worker, dir, ref symSegCounter, symSegFiles);
@@ -87,6 +96,8 @@ public static class RepositoryIndexer
             });
 
         sw.Stop();
+        progressTimer?.Dispose();
+        onProgress?.Invoke(progressFiles, progressBytes);
 
         var textOrdered = textSegFiles.OrderBy(x => x.Num).Select(x => x.Name).ToList();
         var symOrdered = symSegFiles.OrderBy(x => x.Num).Select(x => x.Name).ToList();

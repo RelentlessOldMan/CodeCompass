@@ -1,3 +1,5 @@
+using System;
+using System.Threading;
 using CodeCompass.Mcp;
 using Xunit;
 
@@ -102,5 +104,46 @@ public class McpToolsTests
         var result = CodeCompassTools.FindReferences("square");
         Assert.Contains("src/calc.cpp", result);
         Assert.Contains("square(3)", result);
+    }
+
+    [Fact]
+    public void LargeWorkspace_PuntsToCliInsteadOfIndexing()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class A { } }");
+        Environment.SetEnvironmentVariable("CODECOMPASS_MAX_AUTO_MB", "0"); // any repo "too large"
+        try
+        {
+            ServerContext.Init(repo.Root);
+            var ready = ServerContext.TryGet(out _, out _, out var status);
+            Assert.False(ready);
+            Assert.Contains("codecompass index", status);
+            // The tool relays that message rather than hanging.
+            Assert.Contains("codecompass index", CodeCompassTools.SearchCode("A"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_MAX_AUTO_MB", null);
+            ServerContext.Init(repo.Root);
+        }
+    }
+
+    [Fact]
+    public void SmallWorkspace_BackgroundIndexes_ThenServes()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class Widget { } }");
+        ServerContext.Init(repo.Root);
+
+        bool ready = false;
+        string status = "";
+        for (int i = 0; i < 200 && !ready; i++)
+        {
+            ready = ServerContext.TryGet(out _, out _, out status);
+            if (!ready) Thread.Sleep(25);
+        }
+
+        Assert.True(ready, $"index never became ready; last status: {status}");
+        Assert.Contains("Widget", CodeCompassTools.FindDefinition("Widget"));
     }
 }
