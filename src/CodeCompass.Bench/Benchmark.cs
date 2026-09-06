@@ -1,7 +1,11 @@
 using System.Diagnostics;
+using System.Runtime;
+using System.Runtime.InteropServices;
 using System.Text.Json;
+using CodeCompass.Core.Changes;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Storage;
+using CodeCompass.Core.Symbols;
 
 namespace CodeCompass.Bench;
 
@@ -21,6 +25,7 @@ public sealed record BenchResult(
     double QueryP95Ms,
     double QueryP99Ms,
     long PeakWorkingSetMb,
+    long ManagedHeapMb,
     double IncrementalSeconds,
     int IncrementalFiles)
 {
@@ -34,7 +39,7 @@ public sealed record BenchResult(
         w.WriteLine($"Index on disk:     {IndexBytes / (1024.0 * 1024.0):N1} MB  ({IndexRatio:N2}x corpus)");
         w.WriteLine($"Query latency:     p50 {QueryP50Ms:N2}ms  p95 {QueryP95Ms:N2}ms  p99 {QueryP99Ms:N2}ms");
         w.WriteLine($"Incremental:       {IncrementalSeconds:N3}s for {IncrementalFiles} added file(s)");
-        w.WriteLine($"Peak working set:  {PeakWorkingSetMb:N0} MB");
+        w.WriteLine($"Memory:            {ManagedHeapMb:N0} MB heap, {PeakWorkingSetMb:N0} MB peak working set");
     }
 
     public string ToJson() =>
@@ -55,14 +60,30 @@ public static class Benchmark
         path = Path.GetFullPath(path);
         var name = new DirectoryInfo(path).Name;
 
-        GC.Collect();
+        // Start from a compacted baseline so this repo's memory isn't inflated by a prior run.
+        GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
         GC.WaitForPendingFinalizers();
+        TrimWorkingSet(); // return retained pages so the sampled peak reflects only this repo
 
-        var (text, _, stats) = RepositoryIndexer.Build(path);
+        // Sample the working set across this run to get a true peak (PeakWorkingSet64 is a
+        // sticky process-lifetime value, useless when benchmarking several repos in one process).
+        long peakWs = 0;
+        using var cts = new CancellationTokenSource();
+        var sampler = Task.Run(() =>
+        {
+            var p = Process.GetCurrentProcess();
+            while (!cts.IsCancellationRequested)
+            {
+                p.Refresh();
+                var ws = p.WorkingSet64;
+                if (ws > peakWs) peakWs = ws;
+                Thread.Sleep(50);
+            }
+        });
 
-        var proc = Process.GetCurrentProcess();
-        proc.Refresh();
-        long peakMb = proc.PeakWorkingSet64 / (1024 * 1024);
+        var (text, symbols, stats) = RepositoryIndexer.Build(path);
+        var snapshot = LoadSnapshot(path);
 
         long indexBytes = IndexCacheBytes(path);
         double mb = stats.Bytes / (1024.0 * 1024.0);
@@ -83,19 +104,27 @@ public static class Benchmark
         }
         latencies.Sort();
 
-        var (incSeconds, incFiles) = MeasureIncremental(path);
+        var (incSeconds, incFiles) = MeasureIncremental(text, symbols, snapshot, path);
+
+        cts.Cancel();
+        try { sampler.Wait(); } catch { /* sampler shutting down */ }
+
+        long managedMb = GC.GetTotalMemory(forceFullCollection: true) / (1024 * 1024);
+        long peakWsMb = peakWs / (1024 * 1024);
         double perCore = stats.Cores > 0 ? mbps / stats.Cores : mbps;
 
         return new BenchResult(
             name, stats.Files, stats.Bytes, stats.Trigrams, stats.Symbols,
             stats.Seconds, mbps, stats.Cores, perCore, indexBytes, ratio,
             Percentile(latencies, 0.50), Percentile(latencies, 0.95), Percentile(latencies, 0.99),
-            peakMb, incSeconds, incFiles);
+            peakWsMb, managedMb, incSeconds, incFiles);
     }
 
-    // Non-destructive: add temp files, time the incremental update, then remove them.
-    // Never modifies existing files, so it's safe to point at a real repo.
-    private static (double seconds, int files) MeasureIncremental(string root)
+    // Measures the live targeted-apply path (what the MCP server does when files change):
+    // add temp files, time ApplyChanges against the in-memory index, then remove them.
+    // Non-destructive - never touches existing files and doesn't persist the probe edits.
+    private static (double seconds, int files) MeasureIncremental(
+        TrigramIndex text, SymbolIndex symbols, Dictionary<string, FileState> snapshot, string root)
     {
         const int count = 10;
         var added = new List<string>();
@@ -109,7 +138,7 @@ public static class Benchmark
             }
 
             var sw = Stopwatch.StartNew();
-            RepositoryIndexer.Update(root);
+            RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, added);
             sw.Stop();
             return (sw.Elapsed.TotalSeconds, count);
         }
@@ -117,8 +146,28 @@ public static class Benchmark
         {
             foreach (var p in added)
                 try { File.Delete(p); } catch { /* best effort */ }
-            try { RepositoryIndexer.Update(root); } catch { /* restore index to clean state */ }
+            try { RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, added); } catch { }
         }
+    }
+
+    [DllImport("psapi.dll")]
+    private static extern bool EmptyWorkingSet(IntPtr hProcess);
+
+    private static void TrimWorkingSet()
+    {
+        try { EmptyWorkingSet(Process.GetCurrentProcess().Handle); }
+        catch { /* non-Windows or not permitted: peak WS will just be less precise */ }
+    }
+
+    private static Dictionary<string, FileState> LoadSnapshot(string root)
+    {
+        var path = IndexStore.SnapshotPath(root);
+        if (File.Exists(path))
+        {
+            try { using var fs = File.OpenRead(path); return SnapshotStore.Load(fs); }
+            catch { /* fall through */ }
+        }
+        return new Dictionary<string, FileState>(StringComparer.Ordinal);
     }
 
     private static long IndexCacheBytes(string root)

@@ -11,7 +11,7 @@ public class HtmlReportTests
         BuildSeconds: 4.2, BuildMBps: 15.1, Cores: 8, BuildMBpsPerCore: 1.9,
         IndexBytes: 23_700_000, IndexRatio: 0.37,
         QueryP50Ms: 1.8, QueryP95Ms: 22.7, QueryP99Ms: 36.5,
-        PeakWorkingSetMb: 162, IncrementalSeconds: 0.97, IncrementalFiles: 10);
+        PeakWorkingSetMb: 469, ManagedHeapMb: 180, IncrementalSeconds: 0.97, IncrementalFiles: 10);
 
     [Fact]
     public void Generate_ProducesSelfContainedHtml()

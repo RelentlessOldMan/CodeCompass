@@ -135,12 +135,24 @@ static int CmdAll(string[] args)
         var root = CorpusFetcher.LocalRoot(c.Id);
         if (root is null) { skipped.Add(c.Id); continue; }
 
-        Console.Error.WriteLine($"[{c.Id}] benchmarking...");
-        var bench = Benchmark.Run(root);
-        Console.Error.WriteLine($"[{c.Id}] verifying...");
-        var oracle = Verifier.LexicalOracle(root, 100L * 1024 * 1024, 40);
-        var correctness = oracle.Mismatches == 0 ? "PASS" : $"FAIL ({oracle.Mismatches})";
-        rows.Add(new ReportRow(c.Id, c.Language, bench, correctness));
+        try
+        {
+            Console.Error.WriteLine($"[{c.Id}] benchmarking...");
+            var bench = Benchmark.Run(root);
+            Console.Error.WriteLine($"[{c.Id}] verifying...");
+            var oracle = Verifier.LexicalOracle(root, 100L * 1024 * 1024, 40);
+            var correctness = oracle.Mismatches == 0 ? "PASS" : $"FAIL ({oracle.Mismatches})";
+            rows.Add(new ReportRow(c.Id, c.Language, bench, correctness));
+
+            Console.WriteLine();
+            bench.Print(Console.Out);
+            Console.WriteLine($"Correctness:       {correctness} ({oracle.Queries} oracle queries)");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[{c.Id}] ERROR: {ex.GetType().Name}: {ex.Message}");
+            skipped.Add($"{c.Id} (error)");
+        }
     }
 
     if (rows.Count == 0)

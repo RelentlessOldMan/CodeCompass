@@ -57,7 +57,7 @@ public static class HtmlReport
         sb.Append("</div>");
 
         sb.Append("<table><thead><tr>");
-        foreach (var h in new[] { "Repo", "Lang", "Files", "Text MB", "Build s", "MB/s", "MB/s/core", "Cores", "Index x", "p50 ms", "p95 ms", "p99 ms", "Incr s", "Peak MB", "Correct" })
+        foreach (var h in new[] { "Repo", "Lang", "Files", "Text MB", "Build s", "MB/s", "MB/s/core", "Cores", "Index x", "p50 ms", "p95 ms", "p99 ms", "Incr s", "Heap MB", "Peak MB", "Correct" })
             sb.Append($"<th>{h}</th>");
         sb.Append("</tr></thead><tbody>");
 
@@ -78,6 +78,7 @@ public static class HtmlReport
             Num(sb, $"{b.QueryP95Ms:N2}");
             Num(sb, $"{b.QueryP99Ms:N2}");
             Num(sb, $"{b.IncrementalSeconds:N3}");
+            Num(sb, $"{b.ManagedHeapMb:N0}");
             Num(sb, $"{b.PeakWorkingSetMb:N0}");
             sb.Append($"<td>{CorrectnessBadge(r.Correctness)}</td>");
             sb.Append("</tr>");
