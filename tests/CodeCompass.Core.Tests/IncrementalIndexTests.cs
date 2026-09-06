@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using CodeCompass.Core.Indexing;
+using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Symbols;
 using Xunit;
 
@@ -18,7 +19,7 @@ public class IncrementalIndexTests
         File.SetLastWriteTimeUtc(full, DateTime.UtcNow.AddSeconds(secondsAhead));
     }
 
-    private static HashSet<string> SearchSet(TrigramIndex idx, string q) =>
+    private static HashSet<string> SearchSet(SegmentedIndex idx, string q) =>
         idx.Search(q, 1_000_000).Select(m => $"{m.Path}:{m.Line}:{m.Column}").ToHashSet();
 
     private static HashSet<string> NameSet(SymbolIndex idx, string n) =>

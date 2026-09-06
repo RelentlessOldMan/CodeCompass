@@ -2,6 +2,8 @@ using System.Diagnostics;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Hooks;
 using CodeCompass.Core.Indexing;
+using CodeCompass.Core.Indexing.Segments;
+using CodeCompass.Core.Symbols;
 using CodeCompass.Core.Text;
 using CodeCompass.Semantics;
 
@@ -65,7 +67,8 @@ static int CmdUpdate(string[] args)
     var root = Path.GetFullPath(args[1]);
     if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
 
-    var (_, _, s) = RepositoryIndexer.Update(root);
+    var (idx, _, s) = RepositoryIndexer.Update(root);
+    idx.Dispose();
     if (s.FullRebuild)
         Console.WriteLine($"Full rebuild ({s.Added} files) in {s.Seconds:F2}s");
     else
@@ -79,21 +82,41 @@ static int CmdWatch(string[] args)
     var root = Path.GetFullPath(args[1]);
     if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
 
-    if (!RepositoryIndexer.TryLoad(root, out _, out _))
+    SegmentedIndex text;
+    SymbolIndex symbols;
+    if (RepositoryIndexer.TryLoad(root, out text, out symbols))
+    {
+        Console.Error.WriteLine("loaded existing index");
+    }
+    else
     {
         Console.Error.WriteLine("building initial index...");
         var b = RepositoryIndexer.Build(root);
+        text = b.Text;
+        symbols = b.Symbols;
         Console.Error.WriteLine($"indexed {b.Stats.Files} files");
     }
+    var snapshot = RepositoryIndexer.LoadSnapshot(root);
 
+    // Keep the index in memory and apply targeted changes in place (no reopen per batch).
     using var watcher = new RepositoryWatcher(root, batch =>
     {
-        var (_, _, s) = batch.FullReconcile
-            ? RepositoryIndexer.Update(root)                      // events lost: full reconcile
-            : RepositoryIndexer.UpdatePaths(root, batch.ChangedFullPaths); // targeted
-        if (s.Added != 0 || s.Modified != 0 || s.Removed != 0 || s.FullRebuild)
-            Console.Error.WriteLine($"reindexed: +{s.Added} ~{s.Modified} -{s.Removed}" +
-                                    (s.FullRebuild ? " (full rebuild)" : ""));
+        if (batch.FullReconcile)
+        {
+            text.Dispose();
+            var b = RepositoryIndexer.Build(root);
+            text = b.Text;
+            symbols = b.Symbols;
+            snapshot = RepositoryIndexer.LoadSnapshot(root);
+            Console.Error.WriteLine("reindexed: full rebuild");
+        }
+        else
+        {
+            var c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, batch.ChangedFullPaths);
+            RepositoryIndexer.Persist(root, text, symbols, snapshot);
+            if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
+                Console.Error.WriteLine($"reindexed: +{c.Added} ~{c.Modified} -{c.Removed}");
+        }
     });
     watcher.Start();
 
@@ -101,6 +124,7 @@ static int CmdWatch(string[] args)
     using var exit = new ManualResetEventSlim(false);
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; exit.Set(); };
     exit.Wait();
+    text.Dispose();
     return 0;
 }
 

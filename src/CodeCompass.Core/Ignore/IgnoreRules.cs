@@ -13,7 +13,7 @@ public sealed class IgnoreRules
         ".git", ".hg", ".svn", ".vs", ".vscode", ".idea",
         "bin", "obj", "node_modules", "packages", "dist", "build", "out", "target",
         ".gradle", "__pycache__", ".pytest_cache", ".mypy_cache", "venv", ".venv",
-        "coverage", ".codecompass", ".next", ".nuget",
+        "coverage", ".codecompass", ".corpus", ".next", ".nuget",
     };
 
     // Extensions we never index (binary / assets). Lowercase, leading dot.

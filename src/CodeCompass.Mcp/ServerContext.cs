@@ -1,5 +1,6 @@
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Indexing;
+using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Storage;
 using CodeCompass.Core.Symbols;
 using CodeCompass.Semantics;
@@ -7,14 +8,14 @@ using CodeCompass.Semantics;
 namespace CodeCompass.Mcp;
 
 /// <summary>
-/// Holds the single repository this server instance serves, plus its in-memory indexes,
-/// change snapshot, and the (lazily built) semantic analyzers. The MCP server is launched
-/// per workspace, so the root is fixed at startup and tools never pass paths around.
+/// Holds the single repository this server instance serves, plus its in-memory symbol
+/// index, change snapshot, the memory-mapped segmented text index, and the (lazily built)
+/// semantic analyzers. Launched per workspace, so the root is fixed at startup.
 /// </summary>
 public static class ServerContext
 {
     private static readonly object Gate = new();
-    private static TrigramIndex? _text;
+    private static SegmentedIndex? _text;
     private static SymbolIndex? _symbols;
     private static Dictionary<string, FileState>? _snapshot;
     private static RoslynCSharpAnalyzer? _csharp;
@@ -28,6 +29,7 @@ public static class ServerContext
         lock (Gate)
         {
             Root = Path.GetFullPath(root);
+            _text?.Dispose();
             _text = null;
             _symbols = null;
             _snapshot = null;
@@ -36,7 +38,7 @@ public static class ServerContext
         }
     }
 
-    public static (TrigramIndex Text, SymbolIndex Symbols) Get()
+    public static (SegmentedIndex Text, SymbolIndex Symbols) Get()
     {
         lock (Gate)
         {
@@ -59,6 +61,8 @@ public static class ServerContext
     {
         lock (Gate)
         {
+            _text?.Dispose(); // release mmaps before rebuilding
+            _text = null;
             var built = RepositoryIndexer.Build(Root);
             _text = built.Text;
             _symbols = built.Symbols;
@@ -87,9 +91,11 @@ public static class ServerContext
             EnsureLoaded();
             if (batch.FullReconcile)
             {
-                var (text, symbols, _) = RepositoryIndexer.Update(Root);
-                _text = text;
-                _symbols = symbols;
+                _text!.Dispose();
+                _text = null;
+                var built = RepositoryIndexer.Build(Root);
+                _text = built.Text;
+                _symbols = built.Symbols;
                 _snapshot = LoadSnapshot();
             }
             else

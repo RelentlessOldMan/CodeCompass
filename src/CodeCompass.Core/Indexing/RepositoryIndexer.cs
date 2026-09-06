@@ -1,7 +1,9 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Ignore;
+using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Storage;
 using CodeCompass.Core.Symbols;
 using CodeCompass.Core.Text;
@@ -16,62 +18,68 @@ public sealed record UpdateStats(int Added, int Modified, int Removed, double Se
 public sealed record ChangeCounts(int Added, int Modified, int Removed);
 
 /// <summary>
-/// Builds and loads a repository's on-disk indexes (trigram text + symbols) and the
-/// content snapshot used for change detection. Shared by the CLI and the MCP server.
-/// A full build reads each file exactly once (hashing, trigrams and symbols together);
-/// <see cref="Update"/> reconciles incrementally, re-reading only files that changed.
+/// Builds and loads a repository's on-disk index (segmented, memory-mapped trigram index +
+/// symbols + a content snapshot for change detection). Shared by the CLI and MCP server.
+/// A full build reads each file once and streams trigram postings to disk segments so build
+/// memory stays bounded regardless of repo size; <see cref="Update"/>/<see cref="UpdatePaths"/>
+/// reconcile incrementally. Callers own returned <see cref="SegmentedIndex"/> instances and
+/// should Dispose long-lived ones.
 /// </summary>
 public static class RepositoryIndexer
 {
     // Above this many changed files an incremental update isn't worth it; rebuild instead.
     private const int RebuildThreshold = 2000;
 
-    public static (TrigramIndex Text, SymbolIndex Symbols, IndexStats Stats) Build(string root)
+    public static (SegmentedIndex Text, SymbolIndex Symbols, IndexStats Stats) Build(string root)
     {
         root = Path.GetFullPath(root);
+        var dir = IndexStore.GetCacheDir(root);
         var walker = new FileWalker(new IgnoreRules());
         int cores = DegreeOfParallelism();
+        long budget = SegmentedIndex.DefaultBudgetBytes;
 
-        var text = TrigramIndex.Create(root);
         var symbols = new SymbolIndex();
         var snapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
+        var segFiles = new ConcurrentBag<(int Num, string Name)>();
         long totalBytes = 0;
         var gate = new object();
+        int segCounter = SegmentedIndex.NextSegmentNumber(dir); // monotonic; never reuse/overwrite
 
         var sw = Stopwatch.StartNew();
 
-        // Each worker accumulates a private, lock-free partial (its own trigram index,
-        // symbol list, snapshot). The heavy per-file work (read, hash, trigram extraction,
-        // tree-sitter parse) never contends; the only lock is one merge per worker at the
-        // end - so contention is O(threads), not O(files).
+        // Each worker fills its own SegmentBuilder lock-free and flushes a segment file when it
+        // crosses the byte budget - so build RAM is ~cores x budget, not O(repo). Symbols and the
+        // snapshot are merged under one lock per event (cheap relative to parse/trigram work).
         Parallel.ForEach(
             walker.Walk(root),
             new ParallelOptions { MaxDegreeOfParallelism = cores },
-            () => new BuildWorker(root),
+            () => new BuildWorker(),
             (file, _, worker) =>
             {
                 byte[] bytes;
                 try { bytes = File.ReadAllBytes(file.FullPath); }
                 catch { return worker; }
-
                 if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return worker;
 
                 var content = TextDecoder.FromBytes(bytes);
                 var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
                 var hash = Convert.ToHexString(SHA256.HashData(bytes));
 
-                worker.Text.AddDocument(file.RelativePath, TrigramIndex.ComputeTrigrams(content));
+                worker.Builder.AddDocument(file.RelativePath, TrigramIndex.ComputeTrigrams(content));
                 if (LanguageRegistry.ForPath(file.RelativePath) is not null)
                     worker.Symbols.AddRange(worker.Extractor.Extract(file.RelativePath, content));
                 worker.Snapshot[file.RelativePath] = new FileState(bytes.Length, mtime, hash);
                 worker.Bytes += bytes.Length;
+
+                if (worker.Builder.ApproxBytes >= budget)
+                    FlushWorkerSegment(worker, dir, ref segCounter, segFiles);
                 return worker;
             },
             worker =>
             {
+                FlushWorkerSegment(worker, dir, ref segCounter, segFiles);
                 lock (gate)
                 {
-                    text.MergeFrom(worker.Text);
                     foreach (var s in worker.Symbols) symbols.Add(s);
                     foreach (var (rel, state) in worker.Snapshot) snapshot[rel] = state;
                     totalBytes += worker.Bytes;
@@ -81,12 +89,25 @@ public static class RepositoryIndexer
 
         sw.Stop();
 
-        SaveAll(root, text, symbols, snapshot);
+        var ordered = segFiles.OrderBy(x => x.Num).Select(x => x.Name).ToList();
+        var text = SegmentedIndex.FromSegmentFiles(root, dir, ordered, segCounter, budget);
+        SaveSymbols(root, symbols);
+        SaveSnapshot(root, snapshot);
 
-        long indexBytes = new FileInfo(IndexStore.IndexPath(root)).Length;
-        var stats = new IndexStats(text.DocumentCount, totalBytes, text.TrigramCount,
-                                   symbols.Count, sw.Elapsed.TotalSeconds, indexBytes, cores);
+        var stats = new IndexStats(text.DocumentCount, totalBytes, (int)text.TotalTerms,
+                                   symbols.Count, sw.Elapsed.TotalSeconds, text.IndexBytes, cores);
         return (text, symbols, stats);
+    }
+
+    private static void FlushWorkerSegment(BuildWorker worker, string dir, ref int segCounter,
+                                           ConcurrentBag<(int, string)> segFiles)
+    {
+        if (worker.Builder.DocCount == 0) return;
+        int num = Interlocked.Increment(ref segCounter) - 1;
+        var name = SegmentedIndex.SegmentFileName(num);
+        worker.Builder.WriteTo(Path.Combine(dir, name));
+        segFiles.Add((num, name));
+        worker.Builder = new SegmentBuilder();
     }
 
     /// <summary>Indexing parallelism: CODECOMPASS_THREADS if set (and valid), else all cores.</summary>
@@ -97,34 +118,27 @@ public static class RepositoryIndexer
         return Environment.ProcessorCount;
     }
 
-    // Per-thread accumulator: a private partial index merged into the global once at the end.
     private sealed class BuildWorker
     {
-        public TrigramIndex Text { get; }
+        public SegmentBuilder Builder = new();
         public List<Symbol> Symbols { get; } = new();
         public Dictionary<string, FileState> Snapshot { get; } = new(StringComparer.Ordinal);
         public TreeSitterSymbolExtractor Extractor { get; } = new();
         public long Bytes;
-
-        public BuildWorker(string root) => Text = TrigramIndex.Create(root);
     }
 
     /// <summary>
-    /// Incrementally reconcile the on-disk indexes with the current file tree. Only files
-    /// whose size+mtime changed are read; those whose content hash still matches are skipped
-    /// (touched-but-identical). Falls back to a full rebuild if the index/snapshot is missing
-    /// or if too many files changed at once (e.g. a branch switch).
+    /// Incrementally reconcile the on-disk index with the current tree. Only files whose
+    /// size+mtime changed are read; touched-but-identical files are skipped. Falls back to a
+    /// full rebuild if there's no prior index or too many files changed (e.g. a branch switch).
     /// </summary>
-    public static (TrigramIndex Text, SymbolIndex Symbols, UpdateStats Stats) Update(string root)
+    public static (SegmentedIndex Text, SymbolIndex Symbols, UpdateStats Stats) Update(string root)
     {
         root = Path.GetFullPath(root);
         var sw = Stopwatch.StartNew();
 
         if (!TryLoad(root, out var text, out var symbols) || !TryLoadSnapshot(root, out var old))
-        {
-            var b = Build(root);
-            return (b.Text, b.Symbols, new UpdateStats(b.Stats.Files, 0, 0, b.Stats.Seconds, FullRebuild: true));
-        }
+            return FullRebuild(root, text, sw);
 
         var walker = new FileWalker(new IgnoreRules());
         var newSnapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
@@ -139,10 +153,9 @@ public static class RepositoryIndexer
                 seen.Add(rel);
                 var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
 
-                // Fast path: unchanged size+mtime => reuse old state, no read.
                 if (old.TryGetValue(rel, out var os) && os.Size == file.Size && os.MTimeTicks == mtime)
                 {
-                    newSnapshot[rel] = os;
+                    newSnapshot[rel] = os; // unchanged: no read
                     continue;
                 }
 
@@ -152,11 +165,9 @@ public static class RepositoryIndexer
                 if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) continue;
 
                 var hash = Convert.ToHexString(SHA256.HashData(bytes));
-
-                // Touched but identical content: refresh mtime/size, don't re-index.
                 if (old.TryGetValue(rel, out var os2) && os2.ContentHash == hash)
                 {
-                    newSnapshot[rel] = new FileState(bytes.Length, mtime, hash);
+                    newSnapshot[rel] = new FileState(bytes.Length, mtime, hash); // touched but identical
                     continue;
                 }
 
@@ -166,7 +177,6 @@ public static class RepositoryIndexer
                 symbols.RemovePath(rel);
                 if (LanguageRegistry.ForPath(rel) is not null)
                     symbols.AddForPath(rel, extractor.Extract(rel, content));
-
                 newSnapshot[rel] = new FileState(bytes.Length, mtime, hash);
                 if (old.ContainsKey(rel)) modified++; else added++;
             }
@@ -180,53 +190,47 @@ public static class RepositoryIndexer
             removed++;
         }
 
-        // Large change (branch switch etc.): a clean rebuild is cheaper and reclaims tombstones.
         if (added + modified + removed > RebuildThreshold)
-        {
-            var b = Build(root);
-            return (b.Text, b.Symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, true));
-        }
+            return FullRebuild(root, text, sw);
 
         SaveAll(root, text, symbols, newSnapshot);
         sw.Stop();
         return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false));
     }
 
-    /// <summary>
-    /// Disk-based targeted update: apply just the given changed paths to the on-disk index.
-    /// Falls back to a full build if there is no prior index, or to a full reconcile-scale
-    /// rebuild if too many paths changed at once. Much cheaper than <see cref="Update"/> for
-    /// small changes because it never re-walks the whole tree.
-    /// </summary>
-    public static (TrigramIndex Text, SymbolIndex Symbols, UpdateStats Stats) UpdatePaths(
+    /// <summary>Disk-based targeted update: apply just the given changed paths. Never re-walks
+    /// the whole tree, so it's cheap for small changes.</summary>
+    public static (SegmentedIndex Text, SymbolIndex Symbols, UpdateStats Stats) UpdatePaths(
         string root, IReadOnlyCollection<string> changedFullPaths)
     {
         root = Path.GetFullPath(root);
         var sw = Stopwatch.StartNew();
 
         if (!TryLoad(root, out var text, out var symbols) || !TryLoadSnapshot(root, out var snapshot))
-        {
-            var b = Build(root);
-            return (b.Text, b.Symbols, new UpdateStats(b.Stats.Files, 0, 0, b.Stats.Seconds, true));
-        }
+            return FullRebuild(root, text, sw);
         if (changedFullPaths.Count > RebuildThreshold)
-        {
-            var b = Build(root);
-            return (b.Text, b.Symbols, new UpdateStats(b.Stats.Files, 0, 0, b.Stats.Seconds, true));
-        }
+            return FullRebuild(root, text, sw);
 
         var counts = ApplyChanges(text, symbols, snapshot, root, changedFullPaths);
         SaveAll(root, text, symbols, snapshot);
         return (text, symbols, new UpdateStats(counts.Added, counts.Modified, counts.Removed, sw.Elapsed.TotalSeconds, false));
     }
 
+    private static (SegmentedIndex, SymbolIndex, UpdateStats) FullRebuild(string root, SegmentedIndex? old, Stopwatch sw)
+    {
+        old?.Dispose(); // release mmaps before rebuilding
+        var b = Build(root);
+        sw.Stop();
+        return (b.Text, b.Symbols, new UpdateStats(b.Stats.Files, 0, 0, b.Stats.Seconds, FullRebuild: true));
+    }
+
     /// <summary>
-    /// Apply a set of changed paths to already-loaded in-memory indexes (does not persist).
-    /// Handles files (add/modify/delete/touched-identical), new or renamed directories
-    /// (re-index the subtree), and deleted directories (remove everything under the prefix).
+    /// Apply changed paths to already-loaded in-memory indexes (does not persist). Handles files
+    /// (add/modify/delete/touched-identical), new/renamed directories (re-index the subtree), and
+    /// deleted directories (remove everything under the prefix).
     /// </summary>
     public static ChangeCounts ApplyChanges(
-        TrigramIndex text, SymbolIndex symbols, Dictionary<string, FileState> snapshot,
+        SegmentedIndex text, SymbolIndex symbols, Dictionary<string, FileState> snapshot,
         string root, IEnumerable<string> changedFullPaths)
     {
         root = Path.GetFullPath(root);
@@ -243,7 +247,6 @@ public static class RepositoryIndexer
 
             if (Directory.Exists(full))
             {
-                // New or renamed directory: (re)index every file beneath it.
                 foreach (var f in new FileWalker(ignore).Walk(full))
                 {
                     var childRel = Path.GetRelativePath(root, f.FullPath).Replace('\\', '/');
@@ -258,7 +261,6 @@ public static class RepositoryIndexer
             }
             else
             {
-                // Vanished path: remove the exact entry and anything beneath it (deleted dir).
                 RemovePathAndChildren(text, symbols, snapshot, rel, ref removed);
             }
         }
@@ -266,19 +268,18 @@ public static class RepositoryIndexer
         return new ChangeCounts(added, modified, removed);
     }
 
-    /// <summary>Persist in-memory indexes + snapshot to the cache.</summary>
-    public static void Persist(string root, TrigramIndex text, SymbolIndex symbols,
+    /// <summary>Persist in-memory index + symbols + snapshot to the cache.</summary>
+    public static void Persist(string root, SegmentedIndex text, SymbolIndex symbols,
                                IReadOnlyDictionary<string, FileState> snapshot) =>
         SaveAll(root, text, symbols, snapshot);
 
     private static void ApplyFile(
-        TrigramIndex text, SymbolIndex symbols, Dictionary<string, FileState> snapshot,
+        SegmentedIndex text, SymbolIndex symbols, Dictionary<string, FileState> snapshot,
         string rel, string full, IgnoreRules ignore, TreeSitterSymbolExtractor extractor,
         ref int added, ref int modified, ref int removed)
     {
         bool wasPresent = snapshot.ContainsKey(rel);
 
-        // Ignored path (e.g. now under bin/, or an ignored extension): ensure it isn't indexed.
         if (IsIgnoredRelPath(rel, ignore))
         {
             if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); removed++; }
@@ -317,7 +318,7 @@ public static class RepositoryIndexer
     }
 
     private static void RemovePathAndChildren(
-        TrigramIndex text, SymbolIndex symbols, Dictionary<string, FileState> snapshot,
+        SegmentedIndex text, SymbolIndex symbols, Dictionary<string, FileState> snapshot,
         string rel, ref int removed)
     {
         if (snapshot.Remove(rel))
@@ -347,26 +348,31 @@ public static class RepositoryIndexer
         return ignore.IsIgnoredFile(parts[^1], 0);
     }
 
-    public static bool TryLoad(string root, out TrigramIndex text, out SymbolIndex symbols)
+    public static bool TryLoad(string root, out SegmentedIndex text, out SymbolIndex symbols)
     {
         root = Path.GetFullPath(root);
         text = null!;
         symbols = null!;
+        var dir = IndexStore.GetCacheDir(root);
         try
         {
-            var indexPath = IndexStore.IndexPath(root);
             var symbolPath = IndexStore.SymbolIndexPath(root);
-            if (!File.Exists(indexPath) || !File.Exists(symbolPath)) return false;
-            using (var fs = File.OpenRead(indexPath)) text = TrigramIndex.Load(fs);
+            if (!SegmentedIndex.Exists(dir) || !File.Exists(symbolPath)) return false;
+            text = SegmentedIndex.Open(root, dir);
             using (var fs = File.OpenRead(symbolPath)) symbols = SymbolIndex.Load(fs);
             return true;
         }
         catch
         {
-            // Corrupt or incompatible (older format) index: signal caller to rebuild.
+            text?.Dispose();
+            text = null!;
             return false;
         }
     }
+
+    /// <summary>Load the change-detection snapshot for a repo (empty if none exists).</summary>
+    public static Dictionary<string, FileState> LoadSnapshot(string root) =>
+        TryLoadSnapshot(root, out var s) ? s : new Dictionary<string, FileState>(StringComparer.Ordinal);
 
     private static bool TryLoadSnapshot(string root, out Dictionary<string, FileState> snapshot)
     {
@@ -382,11 +388,23 @@ public static class RepositoryIndexer
         catch { return false; }
     }
 
-    private static void SaveAll(string root, TrigramIndex text, SymbolIndex symbols,
-                                IReadOnlyDictionary<string, FileState> snapshot)
+    private static void SaveAll(string root, SegmentedIndex text, SymbolIndex symbols,
+                               IReadOnlyDictionary<string, FileState> snapshot)
     {
-        using (var fs = File.Create(IndexStore.IndexPath(root))) text.Save(fs);
-        using (var fs = File.Create(IndexStore.SymbolIndexPath(root))) symbols.Save(fs);
-        using (var fs = File.Create(IndexStore.SnapshotPath(root))) SnapshotStore.Save(fs, snapshot);
+        text.Flush();
+        SaveSymbols(root, symbols);
+        SaveSnapshot(root, snapshot);
+    }
+
+    private static void SaveSymbols(string root, SymbolIndex symbols)
+    {
+        using var fs = File.Create(IndexStore.SymbolIndexPath(root));
+        symbols.Save(fs);
+    }
+
+    private static void SaveSnapshot(string root, IReadOnlyDictionary<string, FileState> snapshot)
+    {
+        using var fs = File.Create(IndexStore.SnapshotPath(root));
+        SnapshotStore.Save(fs, snapshot);
     }
 }
