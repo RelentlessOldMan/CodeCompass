@@ -34,8 +34,7 @@ public static class RepositoryIndexer
         var dir = IndexStore.GetCacheDir(root);
         var walker = new FileWalker(new IgnoreRules());
         int cores = DegreeOfParallelism();
-        long textBudget = SegmentedIndex.DefaultBudgetBytes;
-        long symBudget = SegmentedSymbolIndex.DefaultBudgetBytes;
+        var (textBudget, symBudget) = SegmentBudgets(cores);
 
         var snapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
         var textSegFiles = new ConcurrentBag<(int Num, string Name)>();
@@ -126,6 +125,33 @@ public static class RepositoryIndexer
         var env = Environment.GetEnvironmentVariable("CODECOMPASS_THREADS");
         if (int.TryParse(env, out var n) && n > 0) return n;
         return Environment.ProcessorCount;
+    }
+
+    /// <summary>
+    /// Per-worker trigram/symbol segment byte budgets, scaled so total build buffers
+    /// (cores x (text+symbol)) fit a fraction of available RAM - keeps first-time builds
+    /// within reach on small machines. Override the text budget with CODECOMPASS_SEGMENT_MB.
+    /// </summary>
+    public static (long Text, long Symbol) SegmentBudgets(int cores)
+    {
+        cores = Math.Max(1, cores);
+        var envMb = Environment.GetEnvironmentVariable("CODECOMPASS_SEGMENT_MB");
+        if (int.TryParse(envMb, out var mb) && mb > 0)
+        {
+            long t = mb * 1024L * 1024;
+            return (t, Math.Max(2L * 1024 * 1024, t / 2));
+        }
+
+        long avail;
+        try { avail = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; }
+        catch { avail = 8L * 1024 * 1024 * 1024; }
+        if (avail <= 0) avail = 8L * 1024 * 1024 * 1024;
+
+        long totalBuffers = Math.Clamp(avail / 8, 128L * 1024 * 1024, 4L * 1024 * 1024 * 1024);
+        long perCore = totalBuffers / cores;
+        long text = Math.Clamp(perCore * 2 / 3, 4L * 1024 * 1024, 128L * 1024 * 1024);
+        long symbol = Math.Clamp(perCore / 3, 2L * 1024 * 1024, 64L * 1024 * 1024);
+        return (text, symbol);
     }
 
     private sealed class BuildWorker
