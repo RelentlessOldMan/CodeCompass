@@ -129,6 +129,30 @@ so <b>searching</b> a repo this size uses only a few hundred MB. First-time buil
 <code>CODECOMPASS_SEGMENT_MB</code> / <code>CODECOMPASS_THREADS</code>.
 </div>
 
+<h2>Logs &amp; troubleshooting</h2>
+<p>CodeCompass keeps a self-limiting log on disk so problems can be diagnosed after the fact
+without watching it live. Everything lives in one folder &mdash; run <code>codecompass logs</code> to
+print the location and the current files:</p>
+<pre>%LOCALAPPDATA%\CodeCompass\logs\
+  codecompass.log              common log: startup + every warning/error, all repos
+  repo-&lt;name&gt;-&lt;key&gt;.log         per-repo log: full detail (builds, incremental reindex, skips)</pre>
+<p>Each file is <b>size-capped and rotated</b> (default 5 MB &times; 4 files kept), so the logs can
+never grow unbounded &mdash; at most ~20 MB per file family. Warnings and errors from a repo are
+mirrored up into the common log, so that one file is the first place to look when something's off.</p>
+<table>
+<thead><tr><th>Setting</th><th style="text-align:left">Effect</th></tr></thead>
+<tbody>
+<tr><td><code>CODECOMPASS_LOG_LEVEL</code></td><td style="text-align:left">off / error / warn / <b>info</b> (default) / debug</td></tr>
+<tr><td><code>CODECOMPASS_LOG</code>=0</td><td style="text-align:left">disable logging entirely</td></tr>
+<tr><td><code>CODECOMPASS_LOG_DIR</code></td><td style="text-align:left">write logs somewhere other than the default folder</td></tr>
+<tr><td><code>CODECOMPASS_LOG_MAX_MB</code></td><td style="text-align:left">rotate each file at this size (default 5)</td></tr>
+<tr><td><code>CODECOMPASS_LOG_KEEP</code></td><td style="text-align:left">how many rotated files to keep (default 3)</td></tr>
+</tbody>
+</table>
+<p class="muted">Logging never throws and never blocks indexing or search &mdash; if the log can't be
+written it's silently skipped. Set <code>CODECOMPASS_LOG_LEVEL=debug</code> to record per-file skips
+and detailed build stats when chasing a specific issue.</p>
+
 <footer>
 CodeCompass &mdash; local code intelligence for AI agents. Fully local, no GPU, minimal token footprint (5 MCP tools).
 Perf figures measured on the machine noted above; your numbers will vary with hardware and codebase.

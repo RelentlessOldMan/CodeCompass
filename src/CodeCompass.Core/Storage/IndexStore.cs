@@ -10,17 +10,23 @@ namespace CodeCompass.Core.Storage;
 /// </summary>
 public static class IndexStore
 {
-    public static string GetCacheDir(string repoRoot)
+    /// <summary>The per-user CodeCompass root (%LOCALAPPDATA%\CodeCompass), holding index
+    /// caches and the shared <c>logs</c> folder. One place to manage or clear everything.</summary>
+    public static string BaseDir()
     {
-        repoRoot = Path.GetFullPath(repoRoot);
-        var key = Convert.ToHexString(
-            SHA256.HashData(Encoding.UTF8.GetBytes(repoRoot.ToLowerInvariant())))[..16];
-
         var baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrEmpty(baseDir))
             baseDir = Path.Combine(Path.GetTempPath(), "CodeCompass-cache");
+        return Path.Combine(baseDir, "CodeCompass");
+    }
 
-        var dir = Path.Combine(baseDir, "CodeCompass", key);
+    /// <summary>Stable short key for a repo path (used for its cache dir and per-repo log name).</summary>
+    public static string RepoKey(string repoRoot) => Convert.ToHexString(
+        SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(repoRoot).ToLowerInvariant())))[..16];
+
+    public static string GetCacheDir(string repoRoot)
+    {
+        var dir = Path.Combine(BaseDir(), RepoKey(repoRoot));
         Directory.CreateDirectory(dir);
         return dir;
     }

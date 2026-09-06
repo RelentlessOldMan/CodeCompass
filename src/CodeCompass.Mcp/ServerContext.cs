@@ -1,4 +1,5 @@
 using CodeCompass.Core.Changes;
+using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
@@ -117,6 +118,7 @@ public static class ServerContext
     {
         lock (Gate)
         {
+            Log.For(Root).Info("manual reindex requested");
             _text?.Dispose();
             _symbols?.Dispose();
             _text = null;
@@ -128,6 +130,7 @@ public static class ServerContext
             _csharp = null;
             _cpp = null;
             _state = IndexState.Ready;
+            Log.For(Root).Info($"manual reindex complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
             return built.Stats;
         }
     }
@@ -153,6 +156,7 @@ public static class ServerContext
             _text = text;
             _symbols = symbols;
             _state = IndexState.Ready;
+            Log.For(Root).Info($"loaded existing index ({_text.DocumentCount:N0} files)");
             return;
         }
 
@@ -161,6 +165,7 @@ public static class ServerContext
         if (ExceedsAutoLimit(out var total))
         {
             _state = IndexState.NeedsCliBuild;
+            Log.For(Root).Info($"workspace over auto-index limit ({total / 1048576.0:F0} MB); deferring to CLI build");
             return;
         }
 
@@ -168,14 +173,24 @@ public static class ServerContext
         _progressFiles = 0;
         _progressBytes = 0;
         _state = IndexState.Building;
+        Log.For(Root).Info($"background build started ({total / 1048576.0:F0} MB)");
         _buildTask = Task.Run(() =>
         {
-            var built = RepositoryIndexer.Build(Root, (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); });
-            lock (Gate)
+            try
             {
-                _text = built.Text;
-                _symbols = built.Symbols;
-                _state = IndexState.Ready;
+                var built = RepositoryIndexer.Build(Root, (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); });
+                lock (Gate)
+                {
+                    _text = built.Text;
+                    _symbols = built.Symbols;
+                    _state = IndexState.Ready;
+                }
+                Log.For(Root).Info($"background build complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+            }
+            catch (Exception ex)
+            {
+                lock (Gate) { _state = IndexState.NeedsCliBuild; }
+                Log.For(Root).Error("background build failed; falling back to CLI-build state", ex);
             }
         });
     }
@@ -214,25 +229,36 @@ public static class ServerContext
         {
             if (_state != IndexState.Ready) return; // don't build from the watcher; that's on-demand/CLI
 
-            if (batch.FullReconcile)
+            try
             {
-                _text!.Dispose();
-                _symbols!.Dispose();
-                _text = null;
-                _symbols = null;
-                var built = RepositoryIndexer.Build(Root);
-                _text = built.Text;
-                _symbols = built.Symbols;
-                _snapshot = null;
+                if (batch.FullReconcile)
+                {
+                    Log.For(Root).Info("watcher requested full reconcile; rebuilding");
+                    _text!.Dispose();
+                    _symbols!.Dispose();
+                    _text = null;
+                    _symbols = null;
+                    var built = RepositoryIndexer.Build(Root);
+                    _text = built.Text;
+                    _symbols = built.Symbols;
+                    _snapshot = null;
+                }
+                else
+                {
+                    _snapshot ??= LoadSnapshot();
+                    var c = RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, batch.ChangedFullPaths);
+                    RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
+                    if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
+                        Log.For(Root).Info($"incremental reindex: +{c.Added} ~{c.Modified} -{c.Removed} " +
+                                           $"({batch.ChangedFullPaths.Count} path(s) changed)");
+                }
+                _csharp = null;
+                _cpp = null;
             }
-            else
+            catch (Exception ex)
             {
-                _snapshot ??= LoadSnapshot();
-                RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, batch.ChangedFullPaths);
-                RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
+                Log.For(Root).Error("incremental reindex failed", ex);
             }
-            _csharp = null;
-            _cpp = null;
         }
     }
 

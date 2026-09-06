@@ -1,3 +1,4 @@
+using CodeCompass.Core.Diagnostics;
 using CodeCompass.Mcp;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -10,17 +11,29 @@ var argRoot = args.FirstOrDefault(a => !a.StartsWith('-'));
 var root = !string.IsNullOrEmpty(argRoot) && Directory.Exists(argRoot)
     ? argRoot
     : Directory.GetCurrentDirectory();
+
+Log.Global.Info($"mcp server starting, root={root}");
+Log.For(root).Info("mcp server attached to this repo");
+
 ServerContext.Init(root);
 ServerContext.EnableLiveIndex(); // keep the index fresh as files change
 
-var builder = Host.CreateApplicationBuilder(args);
+try
+{
+    var builder = Host.CreateApplicationBuilder(args);
 
-// stdout is the MCP (JSON-RPC) transport, so all logging must go to stderr.
-builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
+    // stdout is the MCP (JSON-RPC) transport, so all logging must go to stderr.
+    builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = Microsoft.Extensions.Logging.LogLevel.Trace);
 
-builder.Services
-    .AddMcpServer()
-    .WithStdioServerTransport()
-    .WithToolsFromAssembly();
+    builder.Services
+        .AddMcpServer()
+        .WithStdioServerTransport()
+        .WithToolsFromAssembly();
 
-await builder.Build().RunAsync();
+    await builder.Build().RunAsync();
+}
+catch (Exception ex)
+{
+    Log.Global.Error("mcp server terminated with an unhandled exception", ex);
+    throw;
+}

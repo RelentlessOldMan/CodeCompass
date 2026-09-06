@@ -239,6 +239,33 @@ Build phases
    grep-redirect hook, and the agent instructions into a one-command install.
 
 
+Diagnostics and logging
+-----------------------
+
+Because CodeCompass runs unattended on other people's machines (a friend's 87 GB
+repo, inside Claude Code where its stderr is invisible), it keeps a self-limiting
+log on disk so a problem can be diagnosed after the fact. Everything lives in one
+folder, %LOCALAPPDATA%\CodeCompass\logs, alongside the index caches, so there is a
+single place to look or clear.
+
+There are two views. A common log (codecompass.log) carries process lifecycle plus
+every warning and error from any repo, so it is the first place to look when
+something is off. Per-repo logs (repo-<name>-<key>.log) carry that repo's full
+detail: builds, incremental reindex batches with counts, the size-gate decision,
+and, at debug level, per-file skips and build statistics. A repo's warnings and
+errors are mirrored up into the common log so nothing important is hidden in a
+per-repo file.
+
+The hard rule is that the log can never itself become a problem. Every file is
+size-capped and rotated (default 5 MB, keeping 3 old files), bounding each family
+to about 20 MB regardless of how long the server runs. Logging never throws and
+never blocks indexing or search: if a line cannot be written it is silently
+dropped. Level and limits are environment-tunable (CODECOMPASS_LOG_LEVEL, _MAX_MB,
+_KEEP, _DIR; CODECOMPASS_LOG=0 disables it). The default level is info; debug is
+opt-in for chasing a specific issue. The CLI exposes "codecompass logs" to print
+the folder and current files.
+
+
 Open questions and risks
 ------------------------
 

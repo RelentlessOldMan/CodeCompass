@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using CodeCompass.Core.Changes;
+using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Hooks;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing;
@@ -21,6 +22,7 @@ return args.Length == 0
         "symbols" => CmdSymbols(args),
         "refs" => CmdRefs(args),
         "watch" => CmdWatch(args),
+        "logs" => CmdLogs(),
         "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
         "hook-context" => CmdHookContext(), // SessionStart hook: inject guidance
         _ => Usage(),
@@ -37,7 +39,26 @@ static int Usage()
     Console.Error.WriteLine("  codecompass def     <path> <name>        exact symbol definition(s)");
     Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
     Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#/C++, lexical elsewhere)");
+    Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
     return 1;
+}
+
+// Print the central log location and current log files - the one place to look when debugging.
+static int CmdLogs()
+{
+    var dir = Log.Directory;
+    Console.WriteLine(dir);
+    if (!Directory.Exists(dir))
+    {
+        Console.Error.WriteLine("(no logs yet)");
+        return 0;
+    }
+    foreach (var f in new DirectoryInfo(dir).GetFiles("*.log*").OrderByDescending(f => f.LastWriteTime))
+        Console.WriteLine($"  {f.Length / 1024.0,8:F0} KB  {f.LastWriteTime:yyyy-MM-dd HH:mm}  {f.Name}");
+    var lvl = Environment.GetEnvironmentVariable("CODECOMPASS_LOG_LEVEL");
+    Console.Error.WriteLine($"-- level: {(string.IsNullOrWhiteSpace(lvl) ? "info (default)" : lvl)} " +
+                            "(set CODECOMPASS_LOG_LEVEL=debug|info|warn|error|off)");
+    return 0;
 }
 
 static int CmdIndex(string[] args)
@@ -68,10 +89,23 @@ static int CmdIndex(string[] args)
                             $"{bytes / 1073741824.0:F2}/{totalBytes / 1073741824.0:F2} GB  {mbps:F0} MB/s  ETA {FormatEta(eta)}   ");
     }
 
-    var (ti, sy, s) = RepositoryIndexer.Build(root, Progress);
-    ti.Dispose();
-    sy.Dispose();
+    Log.For(root).Info($"cli index started ({totalFiles:N0} files, {totalBytes / 1048576.0:F0} MB)");
+    IndexStats s;
+    try
+    {
+        var (ti, sy, st) = RepositoryIndexer.Build(root, Progress);
+        ti.Dispose();
+        sy.Dispose();
+        s = st;
+    }
+    catch (Exception ex)
+    {
+        Log.For(root).Error("cli index failed", ex);
+        Console.Error.WriteLine($"\rindex failed: {ex.Message}");
+        return 1;
+    }
     Console.Error.Write("\r" + new string(' ', 90) + "\r");
+    Log.For(root).Info($"cli index complete: {s.Files:N0} files in {s.Seconds:F1}s ({(s.Seconds > 0 ? s.Bytes / 1048576.0 / s.Seconds : 0):F1} MB/s)");
 
     double mb = s.Bytes / (1024.0 * 1024.0);
     double throughput = s.Seconds > 0 ? mb / s.Seconds : 0;
@@ -94,9 +128,15 @@ static int CmdUpdate(string[] args)
     var (idx, _, s) = RepositoryIndexer.Update(root);
     idx.Dispose();
     if (s.FullRebuild)
+    {
         Console.WriteLine($"Full rebuild ({s.Added} files) in {s.Seconds:F2}s");
+        Log.For(root).Info($"cli update -> full rebuild ({s.Added} files) in {s.Seconds:F1}s");
+    }
     else
+    {
         Console.WriteLine($"Updated in {s.Seconds:F2}s: +{s.Added} added, ~{s.Modified} modified, -{s.Removed} removed");
+        Log.For(root).Info($"cli update: +{s.Added} ~{s.Modified} -{s.Removed} in {s.Seconds:F1}s");
+    }
     return 0;
 }
 
@@ -125,26 +165,38 @@ static int CmdWatch(string[] args)
     // Keep the index in memory and apply targeted changes in place (no reopen per batch).
     using var watcher = new RepositoryWatcher(root, batch =>
     {
-        if (batch.FullReconcile)
+        try
         {
-            text.Dispose();
-            symbols.Dispose();
-            var b = RepositoryIndexer.Build(root);
-            text = b.Text;
-            symbols = b.Symbols;
-            snapshot = RepositoryIndexer.LoadSnapshot(root);
-            Console.Error.WriteLine("reindexed: full rebuild");
+            if (batch.FullReconcile)
+            {
+                text.Dispose();
+                symbols.Dispose();
+                var b = RepositoryIndexer.Build(root);
+                text = b.Text;
+                symbols = b.Symbols;
+                snapshot = RepositoryIndexer.LoadSnapshot(root);
+                Console.Error.WriteLine("reindexed: full rebuild");
+                Log.For(root).Info("watch: full rebuild");
+            }
+            else
+            {
+                var c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, batch.ChangedFullPaths);
+                RepositoryIndexer.Persist(root, text, symbols, snapshot);
+                if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
+                {
+                    Console.Error.WriteLine($"reindexed: +{c.Added} ~{c.Modified} -{c.Removed}");
+                    Log.For(root).Info($"watch reindex: +{c.Added} ~{c.Modified} -{c.Removed}");
+                }
+            }
         }
-        else
+        catch (Exception ex)
         {
-            var c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, batch.ChangedFullPaths);
-            RepositoryIndexer.Persist(root, text, symbols, snapshot);
-            if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
-                Console.Error.WriteLine($"reindexed: +{c.Added} ~{c.Modified} -{c.Removed}");
+            Log.For(root).Error("watch reindex failed", ex);
         }
     });
     watcher.Start();
 
+    Log.For(root).Info("cli watch started");
     Console.Error.WriteLine($"watching {root} - press Ctrl+C to stop");
     using var exit = new ManualResetEventSlim(false);
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; exit.Set(); };

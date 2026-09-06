@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using CodeCompass.Core.Changes;
+using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Storage;
@@ -63,7 +64,7 @@ public static class RepositoryIndexer
             {
                 byte[] bytes;
                 try { bytes = File.ReadAllBytes(file.FullPath); }
-                catch { return worker; }
+                catch (Exception ex) { Log.For(root).Debug($"skipped unreadable file {file.RelativePath}: {ex.Message}"); return worker; }
                 if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return worker;
 
                 var content = TextDecoder.FromBytes(bytes);
@@ -107,6 +108,9 @@ public static class RepositoryIndexer
 
         var stats = new IndexStats(text.DocumentCount, totalBytes, (int)text.TotalTerms,
                                    symbols.Count, sw.Elapsed.TotalSeconds, text.IndexBytes, cores);
+        Log.For(root).Debug($"build stats: {stats.Files:N0} files, {stats.Trigrams:N0} trigrams, " +
+                            $"{stats.Symbols:N0} symbols, index {stats.IndexBytes / 1048576.0:F0} MB, " +
+                            $"{cores} core(s), {stats.Seconds:F1}s");
         return (text, symbols, stats);
     }
 
