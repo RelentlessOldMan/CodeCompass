@@ -66,7 +66,7 @@ public static class ServerContext
             var built = RepositoryIndexer.Build(Root);
             _text = built.Text;
             _symbols = built.Symbols;
-            _snapshot = LoadSnapshot();
+            _snapshot = null; // reloaded lazily only if an edit arrives
             _csharp = null;
             _cpp = null;
             return built.Stats;
@@ -96,22 +96,24 @@ public static class ServerContext
                 var built = RepositoryIndexer.Build(Root);
                 _text = built.Text;
                 _symbols = built.Symbols;
-                _snapshot = LoadSnapshot();
+                _snapshot = null; // lazy
             }
             else
             {
-                RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot!, Root, batch.ChangedFullPaths);
-                RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot!);
+                _snapshot ??= LoadSnapshot(); // load only now that an edit needs it
+                RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, batch.ChangedFullPaths);
+                RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
             }
             _csharp = null; // semantic analyzers rebuild lazily against the new state
             _cpp = null;
         }
     }
 
-    // Caller must hold Gate.
+    // Caller must hold Gate. Loads only the text + symbol indexes; the snapshot is loaded
+    // lazily (see OnChanges) because searching never needs it - keeps serving memory low.
     private static void EnsureLoaded()
     {
-        if (_text is not null && _symbols is not null && _snapshot is not null) return;
+        if (_text is not null && _symbols is not null) return;
 
         if (RepositoryIndexer.TryLoad(Root, out var text, out var symbols))
         {
@@ -124,7 +126,6 @@ public static class ServerContext
             _text = built.Text;
             _symbols = built.Symbols;
         }
-        _snapshot = LoadSnapshot();
     }
 
     private static Dictionary<string, FileState> LoadSnapshot()
