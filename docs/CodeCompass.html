@@ -121,6 +121,14 @@ memory-mapped, not loaded into RAM. <i>Correct</i> = trigram search verified aga
 <p>At ~25 MB/s a first index of a <b>dozens-of-GB</b> repo is on the order of minutes-to-tens-of-minutes (less on a many-core
 machine), and searching it afterward uses only a few hundred MB of RAM &mdash; comfortably within a 16 GB laptop.</p>
 
+<div class="card">
+<b>Scale check (10 GB / ~1.1 million files):</b> an aggregated 10.4 GB corpus indexed in <b>7m48s</b> (22 MB/s) on the machine
+above, using <b>792 MB heap / 2.2 GB peak working set</b> during a full build-plus-edit cycle. Queries stayed ~1 ms
+(p95 7.9 ms). Memory stays bounded because the trigram and symbol indexes are memory-mapped, not loaded into RAM &mdash;
+so <b>searching</b> a repo this size uses only a few hundred MB. First-time build memory is tunable via
+<code>CODECOMPASS_SEGMENT_MB</code> / <code>CODECOMPASS_THREADS</code>.
+</div>
+
 <footer>
 CodeCompass &mdash; local code intelligence for AI agents. Fully local, no GPU, minimal token footprint (5 MCP tools).
 Perf figures measured on the machine noted above; your numbers will vary with hardware and codebase.
