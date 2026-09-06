@@ -489,3 +489,6 @@ plugin/bin/
 # Benchmark corpus cache and run results (build artifacts)
 .corpus/
 bench/results/
+
+# Docs copy shipped into the plugin (source is docs/CodeCompass.html)
+plugin/CodeCompass.html

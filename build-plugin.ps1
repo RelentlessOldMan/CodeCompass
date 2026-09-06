@@ -28,6 +28,10 @@ $cli = Join-Path $binDir "CodeCompass.Cli.exe"
 if (-not (Test-Path $mcp)) { throw "expected $mcp" }
 if (-not (Test-Path $cli)) { throw "expected $cli" }
 
+# Ship the self-contained docs alongside the plugin.
+$docs = Join-Path $root "docs/CodeCompass.html"
+if (Test-Path $docs) { Copy-Item $docs (Join-Path $root "plugin/CodeCompass.html") -Force }
+
 $size = [math]::Round(((Get-ChildItem $binDir -Recurse | Measure-Object Length -Sum).Sum / 1MB), 1)
 Write-Host ""
 Write-Host "Plugin ready: $(Join-Path $root 'plugin')  (bin is $size MB)"

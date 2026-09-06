@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeCompass</title>
+<style>
+  :root{--ink:#1c2530;--muted:#5b6b7b;--line:#e2e8f0;--bg:#ffffff;--soft:#f6f8fb;--accent:#2563eb;--good:#15803d;--warn:#b45309;--code:#0f172a;--codebg:#f1f5f9}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:900px;margin:0 auto;padding:40px 24px 80px}
+  h1{font-size:30px;margin:0 0 2px}
+  .tag{color:var(--muted);font-size:16px;margin:0 0 28px}
+  h2{font-size:20px;margin:36px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  h3{font-size:16px;margin:22px 0 6px}
+  p{margin:8px 0}
+  ul{margin:8px 0 8px 22px;padding:0}
+  li{margin:4px 0}
+  code{background:var(--codebg);color:var(--code);padding:1px 6px;border-radius:5px;font:13px/1.5 ui-monospace,Consolas,monospace}
+  pre{background:var(--codebg);color:var(--code);padding:12px 14px;border-radius:8px;overflow:auto;font:13px/1.55 ui-monospace,Consolas,monospace}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}
+  th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+  th{background:var(--soft);color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  td:first-child,th:first-child,td:nth-child(2),th:nth-child(2){text-align:left}
+  .num{font-variant-numeric:tabular-nums}
+  .card{background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:14px 0}
+  .pill{display:inline-block;background:#eef2ff;color:var(--accent);border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600;margin:0 4px 4px 0}
+  .yes{color:var(--good);font-weight:600}.no{color:var(--warn);font-weight:600}
+  .muted{color:var(--muted)}
+  footer{margin-top:40px;color:var(--muted);font-size:13px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body><div class="wrap">
+
+<h1>CodeCompass</h1>
+<p class="tag">Fast, fully-local code search &amp; navigation for large codebases &mdash; built to cut the tokens an AI coding agent spends finding code.</p>
+
+<div class="card">
+<b>In one line:</b> CodeCompass indexes your repo on your machine and gives Claude Code (or your terminal) precise
+<code>file:line:col</code> answers &mdash; text search, go-to-definition, and find-references &mdash; instead of the agent grepping
+blindly and reading whole files. Nothing leaves your machine. No GPU. No cloud.
+</div>
+
+<h2>What it is &amp; why</h2>
+<p>An AI coding agent's default moves &mdash; grep for a string, then read entire files to understand a match &mdash; are cheap on a
+small repo and ruinously token-hungry on a big one. CodeCompass returns just the lines that matter, so the agent spends its
+context on thinking, not on scrolling files it didn't need.</p>
+<p>It's three complementary layers, cheapest first:</p>
+<ul>
+  <li><b>Lexical</b> &mdash; a trigram index for instant literal/substring search across the whole repo.</li>
+  <li><b>Symbolic</b> &mdash; tree-sitter parses every file into symbols (classes, methods, functions&hellip;) for go-to-definition.</li>
+  <li><b>Semantic</b> &mdash; real find-references for <b>C#</b> (Roslyn) and <b>C/C++</b> (clang): it resolves the actual symbol and
+      ignores matches in comments and strings, which a text search can't.</li>
+</ul>
+
+<h3>Minimal token footprint</h3>
+<p>A pain point with some in-house tools is that they register a pile of MCP tools/skills that eat context every session.
+CodeCompass exposes exactly <b>5 tools</b> with terse descriptions &mdash; that's the entire standing per-session cost.</p>
+<p><span class="pill">search_code</span><span class="pill">find_definition</span><span class="pill">find_references</span><span class="pill">search_symbols</span><span class="pill">reindex</span></p>
+
+<h2>What it can &amp; can't do</h2>
+<table>
+<thead><tr><th>Capability</th><th style="text-align:left">Status</th></tr></thead>
+<tbody>
+<tr><td>Literal / substring search (all files)</td><td style="text-align:left"><span class="yes">Yes</span></td></tr>
+<tr><td>Go-to-definition &amp; symbol search</td><td style="text-align:left"><span class="yes">Yes</span> &mdash; C#, C, C++, Python, JS, TS/TSX, Go, Rust</td></tr>
+<tr><td>Semantic find-references (excludes comments/strings)</td><td style="text-align:left"><span class="yes">Yes</span> for C# &amp; C/C++; lexical whole-word elsewhere</td></tr>
+<tr><td>Auto re-index on file changes (get-latest, edits)</td><td style="text-align:left"><span class="yes">Yes</span> &mdash; debounced, content-hash verified, ignores build output</td></tr>
+<tr><td>Runs fully local, no GPU, no cloud</td><td style="text-align:left"><span class="yes">Yes</span></td></tr>
+<tr><td>Dozens-of-GB repos without exhausting RAM</td><td style="text-align:left"><span class="yes">Yes</span> &mdash; indexes are memory-mapped on disk</td></tr>
+<tr><td>MATLAB / other unlisted languages</td><td style="text-align:left"><span class="no">Lexical only</span> (text search works; no symbols)</td></tr>
+<tr><td>C/C++ find-references precision</td><td style="text-align:left"><span class="no">Best-effort</span> without a <code>compile_commands.json</code></td></tr>
+<tr><td>Semantic "meaning" / embedding search</td><td style="text-align:left"><span class="no">No</span> (deliberately &mdash; needs a model; weaker for real code nav)</td></tr>
+</tbody>
+</table>
+
+<h2>Install</h2>
+<p>Requires the .NET 8 SDK to <i>build</i>; the produced binaries are self-contained (no .NET needed to run them). Windows x64.</p>
+<pre>pwsh ./build-plugin.ps1      # publishes self-contained binaries into plugin/bin</pre>
+<p>Then load it into Claude Code:</p>
+<pre>claude --plugin-dir "&lt;path&gt;/plugin"     # one session
+/plugin add "&lt;path&gt;/plugin"             # persistent (run inside Claude Code)</pre>
+<p>In a session, run <code>/mcp</code> to confirm the <b>codecompass</b> server is connected.</p>
+
+<h2>Using it from Claude Code</h2>
+<p>Once installed you don't do anything special &mdash; just ask Claude to work in your repo. It gets the CodeCompass tools, and a
+hook <b>redirects <code>Grep</code>/<code>Glob</code> to CodeCompass</b> so the agent uses the index instead of scanning files. (Set
+<code>CODECOMPASS_ENFORCE=0</code> to allow grep again.) The index builds automatically on first use for normal-sized workspaces
+and stays fresh as files change.</p>
+<p><b>Large repos:</b> a very large workspace isn't auto-indexed inside a tool call (that could stall). CodeCompass tells you to
+build it once from a terminal &mdash; see below &mdash; then it serves and keeps it fresh.</p>
+
+<h2>Using it from the command line</h2>
+<pre>codecompass index   &lt;path&gt;            build the index (shows progress + ETA)
+codecompass update  &lt;path&gt;            incremental reindex of changes
+codecompass watch   &lt;path&gt;            auto-reindex on file changes
+codecompass search  &lt;path&gt; &lt;query&gt;     literal text search  -> file:line:col
+codecompass def     &lt;path&gt; &lt;name&gt;      go-to-definition
+codecompass refs    &lt;path&gt; &lt;name&gt;      references (semantic C#/C++, lexical elsewhere)
+codecompass symbols &lt;path&gt; &lt;substr&gt;    symbol-name search</pre>
+
+<h2>Performance</h2>
+<p class="muted">Measured on: <b>Intel Core i7-8700</b> (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro, .NET 8.
+A modern many-core laptop (e.g. 32 threads) will be substantially faster to build.</p>
+<table>
+<thead><tr><th>Repo</th><th>Lang</th><th>Source</th><th>Build</th><th>MB/s</th><th>Query p50 / p95</th><th>Incremental</th><th>RAM (heap / peak)</th><th>Correct</th></tr></thead>
+<tbody>
+<tr><td>requests</td><td>Python</td><td class="num">2.7 MB</td><td class="num">1.1 s</td><td class="num">2.5</td><td class="num">1.2 / 53 ms</td><td class="num">23 ms</td><td class="num">0 / 127 MB</td><td class="yes">PASS</td></tr>
+<tr><td>fmt</td><td>C++</td><td class="num">3.1 MB</td><td class="num">0.4 s</td><td class="num">8.6</td><td class="num">0.9 / 3 ms</td><td class="num">19 ms</td><td class="num">0 / 107 MB</td><td class="yes">PASS</td></tr>
+<tr><td>EF Core</td><td>C#</td><td class="num">63 MB</td><td class="num">3.7 s</td><td class="num">17</td><td class="num">1.5 / 16 ms</td><td class="num">20 ms</td><td class="num">3 / 170 MB</td><td class="yes">PASS</td></tr>
+<tr><td>TypeScript</td><td>TS</td><td class="num">325 MB</td><td class="num">21 s</td><td class="num">15</td><td class="num">1.3 / 3 ms</td><td class="num">60 ms</td><td class="num">38 / 270 MB</td><td class="yes">PASS</td></tr>
+<tr><td>Godot</td><td>C++</td><td class="num">168 MB</td><td class="num">9.5 s</td><td class="num">18</td><td class="num">0.9 / 9 ms</td><td class="num">23 ms</td><td class="num">5 / 587 MB</td><td class="yes">PASS</td></tr>
+<tr><td>Roslyn</td><td>C#</td><td class="num">344 MB</td><td class="num">15 s</td><td class="num">23</td><td class="num">1.3 / 3 ms</td><td class="num">32 ms</td><td class="num">12 / 332 MB</td><td class="yes">PASS</td></tr>
+<tr><td>LLVM</td><td>C/C++</td><td class="num">1.3 GB</td><td class="num">51 s</td><td class="num">25</td><td class="num">0.8 / 7 ms</td><td class="num">117 ms</td><td class="num">63 / 482 MB</td><td class="yes">PASS</td></tr>
+</tbody>
+</table>
+<p><b>How to read this:</b> <i>Build</i> is the first full index (parallel across cores; faster on more cores). <i>Query</i> is search
+latency &mdash; typically ~1 ms. <i>Incremental</i> is how fast a small edit is reflected (roughly flat regardless of repo size).
+<i>RAM</i> is managed heap / peak working set &mdash; note it stays small even for a 1.3 GB repo because the indexes are
+memory-mapped, not loaded into RAM. <i>Correct</i> = trigram search verified against a brute-force scan on the real files.</p>
+<p>At ~25 MB/s a first index of a <b>dozens-of-GB</b> repo is on the order of minutes-to-tens-of-minutes (less on a many-core
+machine), and searching it afterward uses only a few hundred MB of RAM &mdash; comfortably within a 16 GB laptop.</p>
+
+<footer>
+CodeCompass &mdash; local code intelligence for AI agents. Fully local, no GPU, minimal token footprint (5 MCP tools).
+Perf figures measured on the machine noted above; your numbers will vary with hardware and codebase.
+</footer>
+
+</div></body></html>
