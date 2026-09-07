@@ -24,6 +24,21 @@ public sealed class TempRepo : IDisposable
         File.WriteAllText(full, content); // UTF-8, no BOM
     }
 
+    /// <summary>Write raw bytes verbatim - for BOM/UTF-16/CRLF/binary content the string
+    /// overload can't produce.</summary>
+    public string WriteBytes(string relativePath, byte[] content)
+    {
+        var full = Path.Combine(Root, relativePath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+        File.WriteAllBytes(full, content);
+        return full;
+    }
+
+    public string FullPath(string relativePath) =>
+        Path.Combine(Root, relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+    public void Delete(string relativePath) => File.Delete(FullPath(relativePath));
+
     public List<(string relPath, string fullPath)> Docs()
     {
         var walker = new FileWalker(new IgnoreRules());

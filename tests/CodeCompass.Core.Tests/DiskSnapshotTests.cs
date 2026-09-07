@@ -204,6 +204,77 @@ public class DiskSnapshotTests
     }
 
     [Fact]
+    public void EmptySnapshot_RoundtripsAsZeroCount()
+    {
+        var dir = NewTempDir();
+        try
+        {
+            DiskSnapshot.WriteFullBase(dir, new Dictionary<string, FileState>(StringComparer.Ordinal));
+            using var snap = DiskSnapshot.Open(dir);
+            Assert.Equal(0, snap.Count);
+            Assert.Empty(snap.Keys);
+            Assert.False(snap.TryGetValue("anything", out _));
+            Assert.Empty(snap.KeysWithPrefix("x"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void UnicodeAndLongPaths_Roundtrip()
+    {
+        var dir = NewTempDir();
+        try
+        {
+            var longPath = "deeply/" + string.Join("/", Enumerable.Repeat("segment", 30)) + "/end.cs"; // ~230 chars
+            var model = new Dictionary<string, FileState>(StringComparer.Ordinal)
+            {
+                ["src/café/naïve.cs"] = St(1),
+                ["src/日本語/ファイル.cs"] = St(2),
+                ["src/emoji/😀.cs"] = St(3),
+                [longPath] = St(4),
+            };
+            DiskSnapshot.WriteFullBase(dir, model);
+            using var snap = DiskSnapshot.Open(dir);
+            AssertMatches(snap, model);
+            Assert.Equal(
+                new[] { "src/café/naïve.cs" },
+                snap.KeysWithPrefix("src/café/").ToArray());
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void CompactionChain_AcrossReopens_StaysConsistentAndSingleBase()
+    {
+        var dir = NewTempDir();
+        try
+        {
+            var model = new Dictionary<string, FileState>(StringComparer.Ordinal);
+            var rand = new Random(99);
+            var paths = Enumerable.Range(0, 40).Select(i => $"d{i % 5}/f{i}.cs").ToArray();
+
+            for (int round = 0; round < 10; round++)
+            {
+                using (var snap = DiskSnapshot.Open(dir))
+                {
+                    for (int o = 0; o < 6; o++)
+                    {
+                        var p = paths[rand.Next(paths.Length)];
+                        if (rand.Next(4) == 0) { snap.Remove(p); model.Remove(p); }
+                        else { var s = St(rand.Next(1, 500)); snap[p] = s; model[p] = s; }
+                    }
+                    snap.Compact();
+                }
+            }
+
+            using var check = DiskSnapshot.Open(dir);
+            AssertMatches(check, model);
+            Assert.Single(Directory.GetFiles(dir, "snapshot-*.base")); // orphans cleaned across reopens
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void RandomOps_MatchReferenceDictionary_AcrossReopens()
     {
         var dir = NewTempDir();
