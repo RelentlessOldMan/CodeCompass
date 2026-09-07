@@ -23,9 +23,8 @@ public static class CodeCompassTools
     public static string SearchCode(
         [Description("Literal substring to find (case-sensitive).")] string query,
         [Description("Maximum number of results.")] int maxResults = 50)
+        => ServerContext.Query((text, _) =>
     {
-        if (!ServerContext.TryGet(out var text, out _, out var status)) return status;
-
         var matches = text.Search(query, maxResults);
         if (matches.Count == 0) return $"No matches for \"{query}\".";
 
@@ -33,16 +32,15 @@ public static class CodeCompassTools
         foreach (var m in matches) sb.AppendLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
         sb.Append($"({matches.Count} match(es))");
         return sb.ToString();
-    }
+    });
 
     [McpServerTool(Name = "find_definition")]
     [Description("Find where a symbol (class, method, function, type, etc.) is defined, by exact name. " +
                  "Returns 'file:line:col: Kind Name'. Use this for go-to-definition instead of searching files.")]
     public static string FindDefinition(
         [Description("Exact symbol name (case-sensitive).")] string name)
+        => ServerContext.Query((_, symbols) =>
     {
-        if (!ServerContext.TryGet(out _, out var symbols, out var status)) return status;
-
         var matches = symbols.FindByName(name);
         if (matches.Count == 0) return $"No definition found for \"{name}\".";
 
@@ -50,7 +48,7 @@ public static class CodeCompassTools
         foreach (var s in matches) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
         sb.Append($"({matches.Count} definition(s))");
         return sb.ToString();
-    }
+    });
 
     [McpServerTool(Name = "find_references")]
     [Description("Find where a symbol is used across the codebase. For C# (Roslyn) and C/C++ (clang) " +
@@ -60,9 +58,8 @@ public static class CodeCompassTools
     public static string FindReferences(
         [Description("Symbol/identifier to find references to (case-sensitive).")] string name,
         [Description("Maximum number of results.")] int maxResults = 100)
+        => ServerContext.Query((text, _) =>
     {
-        if (!ServerContext.TryGet(out var text, out _, out var status)) return status;
-
         var sb = new StringBuilder();
         var cs = ServerContext.CSharp.FindReferences(name, maxResults);
         foreach (var s in cs) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
@@ -83,7 +80,7 @@ public static class CodeCompassTools
         if (semantic == 0 && lexical == 0) return $"No references found for \"{name}\".";
         sb.Append($"({cs.Count} C# + {cpp.Count} C/C++ semantic reference(s); {lexical} lexical in other files)");
         return sb.ToString();
-    }
+    });
 
     [McpServerTool(Name = "search_symbols")]
     [Description("Search symbol names by case-insensitive substring. " +
@@ -91,9 +88,8 @@ public static class CodeCompassTools
     public static string SearchSymbols(
         [Description("Substring to match against symbol names (case-insensitive).")] string query,
         [Description("Maximum number of results.")] int maxResults = 50)
+        => ServerContext.Query((_, symbols) =>
     {
-        if (!ServerContext.TryGet(out _, out var symbols, out var status)) return status;
-
         var matches = symbols.Find(query, maxResults);
         if (matches.Count == 0) return $"No symbols matching \"{query}\".";
 
@@ -101,7 +97,7 @@ public static class CodeCompassTools
         foreach (var s in matches) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
         sb.Append($"({matches.Count} symbol(s))");
         return sb.ToString();
-    }
+    });
 
     [McpServerTool(Name = "reindex")]
     [Description("Rebuild the CodeCompass index for this workspace from scratch. Also reports index " +

@@ -3,8 +3,6 @@ using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
-using CodeCompass.Core.Storage;
-using CodeCompass.Core.Symbols;
 using CodeCompass.Core.Symbols.Segments;
 using CodeCompass.Core.Walking;
 using CodeCompass.Semantics;
@@ -18,10 +16,18 @@ public enum IndexState { NotStarted, Building, Ready, NeedsCliBuild }
 /// call on a build: a small workspace is indexed in the background (tools report progress
 /// until ready); a large one (over the auto-index threshold) is left for the user to build
 /// from the terminal, so a huge first index can't stall or time out the MCP call.
+///
+/// Concurrency: a <see cref="ReaderWriterLockSlim"/> guards the index. Searches run under a
+/// read lock (so the mmap indexes can't be disposed or mutated mid-read); rebuilds and
+/// incremental updates take the write lock. Long rebuilds are done off-lock and swapped in
+/// under a brief write lock so searches aren't blocked for the whole build. Changes that
+/// arrive while a build is in flight are captured and drained when it finishes.
 /// </summary>
 public static class ServerContext
 {
-    private static readonly object Gate = new();
+    private static readonly ReaderWriterLockSlim Rw = new(LockRecursionPolicy.NoRecursion);
+    private static readonly object AnalyzerGate = new();
+
     private static SegmentedIndex? _text;
     private static SegmentedSymbolIndex? _symbols;
     private static DiskSnapshot? _snapshot;
@@ -30,10 +36,13 @@ public static class ServerContext
     private static RepositoryWatcher? _watcher;
 
     private static IndexState _state = IndexState.NotStarted;
-    private static Task? _buildTask;
     private static int _progressFiles;
     private static long _progressBytes;
     private static long _progressTotalBytes;
+
+    // Changes observed while a build is running (state == Building); drained on completion.
+    private static readonly List<string> _pendingPaths = new();
+    private static bool _pendingReconcile;
 
     public static string Root { get; private set; } = "";
 
@@ -46,7 +55,8 @@ public static class ServerContext
 
     public static void Init(string root)
     {
-        lock (Gate)
+        Rw.EnterWriteLock();
+        try
         {
             Root = Path.GetFullPath(root);
             _text?.Dispose();
@@ -58,43 +68,57 @@ public static class ServerContext
             _csharp = null;
             _cpp = null;
             _state = IndexState.NotStarted;
-            _buildTask = null;
+            _pendingPaths.Clear();
+            _pendingReconcile = false;
         }
+        finally { Rw.ExitWriteLock(); }
     }
 
     /// <summary>
-    /// Get the indexes if ready; otherwise false with a human-readable status the tool
-    /// should return to the agent (still indexing, or needs a CLI build).
+    /// Run a read-only operation against the ready indexes under a read lock. If the index
+    /// isn't ready, returns the human-readable status instead (still indexing / needs CLI build).
+    /// </summary>
+    public static string Query(Func<SegmentedIndex, SegmentedSymbolIndex, string> op)
+    {
+        EnsureStartedLocked();
+        Rw.EnterReadLock();
+        try
+        {
+            if (_state != IndexState.Ready || _text is null || _symbols is null)
+                return StatusMessage();
+            return op(_text, _symbols);
+        }
+        finally { Rw.ExitReadLock(); }
+    }
+
+    /// <summary>
+    /// Readiness probe (used by tests and status reporting). Returns the current index refs
+    /// when ready; otherwise a status string. Do not run a long search on the returned refs
+    /// without a read lock - prefer <see cref="Query"/> for that.
     /// </summary>
     public static bool TryGet(out SegmentedIndex text, out SegmentedSymbolIndex symbols, out string status)
     {
-        lock (Gate)
+        EnsureStartedLocked();
+        Rw.EnterReadLock();
+        try
         {
-            EnsureStarted();
-            switch (_state)
+            if (_state == IndexState.Ready && _text is not null && _symbols is not null)
             {
-                case IndexState.Ready:
-                    text = _text!;
-                    symbols = _symbols!;
-                    status = "";
-                    return true;
-                case IndexState.Building:
-                    text = null!; symbols = null!;
-                    status = BuildingMessage();
-                    return false;
-                default: // NeedsCliBuild
-                    text = null!; symbols = null!;
-                    status = CliBuildMessage();
-                    return false;
+                text = _text; symbols = _symbols; status = "";
+                return true;
             }
+            text = null!; symbols = null!; status = StatusMessage();
+            return false;
         }
+        finally { Rw.ExitReadLock(); }
     }
 
     public static string StatusLine()
     {
-        lock (Gate)
+        EnsureStartedLocked();
+        Rw.EnterReadLock();
+        try
         {
-            EnsureStarted();
             return _state switch
             {
                 IndexState.Ready => $"ready - {_text!.DocumentCount:N0} files indexed",
@@ -102,99 +126,126 @@ public static class ServerContext
                 _ => CliBuildMessage(),
             };
         }
+        finally { Rw.ExitReadLock(); }
     }
+
+    private static string StatusMessage() => _state == IndexState.Building ? BuildingMessage() : CliBuildMessage();
 
     public static RoslynCSharpAnalyzer CSharp
     {
-        get { lock (Gate) { return _csharp ??= new RoslynCSharpAnalyzer(Root); } }
+        get { lock (AnalyzerGate) { return _csharp ??= new RoslynCSharpAnalyzer(Root); } }
     }
 
     public static ClangCppAnalyzer Cpp
     {
-        get { lock (Gate) { return _cpp ??= new ClangCppAnalyzer(Root); } }
+        get { lock (AnalyzerGate) { return _cpp ??= new ClangCppAnalyzer(Root); } }
     }
 
-    /// <summary>Force a synchronous full rebuild (the reindex tool).</summary>
+    /// <summary>Force a full rebuild (the reindex tool). Builds off-lock so searches keep
+    /// serving the old index, then swaps atomically. On failure the old index is kept.</summary>
     public static IndexStats Rebuild()
     {
-        lock (Gate)
+        Log.For(Root).Info("manual reindex requested");
+        var built = RepositoryIndexer.Build(Root); // off-lock; old index still serves reads
+        Swap(built.Text, built.Symbols);
+        Log.For(Root).Info($"manual reindex complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+        return built.Stats;
+    }
+
+    // Dispose the previous indexes and install new ones under the write lock (waits for any
+    // in-flight search to finish, so a search never touches a disposed mmap).
+    private static void Swap(SegmentedIndex text, SegmentedSymbolIndex symbols)
+    {
+        Rw.EnterWriteLock();
+        try
         {
-            Log.For(Root).Info("manual reindex requested");
             _text?.Dispose();
             _symbols?.Dispose();
             _snapshot?.Dispose();
-            _text = null;
-            _symbols = null;
-            var built = RepositoryIndexer.Build(Root);
-            _text = built.Text;
-            _symbols = built.Symbols;
+            _text = text;
+            _symbols = symbols;
             _snapshot = null;
             _csharp = null;
             _cpp = null;
             _state = IndexState.Ready;
-            Log.For(Root).Info($"manual reindex complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
-            return built.Stats;
         }
+        finally { Rw.ExitWriteLock(); }
     }
 
     public static void EnableLiveIndex(int debounceMs = 1000)
     {
-        lock (Gate)
+        Rw.EnterWriteLock();
+        try
         {
             if (_watcher is not null) return;
             _watcher = new RepositoryWatcher(Root, OnChanges, debounceMs);
             _watcher.Start();
         }
+        finally { Rw.ExitWriteLock(); }
     }
 
-    // Caller must hold Gate. Decides how to bring the index up without blocking.
-    private static void EnsureStarted()
+    // Bring the index up without blocking a tool call. Runs its own locking; safe to call
+    // before taking a read lock (it never holds the read lock across a build).
+    private static void EnsureStartedLocked()
     {
-        if (_state is IndexState.Ready or IndexState.Building) return;
-
-        // Pick up an index built out-of-band (e.g. the user just ran the CLI).
-        if (RepositoryIndexer.TryLoad(Root, out var text, out var symbols))
+        Rw.EnterUpgradeableReadLock();
+        try
         {
-            _text = text;
-            _symbols = symbols;
-            _state = IndexState.Ready;
-            Log.For(Root).Info($"loaded existing index ({_text.DocumentCount:N0} files)");
-            return;
-        }
+            if (_state is IndexState.Ready or IndexState.Building) return;
 
-        // No index yet: large workspaces are left for a CLI build (no long, timeout-prone
-        // build inside a tool call); small ones index in the background.
-        if (ExceedsAutoLimit(out var total))
-        {
-            _state = IndexState.NeedsCliBuild;
-            Log.For(Root).Info($"workspace over auto-index limit ({total / 1048576.0:F0} MB); deferring to CLI build");
-            return;
-        }
+            // Pick up an index built out-of-band (e.g. the user just ran the CLI).
+            if (RepositoryIndexer.TryLoad(Root, out var text, out var symbols))
+            {
+                Rw.EnterWriteLock();
+                try { _text = text; _symbols = symbols; _state = IndexState.Ready; }
+                finally { Rw.ExitWriteLock(); }
+                Log.For(Root).Info($"loaded existing index ({text.DocumentCount:N0} files)");
+                return;
+            }
 
-        _progressTotalBytes = total;
-        _progressFiles = 0;
-        _progressBytes = 0;
-        _state = IndexState.Building;
-        Log.For(Root).Info($"background build started ({total / 1048576.0:F0} MB)");
-        _buildTask = Task.Run(() =>
-        {
+            // No index yet: large workspaces are left for a CLI build; small ones index in
+            // the background.
+            if (ExceedsAutoLimit(out var total))
+            {
+                Rw.EnterWriteLock();
+                try { _state = IndexState.NeedsCliBuild; }
+                finally { Rw.ExitWriteLock(); }
+                Log.For(Root).Info($"workspace over auto-index limit ({total / 1048576.0:F0} MB); deferring to CLI build");
+                return;
+            }
+
+            Rw.EnterWriteLock();
             try
             {
-                var built = RepositoryIndexer.Build(Root, (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); });
-                lock (Gate)
-                {
-                    _text = built.Text;
-                    _symbols = built.Symbols;
-                    _state = IndexState.Ready;
-                }
-                Log.For(Root).Info($"background build complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+                _progressTotalBytes = total;
+                _progressFiles = 0;
+                _progressBytes = 0;
+                _state = IndexState.Building;
             }
-            catch (Exception ex)
-            {
-                lock (Gate) { _state = IndexState.NeedsCliBuild; }
-                Log.For(Root).Error("background build failed; falling back to CLI-build state", ex);
-            }
-        });
+            finally { Rw.ExitWriteLock(); }
+            Log.For(Root).Info($"background build started ({total / 1048576.0:F0} MB)");
+            Task.Run(BackgroundBuild);
+        }
+        finally { Rw.ExitUpgradeableReadLock(); }
+    }
+
+    private static void BackgroundBuild()
+    {
+        try
+        {
+            var built = RepositoryIndexer.Build(Root,
+                (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); });
+            Swap(built.Text, built.Symbols);
+            Log.For(Root).Info($"background build complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+            DrainPending();
+        }
+        catch (Exception ex)
+        {
+            Rw.EnterWriteLock();
+            try { _state = IndexState.NeedsCliBuild; }
+            finally { Rw.ExitWriteLock(); }
+            Log.For(Root).Error("background build failed; falling back to CLI-build state", ex);
+        }
     }
 
     private static bool ExceedsAutoLimit(out long totalBytes)
@@ -227,43 +278,101 @@ public static class ServerContext
 
     private static void OnChanges(ChangeBatch batch)
     {
-        lock (Gate)
+        // Capture changes that land during a build so they aren't lost (the build's snapshot
+        // may pre-date them and no further event would re-fire).
+        Rw.EnterUpgradeableReadLock();
+        try
         {
-            if (_state != IndexState.Ready) return; // don't build from the watcher; that's on-demand/CLI
+            if (_state == IndexState.Building)
+            {
+                Rw.EnterWriteLock();
+                try
+                {
+                    if (batch.FullReconcile) _pendingReconcile = true;
+                    else _pendingPaths.AddRange(batch.ChangedFullPaths);
+                }
+                finally { Rw.ExitWriteLock(); }
+                return;
+            }
+            if (_state != IndexState.Ready) return;
 
-            try
+            if (!batch.FullReconcile)
             {
-                if (batch.FullReconcile)
-                {
-                    Log.For(Root).Info("watcher requested full reconcile; rebuilding");
-                    _text!.Dispose();
-                    _symbols!.Dispose();
-                    _snapshot?.Dispose();
-                    _text = null;
-                    _symbols = null;
-                    var built = RepositoryIndexer.Build(Root);
-                    _text = built.Text;
-                    _symbols = built.Symbols;
-                    _snapshot = null;
-                }
-                else
-                {
-                    _snapshot ??= LoadSnapshot();
-                    var c = RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, batch.ChangedFullPaths);
-                    RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
-                    if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
-                        Log.For(Root).Info($"incremental reindex: +{c.Added} ~{c.Modified} -{c.Removed} " +
-                                           $"({batch.ChangedFullPaths.Count} path(s) changed)");
-                }
-                _csharp = null;
-                _cpp = null;
+                // Targeted incremental: fast, done under the write lock.
+                Rw.EnterWriteLock();
+                try { ApplyIncremental(batch.ChangedFullPaths, batch.ChangedFullPaths.Count); }
+                finally { Rw.ExitWriteLock(); }
+                return;
             }
-            catch (Exception ex)
-            {
-                Log.For(Root).Error("incremental reindex failed", ex);
-            }
+
+            // Full reconcile (events were lost): mark Building and rebuild off-lock below, so
+            // tool calls aren't blocked for the whole rebuild.
+            Rw.EnterWriteLock();
+            try { _state = IndexState.Building; }
+            finally { Rw.ExitWriteLock(); }
+        }
+        finally { Rw.ExitUpgradeableReadLock(); }
+
+        Log.For(Root).Info("watcher requested full reconcile; rebuilding");
+        try
+        {
+            var built = RepositoryIndexer.Build(Root);
+            Swap(built.Text, built.Symbols);
+            DrainPending();
+        }
+        catch (Exception ex)
+        {
+            Rw.EnterWriteLock();
+            try { _state = IndexState.NeedsCliBuild; }
+            finally { Rw.ExitWriteLock(); }
+            Log.For(Root).Error("full reconcile failed", ex);
         }
     }
 
-    private static DiskSnapshot LoadSnapshot() => RepositoryIndexer.LoadSnapshot(Root);
+    // Caller holds the write lock.
+    private static void ApplyIncremental(IReadOnlyList<string> changedFullPaths, int changedCount)
+    {
+        try
+        {
+            _snapshot ??= RepositoryIndexer.LoadSnapshot(Root);
+            var c = RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, changedFullPaths);
+            RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
+            _csharp = null;
+            _cpp = null;
+            if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
+                Log.For(Root).Info($"incremental reindex: +{c.Added} ~{c.Modified} -{c.Removed} " +
+                                   $"({changedCount} path(s) changed)");
+        }
+        catch (Exception ex) { Log.For(Root).Error("incremental reindex failed", ex); }
+    }
+
+    // Apply changes captured during a build. Loops a bounded number of times to absorb edits
+    // that land during the drain itself; anything after that the next watcher event will catch.
+    private static void DrainPending()
+    {
+        for (int round = 0; round < 5; round++)
+        {
+            List<string> paths;
+            bool reconcile;
+            Rw.EnterWriteLock();
+            try
+            {
+                reconcile = _pendingReconcile;
+                _pendingReconcile = false;
+                paths = _pendingPaths.ToList();
+                _pendingPaths.Clear();
+                if (paths.Count == 0 && !reconcile) return;
+                if (!reconcile && _state == IndexState.Ready)
+                    ApplyIncremental(paths, paths.Count);
+            }
+            finally { Rw.ExitWriteLock(); }
+
+            if (reconcile)
+            {
+                Log.For(Root).Info("draining a full-reconcile request captured during build");
+                try { var b = RepositoryIndexer.Build(Root); Swap(b.Text, b.Symbols); }
+                catch (Exception ex) { Log.For(Root).Error("drained reconcile failed", ex); return; }
+            }
+        }
+    }
 }

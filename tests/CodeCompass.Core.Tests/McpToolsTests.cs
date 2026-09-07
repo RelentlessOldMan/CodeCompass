@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using CodeCompass.Mcp;
 using Xunit;
@@ -104,6 +106,35 @@ public class McpToolsTests
         var result = CodeCompassTools.FindReferences("square");
         Assert.Contains("src/calc.cpp", result);
         Assert.Contains("square(3)", result);
+    }
+
+    [Fact]
+    public void ConcurrentSearchAndReindex_DoesNotCrash()
+    {
+        using var repo = NewIndexedRepo();
+        int stop = 0;
+        Exception? failure = null;
+
+        var searchers = Enumerable.Range(0, 4).Select(threadNo => new Thread(() =>
+        {
+            try
+            {
+                while (Volatile.Read(ref stop) == 0)
+                {
+                    // Result may be search hits or a status string mid-rebuild; both are fine.
+                    _ = CodeCompassTools.SearchCode("Run");
+                    _ = CodeCompassTools.FindDefinition("Widget");
+                }
+            }
+            catch (Exception ex) { Interlocked.CompareExchange(ref failure, ex, null); }
+        })).ToList();
+
+        searchers.ForEach(t => t.Start());
+        for (int i = 0; i < 10; i++) CodeCompassTools.Reindex(); // disposes + swaps the mmap index under readers
+        Volatile.Write(ref stop, 1);
+        searchers.ForEach(t => t.Join());
+
+        Assert.Null(failure); // no ObjectDisposed/AccessViolation from searching a swapped index
     }
 
     [Fact]
