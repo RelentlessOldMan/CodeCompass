@@ -11,6 +11,8 @@ using CodeCompass.Core.Text;
 using CodeCompass.Core.Walking;
 using CodeCompass.Semantics;
 
+ProcessPerformance.RequestFullSpeed(); // opt out of EcoQoS so `index`/`update` run at full speed
+
 return args.Length == 0
     ? Usage()
     : args[0].ToLowerInvariant() switch

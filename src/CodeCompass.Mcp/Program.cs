@@ -4,6 +4,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
+// Opt out of EcoQoS throttling so background auto-reindex isn't parked on E-cores. No priority
+// nudge: this is a long-lived server that shouldn't outrank the editor/agent it shares the box with.
+ProcessPerformance.RequestFullSpeed(raisePriority: false);
+
 // The repository this server serves: first non-flag arg, else the current directory.
 // Repository to serve: first non-flag arg if it's a real directory, else the cwd.
 // (This tolerates an unexpanded ${CLAUDE_PROJECT_DIR} when launched as a plugin.)

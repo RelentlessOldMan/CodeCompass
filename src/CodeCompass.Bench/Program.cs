@@ -1,5 +1,8 @@
 using System.Text.Json;
 using CodeCompass.Bench;
+using CodeCompass.Core.Diagnostics;
+
+ProcessPerformance.RequestFullSpeed(); // opt out of EcoQoS so bench numbers reflect full-speed indexing
 
 if (args.Length == 0) return Usage();
 
