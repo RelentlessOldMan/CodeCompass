@@ -1,0 +1,31 @@
+name: Auto-close PRs
+
+# CodeCompass is a personal tool published as-is and doesn't accept contributions.
+# Any pull request is politely closed automatically.
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: "Thanks for looking! 🧭 CodeCompass is a personal tool, published as-is and not accepting contributions — so this PR will auto-close. Please fork it and make it your own."
+            });
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              state: "closed"
+            });
