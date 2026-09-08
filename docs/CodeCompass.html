@@ -102,7 +102,10 @@ codecompass symbols &lt;path&gt; &lt;substr&gt;    symbol-name search</pre>
 
 <h2>Performance</h2>
 <p class="muted">Measured on: <b>Intel Core i7-8700</b> (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro, .NET 8.
-A modern many-core laptop (e.g. 32 threads) will be substantially faster to build.</p>
+A modern many-core laptop (e.g. 32 threads) will be substantially faster to build.
+These figures were recorded <b>before</b> the EcoQoS / E-core throttling opt-out, so build throughput is
+conservative here &mdash; expect higher on hybrid CPUs (up to ~2&times; where the OS was previously parking
+the process on efficiency cores).</p>
 <table>
 <thead><tr><th>Repo</th><th>Lang</th><th>Source</th><th>Build</th><th>MB/s</th><th>Query p50 / p95</th><th>Incremental</th><th>RAM (heap / peak)</th><th>Correct</th></tr></thead>
 <tbody>

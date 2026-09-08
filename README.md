@@ -89,6 +89,10 @@ codecompass logs                      show the log folder and files
 Measured on an **Intel Core i7-8700** (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro,
 .NET 8. A modern many-core laptop builds substantially faster.
 
+> **Note:** these figures were recorded *before* the EcoQoS / E-core throttling opt-out, so build
+> throughput is conservative here — expect higher on hybrid CPUs (up to ~2× when the OS was
+> previously parking the process on efficiency cores).
+
 | Repo | Lang | Source | Build | MB/s | Query p50/p95 | RAM (heap/peak) |
 |---|---|--:|--:|--:|--:|--:|
 | requests | Python | 2.7 MB | 1.1 s | 2.5 | 1.2 / 53 ms | 0 / 127 MB |
