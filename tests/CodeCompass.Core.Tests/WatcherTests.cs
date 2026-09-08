@@ -40,6 +40,23 @@ public class WatcherTests
     }
 
     [Fact]
+    public void Watcher_DoesNotFireAfterDispose()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class A { } }");
+
+        int fires = 0;
+        var watcher = new RepositoryWatcher(repo.Root, _ => Interlocked.Increment(ref fires), debounceMs: 300);
+        watcher.Start();
+
+        repo.Write("b.cs", "namespace N { class B { } }"); // schedule a flush...
+        watcher.Dispose();                                  // ...then dispose before the debounce elapses
+
+        Thread.Sleep(800); // well past the debounce window
+        Assert.Equal(0, Volatile.Read(ref fires)); // the pending flush must not run after Dispose
+    }
+
+    [Fact]
     public void Watcher_IgnoresChangesUnderIgnoredDirectories()
     {
         using var repo = new TempRepo();

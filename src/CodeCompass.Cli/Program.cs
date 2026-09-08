@@ -204,6 +204,7 @@ static int CmdWatch(string[] args)
     using var exit = new ManualResetEventSlim(false);
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; exit.Set(); };
     exit.Wait();
+    watcher.Dispose(); // stop the watcher and drain any in-flight reindex BEFORE freeing the indexes it touches
     text.Dispose();
     symbols.Dispose();
     snapshot.Dispose();

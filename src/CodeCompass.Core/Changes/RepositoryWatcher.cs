@@ -31,7 +31,7 @@ public sealed class RepositoryWatcher : IDisposable
     private readonly int _maxWaitMs;
     private long _firstPendingTick; // 0 = nothing pending since last flush
     private System.Threading.Timer? _timer;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public RepositoryWatcher(string root, Action<ChangeBatch> onFlush, int debounceMs = 1000, IgnoreRules? ignore = null)
     {
@@ -142,9 +142,14 @@ public sealed class RepositoryWatcher : IDisposable
 
     public void Dispose()
     {
-        lock (_timerGate) { _disposed = true; }
+        // Stop new events first, then mark disposed and kill the timer, then wait for any
+        // in-flight Flush to finish. Without the final barrier a callback already dispatched to
+        // the thread pool could run _onFlush after Dispose returns - and touch state the caller
+        // is about to tear down (disposed mmap indexes). Note: Dispose never holds _timerGate and
+        // _flushGate at the same time, so it can't deadlock against Flush (which nests the other way).
         try { _fsw.EnableRaisingEvents = false; } catch { }
-        _fsw.Dispose();
-        _timer?.Dispose();
+        try { _fsw.Dispose(); } catch { }
+        lock (_timerGate) { _disposed = true; _timer?.Dispose(); _timer = null; }
+        lock (_flushGate) { /* drains any Flush currently running; later Flushes see _disposed */ }
     }
 }
