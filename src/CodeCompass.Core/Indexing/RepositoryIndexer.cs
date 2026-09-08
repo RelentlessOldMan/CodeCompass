@@ -133,6 +133,25 @@ public static class RepositoryIndexer
         w.Symbols = new SymbolSegmentBuilder();
     }
 
+    /// <summary>
+    /// True when the incremental path should compact by doing a full rebuild. Every incremental
+    /// batch appends a segment and can add tombstones that are never otherwise reclaimed, so a
+    /// long-running watch session accumulates unbounded tiny segments + tombstones (slower search,
+    /// rising RAM). Rebuilding resets to a clean, tombstone-free set of segments. Threshold via
+    /// CODECOMPASS_COMPACT_SEGMENTS (default 64); under normal editing this fires rarely.
+    /// </summary>
+    public static bool NeedsCompaction(SegmentedIndex text, SegmentedSymbolIndex symbols)
+    {
+        int threshold = CompactSegmentThreshold();
+        return text.SegmentCount >= threshold || symbols.SegmentCount >= threshold;
+    }
+
+    private static int CompactSegmentThreshold()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS");
+        return int.TryParse(env, out var v) && v >= 2 ? v : 64;
+    }
+
     /// <summary>Indexing parallelism: CODECOMPASS_THREADS if set (and valid), else all cores.</summary>
     public static int DegreeOfParallelism()
     {

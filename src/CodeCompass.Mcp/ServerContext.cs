@@ -320,22 +320,32 @@ public static class ServerContext
 
             if (!batch.FullReconcile)
             {
-                // Targeted incremental: fast, done under the write lock.
+                // Targeted incremental: fast, done under the write lock. If segments have piled
+                // up, escalate to a compacting rebuild (below) instead of just returning.
+                bool compact;
                 Rw.EnterWriteLock();
-                try { ApplyIncremental(batch.ChangedFullPaths, batch.ChangedFullPaths.Count); }
+                try
+                {
+                    ApplyIncremental(batch.ChangedFullPaths, batch.ChangedFullPaths.Count);
+                    compact = RepositoryIndexer.NeedsCompaction(_text!, _symbols!);
+                    if (compact) _state = IndexState.Building;
+                }
                 finally { Rw.ExitWriteLock(); }
-                return;
+                if (!compact) return;
+                Log.For(Root).Info("compacting: segment count high after incremental edits; rebuilding");
             }
-
-            // Full reconcile (events were lost): mark Building and rebuild off-lock below, so
-            // tool calls aren't blocked for the whole rebuild.
-            Rw.EnterWriteLock();
-            try { _state = IndexState.Building; }
-            finally { Rw.ExitWriteLock(); }
+            else
+            {
+                // Full reconcile (events were lost): mark Building and rebuild off-lock below, so
+                // tool calls aren't blocked for the whole rebuild.
+                Rw.EnterWriteLock();
+                try { _state = IndexState.Building; }
+                finally { Rw.ExitWriteLock(); }
+                Log.For(Root).Info("watcher requested full reconcile; rebuilding");
+            }
         }
         finally { Rw.ExitUpgradeableReadLock(); }
 
-        Log.For(Root).Info("watcher requested full reconcile; rebuilding");
         try
         {
             var built = RepositoryIndexer.Build(Root);

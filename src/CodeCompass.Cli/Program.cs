@@ -190,6 +190,20 @@ static int CmdWatch(string[] args)
                     Console.Error.WriteLine($"reindexed: +{c.Added} ~{c.Modified} -{c.Removed}");
                     Log.For(root).Info($"watch reindex: +{c.Added} ~{c.Modified} -{c.Removed}");
                 }
+
+                // Keep a long-running watch from accumulating unbounded segments/tombstones.
+                if (RepositoryIndexer.NeedsCompaction(text, symbols))
+                {
+                    text.Dispose();
+                    symbols.Dispose();
+                    snapshot.Dispose();
+                    var b = RepositoryIndexer.Build(root);
+                    text = b.Text;
+                    symbols = b.Symbols;
+                    snapshot = RepositoryIndexer.LoadSnapshot(root);
+                    Console.Error.WriteLine("compacted: full rebuild");
+                    Log.For(root).Info("watch: compacted via full rebuild");
+                }
             }
         }
         catch (Exception ex)
