@@ -8,9 +8,9 @@ namespace CodeCompass.Core.Changes.Segments;
 /// via mmap - a lookup is a binary search over the sorted paths, and a full pass streams
 /// paths on demand - so the change ledger for a huge repo never has to sit in RAM.
 ///
-/// Columnar layout (little-endian): header, then path offsets, the UTF-8 path blob (sorted),
-/// sizes (int64), mtimes (int64), and raw 32-byte SHA-256 hashes. Fixed-width columns make
-/// every field directly indexable by record number.
+/// Columnar layout (little-endian): header, then path offsets (int64), the UTF-8 path blob
+/// (sorted), sizes (int64), mtimes (int64), and raw 16-byte XxHash128 content hashes. Fixed-width
+/// columns make every field directly indexable by record number.
 /// </summary>
 public static class SnapshotBaseFile
 {

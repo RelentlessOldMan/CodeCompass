@@ -40,9 +40,15 @@ public static class ServerContext
     private static long _progressBytes;
     private static long _progressTotalBytes;
 
-    // Changes observed while a build is running (state == Building); drained on completion.
+    // Changes observed while a build is running (state == Building) or a manual rebuild is in
+    // flight (_rebuilding); drained on completion so they aren't lost.
     private static readonly List<string> _pendingPaths = new();
     private static bool _pendingReconcile;
+
+    // A full off-lock rebuild (the reindex tool) is running while the old index keeps serving.
+    // The watcher must capture changes instead of writing them, so it doesn't race the rebuild
+    // for the on-disk cache.
+    private static bool _rebuilding;
 
     public static string Root { get; private set; } = "";
 
@@ -70,6 +76,7 @@ public static class ServerContext
             _state = IndexState.NotStarted;
             _pendingPaths.Clear();
             _pendingReconcile = false;
+            _rebuilding = false;
         }
         finally { Rw.ExitWriteLock(); }
     }
@@ -142,14 +149,29 @@ public static class ServerContext
     }
 
     /// <summary>Force a full rebuild (the reindex tool). Builds off-lock so searches keep
-    /// serving the old index, then swaps atomically. On failure the old index is kept.</summary>
+    /// serving the old index, then swaps atomically. On failure the old index is kept. While it
+    /// runs, watcher changes are captured (not written) so they don't race the rebuild for the
+    /// on-disk cache, then drained afterward.</summary>
     public static IndexStats Rebuild()
     {
         Log.For(Root).Info("manual reindex requested");
-        var built = RepositoryIndexer.Build(Root); // off-lock; old index still serves reads
-        Swap(built.Text, built.Symbols);
-        Log.For(Root).Info($"manual reindex complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
-        return built.Stats;
+        Rw.EnterWriteLock();
+        try { _rebuilding = true; } // divert the watcher to the pending queue; waits out any in-flight incremental
+        finally { Rw.ExitWriteLock(); }
+        try
+        {
+            var built = RepositoryIndexer.Build(Root); // off-lock; old index still serves reads
+            Swap(built.Text, built.Symbols);
+            Log.For(Root).Info($"manual reindex complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+            return built.Stats;
+        }
+        finally
+        {
+            Rw.EnterWriteLock();
+            try { _rebuilding = false; }
+            finally { Rw.ExitWriteLock(); }
+            DrainPending(); // apply whatever the watcher captured during the rebuild (onto new or, on failure, old index)
+        }
     }
 
     // Dispose the previous indexes and install new ones under the write lock (waits for any
@@ -217,9 +239,9 @@ public static class ServerContext
             Rw.EnterWriteLock();
             try
             {
-                _progressTotalBytes = total;
-                _progressFiles = 0;
-                _progressBytes = 0;
+                Interlocked.Exchange(ref _progressTotalBytes, total); // read via Interlocked in BuildingMessage
+                Volatile.Write(ref _progressFiles, 0);
+                Interlocked.Exchange(ref _progressBytes, 0);
                 _state = IndexState.Building;
             }
             finally { Rw.ExitWriteLock(); }
@@ -242,7 +264,7 @@ public static class ServerContext
         catch (Exception ex)
         {
             Rw.EnterWriteLock();
-            try { _state = IndexState.NeedsCliBuild; }
+            try { _state = IndexState.NeedsCliBuild; _pendingPaths.Clear(); _pendingReconcile = false; }
             finally { Rw.ExitWriteLock(); }
             Log.For(Root).Error("background build failed; falling back to CLI-build state", ex);
         }
@@ -283,7 +305,7 @@ public static class ServerContext
         Rw.EnterUpgradeableReadLock();
         try
         {
-            if (_state == IndexState.Building)
+            if (_state == IndexState.Building || _rebuilding)
             {
                 Rw.EnterWriteLock();
                 try
@@ -323,7 +345,7 @@ public static class ServerContext
         catch (Exception ex)
         {
             Rw.EnterWriteLock();
-            try { _state = IndexState.NeedsCliBuild; }
+            try { _state = IndexState.NeedsCliBuild; _pendingPaths.Clear(); _pendingReconcile = false; }
             finally { Rw.ExitWriteLock(); }
             Log.For(Root).Error("full reconcile failed", ex);
         }
