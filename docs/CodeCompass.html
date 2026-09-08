@@ -76,6 +76,7 @@ CodeCompass exposes exactly <b>5 tools</b> with terse descriptions &mdash; that'
 
 <h2>Install</h2>
 <p>Requires the .NET 8 SDK to <i>build</i>; the produced binaries are self-contained (no .NET needed to run them). Windows x64.</p>
+<p class="muted"><b>Windows on ARM (Snapdragon):</b> no separate ARM build is needed &mdash; the x64 binaries run on Windows 11 on ARM through its built-in x64 emulation (the whole process, native dependencies included, runs emulated). Searches stay effectively instant; only the first index build runs somewhat slower than on native x64.</p>
 <pre>pwsh ./build-plugin.ps1      # publishes self-contained binaries into plugin/bin</pre>
 <p>Then load it into Claude Code:</p>
 <pre>claude --plugin-dir "&lt;path&gt;/plugin"     # one session

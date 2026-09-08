@@ -50,6 +50,11 @@ entire standing per-session cost: `search_code`, `find_definition`, `find_refere
 Requires the .NET 8 SDK to *build*; the produced binaries are self-contained (no .NET needed to run
 them). Windows x64.
 
+> **Windows on ARM (Snapdragon):** there's no separate ARM build and you don't need one — the x64
+> binaries run on Windows 11 on ARM via its built-in x64 emulation (the whole process, native
+> dependencies included, runs emulated). Searches stay effectively instant; only the initial index
+> build runs somewhat slower than on native x64.
+
 ```powershell
 pwsh ./build-plugin.ps1      # publishes self-contained binaries into plugin/bin
 ```
