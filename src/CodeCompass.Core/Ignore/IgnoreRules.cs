@@ -28,19 +28,42 @@ public sealed class IgnoreRules
         ".bin", ".dat", ".db", ".sqlite", ".pack", ".idx",
     };
 
+    public const long DefaultMaxFileSizeBytes = 5 * 1024 * 1024;
+
     private readonly HashSet<string> _ignoredDirs;
     private readonly HashSet<string> _ignoredExtensions;
 
     public long MaxFileSizeBytes { get; }
 
-    public IgnoreRules(long maxFileSizeBytes = 5 * 1024 * 1024, IEnumerable<string>? extraIgnoredDirs = null)
+    /// <summary>
+    /// Build ignore rules. When <paramref name="maxFileSizeBytes"/> is null the cap comes from
+    /// CODECOMPASS_MAX_FILE_MB (default 5 MB); CODECOMPASS_IGNORE (comma/semicolon-separated
+    /// directory names) always adds to the skipped-directory set. These env knobs let an operator
+    /// exclude a pathological generated tree (e.g. dense register-map headers) or lower the cap
+    /// without editing source.
+    /// </summary>
+    public IgnoreRules(long? maxFileSizeBytes = null, IEnumerable<string>? extraIgnoredDirs = null)
     {
         _ignoredDirs = new HashSet<string>(DefaultIgnoredDirs, StringComparer.OrdinalIgnoreCase);
+        foreach (var d in EnvIgnoredDirs()) _ignoredDirs.Add(d);
         if (extraIgnoredDirs is not null)
             foreach (var d in extraIgnoredDirs)
                 _ignoredDirs.Add(d);
         _ignoredExtensions = DefaultIgnoredExtensions;
-        MaxFileSizeBytes = maxFileSizeBytes;
+        MaxFileSizeBytes = maxFileSizeBytes ?? EnvMaxFileSizeBytes();
+    }
+
+    private static long EnvMaxFileSizeBytes()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB");
+        return long.TryParse(env, out var mb) && mb > 0 ? mb * 1024 * 1024 : DefaultMaxFileSizeBytes;
+    }
+
+    private static IEnumerable<string> EnvIgnoredDirs()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_IGNORE");
+        if (string.IsNullOrWhiteSpace(env)) return Array.Empty<string>();
+        return env.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     public bool IsIgnoredDirectory(string directoryName) => _ignoredDirs.Contains(directoryName);

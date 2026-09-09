@@ -33,7 +33,8 @@ public static class RepositoryIndexer
     {
         root = Path.GetFullPath(root);
         var dir = IndexStore.GetCacheDir(root);
-        var walker = new FileWalker(new IgnoreRules());
+        var ignore = new IgnoreRules();
+        var walker = new FileWalker(ignore);
         int cores = DegreeOfParallelism();
         var (textBudget, symBudget) = SegmentBudgets(cores);
 
@@ -42,6 +43,21 @@ public static class RepositoryIndexer
         System.Threading.Timer? progressTimer = onProgress is null ? null
             : new System.Threading.Timer(_ => onProgress(Volatile.Read(ref progressFiles), Interlocked.Read(ref progressBytes)),
                                          null, 500, 500);
+
+        // Stall watchdog: if indexing makes no progress for a while (e.g. a pathologically dense
+        // generated file stuck in a segment build), warn instead of hanging silently forever.
+        long stallSeen = -1;
+        int stallSec = StallWarnSeconds();
+        var watchdog = new System.Threading.Timer(_ =>
+        {
+            long cur = Interlocked.Read(ref progressBytes);
+            if (cur == Interlocked.Read(ref stallSeen) && cur > 0)
+                Log.For(root).Warn($"indexing has made no progress for ~{stallSec}s at " +
+                    $"{Volatile.Read(ref progressFiles):N0} files ({cur / 1048576.0:F0} MB) - a pathologically dense " +
+                    $"generated file may be stalling the build. Exclude it with CODECOMPASS_IGNORE=<dir> or lower " +
+                    $"CODECOMPASS_MAX_FILE_MB.");
+            Interlocked.Exchange(ref stallSeen, cur);
+        }, null, stallSec * 1000, stallSec * 1000);
 
         var snapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
         var textSegFiles = new ConcurrentBag<(int Num, string Name)>();
@@ -97,7 +113,17 @@ public static class RepositoryIndexer
 
         sw.Stop();
         progressTimer?.Dispose();
+        watchdog.Dispose();
         onProgress?.Invoke(progressFiles, progressBytes);
+
+        if (walker.OverCapSkipped > 0)
+        {
+            var largest = walker.LargestOverCapPath is null ? "" :
+                $" (largest: {Path.GetFileName(walker.LargestOverCapPath)} {walker.LargestOverCapBytes / 1048576.0:F0} MB)";
+            Log.For(root).Info($"skipped {walker.OverCapSkipped:N0} file(s) over the " +
+                $"{ignore.MaxFileSizeBytes / 1048576.0:F0} MB size cap{largest} - not in the index. " +
+                $"Raise CODECOMPASS_MAX_FILE_MB to include them.");
+        }
 
         var textOrdered = textSegFiles.OrderBy(x => x.Num).Select(x => x.Name).ToList();
         var symOrdered = symSegFiles.OrderBy(x => x.Num).Select(x => x.Name).ToList();
@@ -150,6 +176,12 @@ public static class RepositoryIndexer
     {
         var env = Environment.GetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS");
         return int.TryParse(env, out var v) && v >= 2 ? v : 64;
+    }
+
+    private static int StallWarnSeconds()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_STALL_WARN_SEC");
+        return int.TryParse(env, out var s) && s >= 5 ? s : 60;
     }
 
     /// <summary>Indexing parallelism: CODECOMPASS_THREADS if set (and valid), else all cores.</summary>

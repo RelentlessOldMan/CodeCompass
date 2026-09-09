@@ -17,9 +17,18 @@ public sealed class FileWalker
 
     public FileWalker(IgnoreRules ignore) => _ignore = ignore;
 
+    /// <summary>Files skipped for exceeding the size cap during the last <see cref="Walk"/> (they are
+    /// silently absent from the index otherwise). Valid after enumeration completes.</summary>
+    public int OverCapSkipped { get; private set; }
+    public long LargestOverCapBytes { get; private set; }
+    public string? LargestOverCapPath { get; private set; }
+
     public IEnumerable<FileRecord> Walk(string root)
     {
         root = Path.GetFullPath(root);
+        OverCapSkipped = 0;
+        LargestOverCapBytes = 0;
+        LargestOverCapPath = null;
         var stack = new Stack<string>();
         stack.Push(root);
 
@@ -59,6 +68,13 @@ public sealed class FileWalker
                 long size;
                 try { size = new FileInfo(file).Length; }
                 catch { continue; }
+
+                if (size > _ignore.MaxFileSizeBytes) // count over-cap skips so the coverage gap isn't silent
+                {
+                    OverCapSkipped++;
+                    if (size > LargestOverCapBytes) { LargestOverCapBytes = size; LargestOverCapPath = file; }
+                    continue;
+                }
 
                 var name = Path.GetFileName(file);
                 if (_ignore.IsIgnoredFile(name, size)) continue;

@@ -84,6 +84,23 @@ codecompass symbols <path> <substr>   symbol-name search
 codecompass logs                      show the log folder and files
 ```
 
+## Tuning for huge or generated trees
+
+Indexing is robust on ordinary source at scale, but a tree with many *dense machine-generated
+files* (e.g. multi-MB register-map headers that are millions of `#define` lines) can be
+pathologically slow to index. Knobs to handle that without editing source:
+
+| Env var | Effect |
+|---|---|
+| `CODECOMPASS_MAX_FILE_MB` | Per-file size cap (default 5). Lower it to skip large generated files. |
+| `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
+| `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if indexing makes no progress for this long (default 60). |
+| `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
+
+Files skipped for exceeding the size cap are counted and logged (not silently dropped), so you can
+see the coverage gap. Note: files over the cap are currently absent from search — searching *over*
+the cap is a known limitation.
+
 ## Performance
 
 Measured on an **Intel Core i7-8700** (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro,
