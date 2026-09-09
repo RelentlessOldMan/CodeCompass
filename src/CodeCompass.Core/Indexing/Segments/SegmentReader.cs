@@ -34,6 +34,17 @@ public sealed class SegmentReader : IDisposable
         _docTableOff = _view.ReadInt64(40);
     }
 
+    /// <summary>The i-th trigram key (keys are stored sorted). For enumerating a segment during a merge.</summary>
+    public long GetTermKey(int i) => _view.ReadInt64(_termKeysOff + (long)i * 8);
+
+    /// <summary>Postings (local docIds) for the i-th term, by index (no binary search).</summary>
+    public int[] GetPostingsAt(int i)
+    {
+        long rel = _view.ReadInt64(_termInfoOff + (long)i * 12);
+        int len = _view.ReadInt32(_termInfoOff + (long)i * 12 + 8);
+        return DecodePostings(_postingsOff + rel, len);
+    }
+
     /// <summary>Local docIds containing the trigram, or null if the segment has no such term.</summary>
     public int[]? GetPostings(long key)
     {

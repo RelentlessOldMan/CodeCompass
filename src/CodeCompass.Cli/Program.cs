@@ -192,17 +192,13 @@ static int CmdWatch(string[] args)
                 }
 
                 // Keep a long-running watch from accumulating unbounded segments/tombstones.
+                // Merge existing segments in place (no source-file re-read).
                 if (RepositoryIndexer.NeedsCompaction(text, symbols))
                 {
-                    text.Dispose();
-                    symbols.Dispose();
-                    snapshot.Dispose();
-                    var b = RepositoryIndexer.Build(root);
-                    text = b.Text;
-                    symbols = b.Symbols;
-                    snapshot = RepositoryIndexer.LoadSnapshot(root);
-                    Console.Error.WriteLine("compacted: full rebuild");
-                    Log.For(root).Info("watch: compacted via full rebuild");
+                    text.Compact();
+                    symbols.Compact();
+                    Console.Error.WriteLine("compacted: merged segments");
+                    Log.For(root).Info("watch: compacted (merged segments)");
                 }
             }
         }

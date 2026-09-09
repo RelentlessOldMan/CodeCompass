@@ -153,6 +153,53 @@ public sealed class SegmentedSymbolIndex : IDisposable
         CleanupOrphans();
     }
 
+    /// <summary>
+    /// Merge all segments into a fresh, tombstone-free set, dropping tombstoned paths' symbols.
+    /// Bounded memory: symbols are streamed from each segment into a budget-flushed builder (no
+    /// source files re-read). New segments use fresh monotonic numbers so old maps stay valid.
+    /// </summary>
+    public void Compact()
+    {
+        FlushPending();
+        if (_segments.Count <= 1 && _tombstones.Count == 0) return; // already compact
+
+        var old = _segments.ToList();
+        var merged = new List<SymbolSegmentReader>();
+        var builder = new SymbolSegmentBuilder();
+
+        void FlushMerged()
+        {
+            if (builder.Count == 0) return;
+            var file = Path.Combine(_dir, SegmentFileName(_nextSegmentNumber));
+            _nextSegmentNumber++;
+            builder.WriteTo(file);
+            merged.Add(new SymbolSegmentReader(file));
+            builder = new SymbolSegmentBuilder();
+        }
+
+        for (int segId = 0; segId < old.Count; segId++)
+        {
+            var seg = old[segId];
+            _tombstones.TryGetValue(segId, out var tomb);
+            for (int i = 0; i < seg.Count; i++)
+            {
+                if (tomb is not null && tomb.Contains(seg.GetSymbolPath(i))) continue;
+                builder.Add(seg.GetSymbol(i));
+                if (builder.ApproxBytes >= _budget) FlushMerged();
+            }
+        }
+        FlushMerged();
+
+        foreach (var s in old) s.Dispose();
+        _segments.Clear();
+        _segments.AddRange(merged);
+        _tombstones.Clear();
+
+        SaveManifest();
+        SaveTombstones();
+        CleanupOrphans();
+    }
+
     private void FlushPending()
     {
         if (_pending is null || _pending.Count == 0) { _pending = null; return; }

@@ -286,6 +286,24 @@ public static class RepositoryIndexer
         }
     }
 
+    /// <summary>
+    /// Compact a repo's on-disk index (merge segments, drop tombstones) without re-reading source
+    /// files - the cheap way to reclaim the segments/tombstones a long incremental session builds up.
+    /// Falls back to a full build if no index exists yet. Caller owns/disposes the returned instances.
+    /// </summary>
+    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols) Compact(string root)
+    {
+        root = Path.GetFullPath(root);
+        if (!TryLoad(root, out var text, out var symbols))
+        {
+            var b = Build(root);
+            return (b.Text, b.Symbols);
+        }
+        text.Compact();
+        symbols.Compact();
+        return (text, symbols);
+    }
+
     private static (SegmentedIndex, SegmentedSymbolIndex, UpdateStats) FullRebuild(
         string root, SegmentedIndex? oldText, SegmentedSymbolIndex? oldSymbols, Stopwatch sw)
     {

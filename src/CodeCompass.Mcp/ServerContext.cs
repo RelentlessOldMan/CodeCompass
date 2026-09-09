@@ -332,7 +332,7 @@ public static class ServerContext
                 }
                 finally { Rw.ExitWriteLock(); }
                 if (!compact) return;
-                Log.For(Root).Info("compacting: segment count high after incremental edits; rebuilding");
+                Log.For(Root).Info("compacting: segment count high after incremental edits; merging segments");
             }
             else
             {
@@ -346,10 +346,15 @@ public static class ServerContext
         }
         finally { Rw.ExitUpgradeableReadLock(); }
 
+        // Off-lock so tool calls aren't blocked for the whole operation. A true reconcile (events
+        // were lost) must re-read files (Build); a compaction just merges existing segments.
         try
         {
-            var built = RepositoryIndexer.Build(Root);
-            Swap(built.Text, built.Symbols);
+            SegmentedIndex nt;
+            SegmentedSymbolIndex ns;
+            if (batch.FullReconcile) { var b = RepositoryIndexer.Build(Root); nt = b.Text; ns = b.Symbols; }
+            else { var c = RepositoryIndexer.Compact(Root); nt = c.Text; ns = c.Symbols; }
+            Swap(nt, ns);
             DrainPending();
         }
         catch (Exception ex)
@@ -357,7 +362,7 @@ public static class ServerContext
             Rw.EnterWriteLock();
             try { _state = IndexState.NeedsCliBuild; _pendingPaths.Clear(); _pendingReconcile = false; }
             finally { Rw.ExitWriteLock(); }
-            Log.For(Root).Error("full reconcile failed", ex);
+            Log.For(Root).Error("reconcile/compaction failed", ex);
         }
     }
 

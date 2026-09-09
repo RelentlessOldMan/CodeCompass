@@ -206,6 +206,67 @@ public sealed class SegmentedIndex : IDisposable
         CleanupOrphans();
     }
 
+    /// <summary>
+    /// Merge all segments into a fresh, tombstone-free set - reclaiming the segments and tombstones
+    /// that a long-running incremental session accumulates. Bounded memory: each old segment is
+    /// inverted (postings -> per-doc trigrams) one at a time and re-added to a budget-flushed
+    /// builder, so no source files are re-read and the whole index never sits in RAM. New segments
+    /// use fresh monotonic numbers, so old readers/maps stay valid until disposed (Windows-safe).
+    /// </summary>
+    public void Compact()
+    {
+        FlushPending();
+        if (_segments.Count <= 1 && _tombstones.Count == 0) return; // already compact
+
+        var old = _segments.ToList();
+        var merged = new List<SegmentReader>();
+        var builder = new SegmentBuilder();
+
+        void FlushMerged()
+        {
+            if (builder.DocCount == 0) return;
+            var file = Path.Combine(_dir, SegmentFileName(_nextSegmentNumber));
+            _nextSegmentNumber++;
+            builder.WriteTo(file);
+            merged.Add(new SegmentReader(file));
+            builder = new SegmentBuilder();
+        }
+
+        for (int segId = 0; segId < old.Count; segId++)
+        {
+            var seg = old[segId];
+            _tombstones.TryGetValue(segId, out var tomb);
+
+            // Reconstruct each live doc's trigram set by inverting the segment's posting lists.
+            var docTris = new List<long>[seg.DocCount];
+            for (int d = 0; d < seg.DocCount; d++)
+                if (tomb is null || !tomb.Contains(d)) docTris[d] = new List<long>();
+            for (int t = 0; t < seg.TermCount; t++)
+            {
+                long key = seg.GetTermKey(t);
+                foreach (var d in seg.GetPostingsAt(t)) docTris[d]?.Add(key);
+            }
+            for (int d = 0; d < seg.DocCount; d++)
+            {
+                if (docTris[d] is null) continue;
+                builder.AddDocument(seg.GetPath(d), docTris[d].ToArray());
+                if (builder.ApproxBytes >= _budget) FlushMerged();
+            }
+        }
+        FlushMerged();
+
+        foreach (var s in old) s.Dispose();
+        _segments.Clear();
+        _segments.AddRange(merged);
+        _tombstones.Clear();
+        _pathToDoc.Clear();
+        _pathMapBuilt = false;
+
+        SaveManifest();
+        SaveTombstones();
+        CleanupOrphans();
+    }
+
     private void FlushPending()
     {
         if (_pending is null || _pending.DocCount == 0) { _pending = null; return; }
