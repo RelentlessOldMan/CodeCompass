@@ -27,6 +27,9 @@ public static class ServerContext
 {
     private static readonly ReaderWriterLockSlim Rw = new(LockRecursionPolicy.NoRecursion);
     private static readonly object AnalyzerGate = new();
+    // Serializes full builds/compactions so two off-lock rebuilds (e.g. a manual reindex racing
+    // the watcher) can't target the same segment directory and collide on seg-NNNNN filenames.
+    private static readonly SemaphoreSlim BuildGate = new(1, 1);
 
     private static SegmentedIndex? _text;
     private static SegmentedSymbolIndex? _symbols;
@@ -171,6 +174,7 @@ public static class ServerContext
     public static IndexStats Rebuild()
     {
         Log.For(Root).Info("manual reindex requested");
+        BuildGate.Wait(); // one builder at a time; waits out any in-flight rebuild/compaction
         Rw.EnterWriteLock();
         try { _rebuilding = true; } // divert the watcher to the pending queue; waits out any in-flight incremental
         finally { Rw.ExitWriteLock(); }
@@ -186,6 +190,7 @@ public static class ServerContext
             Rw.EnterWriteLock();
             try { _rebuilding = false; }
             finally { Rw.ExitWriteLock(); }
+            BuildGate.Release();
             DrainPending(); // apply whatever the watcher captured during the rebuild (onto new or, on failure, old index)
         }
     }
@@ -269,13 +274,15 @@ public static class ServerContext
 
     private static void BackgroundBuild()
     {
+        BuildGate.Wait(); // serialize against a manual reindex / watcher rebuild
+        bool ok = false;
         try
         {
             var built = RepositoryIndexer.Build(Root,
                 (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); });
             Swap(built.Text, built.Symbols);
             Log.For(Root).Info($"background build complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
-            DrainPending();
+            ok = true;
         }
         catch (Exception ex)
         {
@@ -284,6 +291,8 @@ public static class ServerContext
             finally { Rw.ExitWriteLock(); }
             Log.For(Root).Error("background build failed; falling back to CLI-build state", ex);
         }
+        finally { BuildGate.Release(); }
+        if (ok) DrainPending();
     }
 
     private static bool ExceedsAutoLimit(out long totalBytes)
@@ -362,8 +371,11 @@ public static class ServerContext
         }
         finally { Rw.ExitUpgradeableReadLock(); }
 
-        // Off-lock so tool calls aren't blocked for the whole operation. A true reconcile (events
-        // were lost) must re-read files (Build); a compaction just merges existing segments.
+        // Off-lock so tool calls aren't blocked for the whole operation, but under BuildGate so it
+        // can't race a manual reindex for the segment directory. A true reconcile (events were
+        // lost) must re-read files (Build); a compaction just merges existing segments.
+        BuildGate.Wait();
+        bool ok = false;
         try
         {
             SegmentedIndex nt;
@@ -371,7 +383,7 @@ public static class ServerContext
             if (batch.FullReconcile) { var b = RepositoryIndexer.Build(Root); nt = b.Text; ns = b.Symbols; }
             else { var c = RepositoryIndexer.Compact(Root); nt = c.Text; ns = c.Symbols; }
             Swap(nt, ns);
-            DrainPending();
+            ok = true;
         }
         catch (Exception ex)
         {
@@ -380,6 +392,8 @@ public static class ServerContext
             finally { Rw.ExitWriteLock(); }
             Log.For(Root).Error("reconcile/compaction failed", ex);
         }
+        finally { BuildGate.Release(); }
+        if (ok) DrainPending();
     }
 
     // Caller holds the write lock.
@@ -423,8 +437,10 @@ public static class ServerContext
             if (reconcile)
             {
                 Log.For(Root).Info("draining a full-reconcile request captured during build");
+                BuildGate.Wait(); // serialize with any other rebuild
                 try { var b = RepositoryIndexer.Build(Root); Swap(b.Text, b.Symbols); }
                 catch (Exception ex) { Log.For(Root).Error("drained reconcile failed", ex); return; }
+                finally { BuildGate.Release(); }
             }
         }
     }
