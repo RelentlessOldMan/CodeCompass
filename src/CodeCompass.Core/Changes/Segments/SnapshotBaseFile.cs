@@ -111,6 +111,13 @@ public sealed class SnapshotBaseReader : IDisposable
         _sizesOff = _view.ReadInt64(28);
         _mtimesOff = _view.ReadInt64(36);
         _hashesOff = _view.ReadInt64(44);
+
+        // Reject a structurally-corrupt/tampered base at open so callers rebuild.
+        long cap = _view.Capacity;
+        if (Count < 0 || _pathOffsetsOff < 0 || _pathBlobOff < _pathOffsetsOff ||
+            _sizesOff < _pathBlobOff || _mtimesOff < _sizesOff || _hashesOff < _mtimesOff ||
+            _hashesOff + (long)Count * SnapshotBaseFile.HashBytes > cap)
+            throw new InvalidDataException("corrupt CodeCompass snapshot base (bad section offsets)");
     }
 
     public string GetPath(int i)

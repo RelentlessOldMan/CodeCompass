@@ -32,6 +32,13 @@ public sealed class SegmentReader : IDisposable
         _termInfoOff = _view.ReadInt64(24);
         _postingsOff = _view.ReadInt64(32);
         _docTableOff = _view.ReadInt64(40);
+
+        // Reject a structurally-corrupt/tampered file at open (offsets must be ascending and in
+        // bounds) so callers rebuild instead of hitting an OOB/huge-alloc on a later read.
+        long cap = _view.Capacity;
+        if (DocCount < 0 || TermCount < 0 || _termKeysOff < 0 || _termInfoOff < _termKeysOff ||
+            _postingsOff < _termInfoOff || _docTableOff < _postingsOff || _docTableOff > cap)
+            throw new InvalidDataException("corrupt CodeCompass segment (bad section offsets)");
     }
 
     /// <summary>The i-th trigram key (keys are stored sorted). For enumerating a segment during a merge.</summary>

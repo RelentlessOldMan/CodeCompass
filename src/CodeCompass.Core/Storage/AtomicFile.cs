@@ -1,6 +1,23 @@
+using System.Linq;
 using System.Text;
 
 namespace CodeCompass.Core.Storage;
+
+/// <summary>
+/// Path-safety checks for values read back from on-disk index metadata (manifests, doc tables).
+/// A corrupt or tampered cache must not be able to make the tool read/return files outside the
+/// repo or write outside the cache directory.
+/// </summary>
+public static class PathSafety
+{
+    /// <summary>A relative, in-repo path: not rooted and with no ".." segment.</summary>
+    public static bool IsInsideRepo(string rel) =>
+        rel.Length > 0 && !Path.IsPathRooted(rel) && !rel.Split('/', '\\').Any(p => p == "..");
+
+    /// <summary>A bare filename (no directory separators, not rooted) - resolves only inside its dir.</summary>
+    public static bool IsBareFileName(string name) =>
+        name.Length > 0 && name == Path.GetFileName(name);
+}
 
 /// <summary>
 /// Small IO helpers shared by the on-disk index/snapshot code, so the invariants (atomic

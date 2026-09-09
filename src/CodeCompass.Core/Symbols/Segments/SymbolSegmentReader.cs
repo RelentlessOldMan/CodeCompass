@@ -36,6 +36,14 @@ public sealed class SymbolSegmentReader : IDisposable
         _nameBlobOff = _view.ReadInt64(56);
         _pathOffsetsOff = _view.ReadInt64(64);
         _pathBlobOff = _view.ReadInt64(72);
+
+        // Reject a structurally-corrupt/tampered segment at open so callers rebuild.
+        long cap = _view.Capacity;
+        if (Count < 0 || PathCount < 0 || _nameOffsetsOff < 0 || _kindsOff < _nameOffsetsOff ||
+            _pathIdsOff < _kindsOff || _linesOff < _pathIdsOff || _colsOff < _linesOff ||
+            _nameBlobOff < _colsOff || _pathOffsetsOff < _nameBlobOff ||
+            _pathBlobOff < _pathOffsetsOff || _pathBlobOff > cap)
+            throw new InvalidDataException("corrupt CodeCompass symbol segment (bad section offsets)");
     }
 
     public string GetName(int i)

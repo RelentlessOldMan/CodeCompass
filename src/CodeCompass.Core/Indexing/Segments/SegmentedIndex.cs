@@ -178,6 +178,9 @@ public sealed class SegmentedIndex : IDisposable
             {
                 if (tomb is not null && tomb.Contains(local)) continue;
                 var rel = seg.GetPath(local);
+                // Defence in depth: paths come from the index, but a tampered/corrupt cache could
+                // hold a "../" or rooted path - never read (and return to the agent) outside the repo.
+                if (!PathSafety.IsInsideRepo(rel)) continue;
                 var full = Path.Combine(_root, rel.Replace('/', Path.DirectorySeparatorChar));
                 string text;
                 try { text = File.ReadAllText(full); }
@@ -330,6 +333,7 @@ public sealed class SegmentedIndex : IDisposable
         if (lines.Length >= 2) int.TryParse(lines[1], out _nextSegmentNumber);
         for (int i = 2; i < lines.Length; i++)
         {
+            if (!PathSafety.IsBareFileName(lines[i])) continue; // a tampered manifest can't point outside _dir
             var file = Path.Combine(_dir, lines[i]);
             if (File.Exists(file)) _segments.Add(new SegmentReader(file));
         }

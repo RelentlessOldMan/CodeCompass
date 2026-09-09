@@ -267,7 +267,7 @@ public sealed class DiskSnapshot : IDisposable
         string[] lines;
         try { lines = File.ReadAllLines(mf); } catch { return; }
 
-        if (lines.Length >= 1 && lines[0].Length > 0)
+        if (lines.Length >= 1 && PathSafety.IsBareFileName(lines[0]))
         {
             var bf = Path.Combine(_dir, lines[0]);
             if (File.Exists(bf))

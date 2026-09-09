@@ -232,6 +232,7 @@ public sealed class SegmentedSymbolIndex : IDisposable
         if (lines.Length >= 1) int.TryParse(lines[0], out _nextSegmentNumber);
         for (int i = 1; i < lines.Length; i++)
         {
+            if (!PathSafety.IsBareFileName(lines[i])) continue; // a tampered manifest can't point outside _dir
             var file = Path.Combine(_dir, lines[i]);
             if (File.Exists(file)) _segments.Add(new SymbolSegmentReader(file));
         }
