@@ -25,6 +25,10 @@ public static class ProcessPerformance
     private static extern bool SetProcessInformation(IntPtr hProcess, int ProcessInformationClass,
         ref PROCESS_POWER_THROTTLING_STATE ProcessInformation, int ProcessInformationSize);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessInformation(IntPtr hProcess, int ProcessInformationClass,
+        ref PROCESS_POWER_THROTTLING_STATE ProcessInformation, int ProcessInformationSize);
+
     private const int ProcessPowerThrottling = 4; // ProcessPowerThrottling from PROCESS_INFORMATION_CLASS
     private const uint PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
     private const uint PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1;
@@ -60,5 +64,26 @@ public static class ProcessPerformance
         // starving the UI.
         try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.AboveNormal; }
         catch { /* priority hint is not worth failing the run over */ }
+    }
+
+    /// <summary>
+    /// Reads the process's current power-throttling policy back from the OS and reports whether
+    /// execution-speed (EcoQoS) throttling is explicitly opted out - i.e. the fix actually took.
+    /// Returns null if the OS doesn't support the query (pre-Win10-1709 / non-Windows). Diagnostic /
+    /// test hook only.
+    /// </summary>
+    public static bool? ExecutionSpeedThrottlingDisabled()
+    {
+        try
+        {
+            var s = new PROCESS_POWER_THROTTLING_STATE { Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION };
+            if (!GetProcessInformation(Process.GetCurrentProcess().Handle, ProcessPowerThrottling,
+                    ref s, Marshal.SizeOf(s)))
+                return null;
+            // Opted out when we manage execution speed (ControlMask bit set) and its throttle is OFF.
+            return (s.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0
+                   && (s.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) == 0;
+        }
+        catch { return null; }
     }
 }
