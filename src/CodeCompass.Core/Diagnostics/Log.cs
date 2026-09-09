@@ -205,9 +205,9 @@ public sealed class DiskLogger
             if (!fi.Exists || fi.Length < max) return; // another process already rotated
 
             int keep = Keep();
-            if (keep == 0) { TryDelete(_path); return; }
+            if (keep == 0) { AtomicFile.TryDelete(_path); return; }
 
-            TryDelete($"{_path}.{keep}");
+            AtomicFile.TryDelete($"{_path}.{keep}");
             for (int i = keep - 1; i >= 1; i--)
                 TryMove($"{_path}.{i}", $"{_path}.{i + 1}");
             TryMove(_path, $"{_path}.1");
@@ -220,11 +220,9 @@ public sealed class DiskLogger
         }
     }
 
-    private static void TryDelete(string p) { try { if (File.Exists(p)) File.Delete(p); } catch { } }
-
     private static void TryMove(string from, string to)
     {
-        try { if (File.Exists(from)) { TryDelete(to); File.Move(from, to); } } catch { }
+        try { if (File.Exists(from)) { AtomicFile.TryDelete(to); File.Move(from, to); } } catch { }
     }
 
     private static string Pad(LogLevel l) => l switch

@@ -1,3 +1,5 @@
+using CodeCompass.Core.Storage;
+
 namespace CodeCompass.Core.Symbols.Segments;
 
 /// <summary>
@@ -61,17 +63,7 @@ public sealed class SegmentedSymbolIndex : IDisposable
         return idx;
     }
 
-    public static int NextSegmentNumber(string dir)
-    {
-        int max = -1;
-        if (System.IO.Directory.Exists(dir))
-            foreach (var f in System.IO.Directory.EnumerateFiles(dir, SegmentPattern))
-            {
-                var name = Path.GetFileNameWithoutExtension(f); // "sym-00000123"
-                if (name.Length > 4 && int.TryParse(name.AsSpan(4), out var n) && n > max) max = n;
-            }
-        return max + 1;
-    }
+    public static int NextSegmentNumber(string dir) => NumberedFiles.Next(dir, SegmentPattern);
 
     public static string SegmentFileName(int number) => $"sym-{number:D8}.ccsym";
 
@@ -210,44 +202,26 @@ public sealed class SegmentedSymbolIndex : IDisposable
         _segments.Add(new SymbolSegmentReader(file));
     }
 
-    private void SaveManifest()
+    private void SaveManifest() => AtomicFile.WriteText(Path.Combine(_dir, ManifestName), w =>
     {
-        var path = Path.Combine(_dir, ManifestName);
-        var tmp = path + ".tmp";
-        using (var w = new StreamWriter(tmp, append: false))
-        {
-            w.WriteLine(_nextSegmentNumber);
-            foreach (var s in _segments) w.WriteLine(Path.GetFileName(s.FilePath));
-        }
-        File.Move(tmp, path, overwrite: true); // atomic: a crash never leaves a truncated manifest
-    }
+        w.WriteLine(_nextSegmentNumber);
+        foreach (var s in _segments) w.WriteLine(Path.GetFileName(s.FilePath));
+    });
 
-    private void SaveTombstones()
+    private void SaveTombstones() => AtomicFile.Write(Path.Combine(_dir, TombstoneName), fs =>
     {
-        var path = Path.Combine(_dir, TombstoneName);
-        var tmp = path + ".tmp";
-        using (var fs = File.Create(tmp))
-        using (var w = new BinaryWriter(fs, System.Text.Encoding.UTF8))
+        using var w = new BinaryWriter(fs, System.Text.Encoding.UTF8, leaveOpen: true);
+        w.Write(_tombstones.Count);
+        foreach (var (seg, paths) in _tombstones)
         {
-            w.Write(_tombstones.Count);
-            foreach (var (seg, paths) in _tombstones)
-            {
-                w.Write(seg);
-                w.Write(paths.Count);
-                foreach (var p in paths) w.Write(p);
-            }
+            w.Write(seg);
+            w.Write(paths.Count);
+            foreach (var p in paths) w.Write(p);
         }
-        File.Move(tmp, path, overwrite: true);
-    }
+    });
 
-    private void CleanupOrphans()
-    {
-        var live = new HashSet<string>(
-            _segments.Select(s => Path.GetFileName(s.FilePath)), StringComparer.OrdinalIgnoreCase);
-        foreach (var f in System.IO.Directory.EnumerateFiles(_dir, SegmentPattern))
-            if (!live.Contains(Path.GetFileName(f)))
-                try { File.Delete(f); } catch { /* still mapped: leave it */ }
-    }
+    private void CleanupOrphans() => NumberedFiles.CleanupOrphans(_dir, SegmentPattern,
+        new HashSet<string>(_segments.Select(s => Path.GetFileName(s.FilePath)), StringComparer.OrdinalIgnoreCase));
 
     private void Load()
     {

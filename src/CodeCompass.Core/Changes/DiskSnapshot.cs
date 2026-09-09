@@ -1,6 +1,7 @@
 using System.Text;
 using CodeCompass.Core.Changes.Segments;
 using CodeCompass.Core.Diagnostics;
+using CodeCompass.Core.Storage;
 
 namespace CodeCompass.Core.Changes;
 
@@ -236,7 +237,7 @@ public sealed class DiskSnapshot : IDisposable
                                keys.Select(k => (k, snapshot[k])));
 
         WriteManifestTo(dir, name, num + 1);
-        TryDelete(Path.Combine(dir, JournalName));
+        AtomicFile.TryDelete(Path.Combine(dir, JournalName));
         CleanupOrphansIn(dir, name);
     }
 
@@ -253,7 +254,7 @@ public sealed class DiskSnapshot : IDisposable
             var dict = SnapshotStore.Load(fs);
             fs.Dispose();
             WriteFullBase(_dir, dict);
-            TryDelete(legacy);
+            AtomicFile.TryDelete(legacy);
             Log.Global.Info($"migrated legacy snapshot ({dict.Count:N0} entries) to on-disk base in {_dir}");
         }
         catch (Exception ex) { Log.Global.Warn($"legacy snapshot migration failed in {_dir}: {ex.Message}"); }
@@ -318,74 +319,44 @@ public sealed class DiskSnapshot : IDisposable
 
     // ---- writers (atomic via temp + replace) ----
 
-    private void WriteJournal()
+    private void WriteJournal() => AtomicFile.Write(Path.Combine(_dir, JournalName), fs =>
     {
-        var jp = Path.Combine(_dir, JournalName);
-        var tmp = jp + ".tmp";
-        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
-        using (var w = new BinaryWriter(fs, Encoding.UTF8, leaveOpen: true))
+        using var w = new BinaryWriter(fs, Encoding.UTF8, leaveOpen: true);
+        w.Write(JournalMagic);
+        w.Write(_overlay.Count);
+        foreach (var (path, state) in _overlay)
         {
-            w.Write(JournalMagic);
-            w.Write(_overlay.Count);
-            foreach (var (path, state) in _overlay)
-            {
-                w.Write(path);
-                w.Write(state.Size);
-                w.Write(state.MTimeTicks);
-                w.Write(state.ContentHash);
-            }
-            w.Write(_removed.Count);
-            foreach (var p in _removed) w.Write(p);
+            w.Write(path);
+            w.Write(state.Size);
+            w.Write(state.MTimeTicks);
+            w.Write(state.ContentHash);
         }
-        File.Move(tmp, jp, overwrite: true);
-    }
+        w.Write(_removed.Count);
+        foreach (var p in _removed) w.Write(p);
+    });
 
     private void WriteManifest(string baseName) => WriteManifestTo(_dir, baseName, _nextBaseNumber);
 
-    private static void WriteManifestTo(string dir, string baseName, int nextNumber)
-    {
-        var mf = Path.Combine(dir, ManifestName);
-        var tmp = mf + ".tmp";
-        using (var w = new StreamWriter(tmp, append: false))
+    private static void WriteManifestTo(string dir, string baseName, int nextNumber) =>
+        AtomicFile.WriteText(Path.Combine(dir, ManifestName), w =>
         {
             w.WriteLine(baseName);
             w.WriteLine(nextNumber);
-        }
-        File.Move(tmp, mf, overwrite: true);
-    }
+        });
 
-    private void DeleteJournal() => TryDelete(Path.Combine(_dir, JournalName));
+    private void DeleteJournal() => AtomicFile.TryDelete(Path.Combine(_dir, JournalName));
 
     // ---- helpers ----
 
     public static string BaseFileName(int number) => $"snapshot-{number:D8}.base";
 
-    private static int NextBaseNumber(string dir)
-    {
-        int max = -1;
-        if (System.IO.Directory.Exists(dir))
-            foreach (var f in System.IO.Directory.EnumerateFiles(dir, BasePattern))
-            {
-                var name = Path.GetFileNameWithoutExtension(f); // "snapshot-00000123"
-                int dash = name.LastIndexOf('-');
-                if (dash >= 0 && int.TryParse(name.AsSpan(dash + 1), out var n) && n > max) max = n;
-            }
-        return max + 1;
-    }
+    private static int NextBaseNumber(string dir) => NumberedFiles.Next(dir, BasePattern);
 
     private void CleanupOrphans(string keepName) => CleanupOrphansIn(_dir, keepName);
 
-    private static void CleanupOrphansIn(string dir, string keepName)
-    {
-        foreach (var f in System.IO.Directory.EnumerateFiles(dir, BasePattern))
-            if (!string.Equals(Path.GetFileName(f), keepName, StringComparison.OrdinalIgnoreCase))
-                TryDelete(f); // may still be mmapped by another reader: best-effort
-    }
-
-    private static void TryDelete(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); } catch { /* locked/gone: ignore */ }
-    }
+    private static void CleanupOrphansIn(string dir, string keepName) =>
+        NumberedFiles.CleanupOrphans(dir, BasePattern,
+            new HashSet<string>(new[] { keepName }, StringComparer.OrdinalIgnoreCase));
 
     private static int ThresholdFromEnv()
     {
