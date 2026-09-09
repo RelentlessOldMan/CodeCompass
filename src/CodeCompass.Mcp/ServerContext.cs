@@ -61,9 +61,12 @@ public static class ServerContext
 
     public static void Init(string root)
     {
+        RepositoryWatcher? oldWatcher;
         Rw.EnterWriteLock();
         try
         {
+            oldWatcher = _watcher; // dispose after releasing the lock (see StopLiveIndex)
+            _watcher = null;
             Root = Path.GetFullPath(root);
             _text?.Dispose();
             _symbols?.Dispose();
@@ -79,6 +82,19 @@ public static class ServerContext
             _rebuilding = false;
         }
         finally { Rw.ExitWriteLock(); }
+        oldWatcher?.Dispose();
+    }
+
+    /// <summary>Stop live indexing and release the watcher (clean shutdown / re-point).</summary>
+    public static void StopLiveIndex()
+    {
+        RepositoryWatcher? w;
+        Rw.EnterWriteLock();
+        try { w = _watcher; _watcher = null; }
+        finally { Rw.ExitWriteLock(); }
+        // Dispose OUTSIDE the lock: the watcher drains an in-flight OnChanges callback, which
+        // itself needs the lock - disposing under the lock would deadlock.
+        w?.Dispose();
     }
 
     /// <summary>

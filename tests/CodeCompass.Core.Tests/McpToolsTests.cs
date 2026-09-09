@@ -8,7 +8,9 @@ using Xunit;
 namespace CodeCompass.Core.Tests;
 
 // All MCP tool tests live in one class so they share ServerContext's static state
-// serially (xunit runs methods within a class sequentially).
+// serially (xunit runs methods within a class sequentially). The collection serializes this
+// against CompactionTests too - both drive the process-global CODECOMPASS_COMPACT_SEGMENTS env.
+[Collection("compaction-env")]
 public class McpToolsTests
 {
     private static TempRepo NewIndexedRepo()
@@ -135,6 +137,66 @@ public class McpToolsTests
         searchers.ForEach(t => t.Join());
 
         Assert.Null(failure); // no ObjectDisposed/AccessViolation from searching a swapped index
+    }
+
+    [Fact]
+    public void Soak_ConcurrentSearchReindexWatchedEditsAndCompaction_NoCrash()
+    {
+        var old = Environment.GetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS");
+        Environment.SetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS", "3"); // force frequent compaction
+        using var repo = new TempRepo();
+        try
+        {
+            for (int i = 0; i < 5; i++) repo.Write($"f{i}.cs", $"namespace N {{ class C{i} {{ void M(){{}} }} }}");
+            ServerContext.Init(repo.Root);
+            CodeCompassTools.Reindex();          // become Ready
+            ServerContext.EnableLiveIndex(100);  // live watcher -> incremental + compaction under edits
+
+            int stop = 0;
+            Exception? failure = null;
+            void Guard(Action loop) { try { loop(); } catch (Exception ex) { Interlocked.CompareExchange(ref failure, ex, null); } }
+
+            var threads = new System.Collections.Generic.List<Thread>();
+            for (int t = 0; t < 3; t++)
+                threads.Add(new Thread(() => Guard(() =>
+                {
+                    while (Volatile.Read(ref stop) == 0) { _ = CodeCompassTools.SearchCode("class"); _ = CodeCompassTools.FindDefinition("C1"); }
+                })));
+            threads.Add(new Thread(() => Guard(() =>
+            {
+                while (Volatile.Read(ref stop) == 0) { CodeCompassTools.Reindex(); Thread.Sleep(150); }
+            })));
+            threads.Add(new Thread(() => Guard(() =>
+            {
+                int i = 0;
+                while (Volatile.Read(ref stop) == 0)
+                {
+                    // The indexer may have the file open for reading; a real editor writes
+                    // atomically, so tolerate our own naive-write contention here.
+                    try { repo.Write($"f{i % 5}.cs", $"namespace N {{ class C{i % 5} {{ void M{i}(){{}} }} }}"); }
+                    catch (System.IO.IOException) { }
+                    i++;
+                    Thread.Sleep(40);
+                }
+            })));
+
+            threads.ForEach(t => t.Start());
+            Thread.Sleep(4000);
+            Volatile.Write(ref stop, 1);
+            threads.ForEach(t => t.Join());
+            ServerContext.StopLiveIndex();
+
+            Assert.Null(failure); // no crash from search racing reindex/compaction/watcher edits
+            // Still functional afterward.
+            CodeCompassTools.Reindex();
+            Assert.Contains("class", CodeCompassTools.SearchCode("class"));
+        }
+        finally
+        {
+            ServerContext.StopLiveIndex();
+            Environment.SetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS", old);
+            ServerContext.Init(repo.Root); // reset shared static state for other tests
+        }
     }
 
     [Fact]

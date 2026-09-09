@@ -8,6 +8,9 @@ namespace CodeCompass.Core.Tests;
 // The incremental path appends a segment (and tombstones) per batch; without compaction a
 // long-running watch session grows unbounded. NeedsCompaction() flags when the watch orchestration
 // should reset via a full rebuild.
+// Shares the process-global CODECOMPASS_COMPACT_SEGMENTS env with McpToolsTests' soak test, so the
+// collection serializes the two classes to avoid a cross-test env race.
+[Collection("compaction-env")]
 public class CompactionTests
 {
     [Fact]
