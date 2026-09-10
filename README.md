@@ -127,7 +127,7 @@ editing source:
 | `CODECOMPASS_MAX_SYMBOL_MB` | Skip tree-sitter symbol extraction above this size (default 1). Bounds per-file parse time; raise it if you have large *valid* generated code whose symbols you want (run `symstats` first to see the real sizes). |
 | `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing entirely (default 5). Lower it to skip large generated files from search too. |
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
-| `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if indexing makes no progress for this long (default 60). |
+| `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if a build stalls or a single file is held longer than this (default 60, min 5). The warning names the exact file(s) each worker is stuck on, so a pathologically slow file is identified rather than guessed. |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
 | `CODECOMPASS_READ_BUDGET_MB` | Cap on total file bytes held in memory at once during a parallel build (default scales to RAM: ≈1/16th of available, clamped 256 MB–4 GB). Prevents N cores each loading a multi-GB file simultaneously when `MAX_FILE_MB` is large. A file bigger than the budget reads solo. |
 

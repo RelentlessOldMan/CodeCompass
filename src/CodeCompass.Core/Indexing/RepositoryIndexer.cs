@@ -13,7 +13,10 @@ using CodeCompass.Core.Walking;
 
 namespace CodeCompass.Core.Indexing;
 
-public sealed record IndexStats(int Files, long Bytes, int Trigrams, int Symbols, double Seconds, long IndexBytes, int Cores);
+// TrigramPostings is the sum of each document's distinct-trigram count - a deterministic total
+// (independent of how files are split across segments), unlike a per-segment distinct-term sum which
+// double-counts shared trigrams and varies run to run with parallel scheduling.
+public sealed record IndexStats(int Files, long Bytes, long TrigramPostings, int Symbols, double Seconds, long IndexBytes, int Cores);
 
 public sealed record UpdateStats(int Added, int Modified, int Removed, double Seconds, bool FullRebuild);
 
@@ -46,20 +49,54 @@ public static class RepositoryIndexer
             : new System.Threading.Timer(_ => onProgress(Volatile.Read(ref progressFiles), Interlocked.Read(ref progressBytes)),
                                          null, 500, 500);
 
-        // Stall watchdog: if indexing makes no progress for a while (e.g. a pathologically dense
-        // generated file stuck in a segment build), warn instead of hanging silently forever.
-        long stallSeen = -1;
+        // What each worker is chewing on right now (thread id -> file + when it started), so the
+        // watchdog can name the exact file(s) wedging a build instead of guessing.
+        var inFlight = new ConcurrentDictionary<int, (string Path, long Size, long StartMs)>();
+        var clock = Stopwatch.StartNew();
+
+        // Stall watchdog. Two triggers, both content-independent: (1) the byte counter is frozen (a
+        // hard stall), or (2) any worker has held a single file longer than the stall window - which
+        // catches the "single-threaded tail" (one slow file grinding one worker while the counter
+        // still creeps from the others, so a zero-progress test alone stays silent). It logs the
+        // files in flight and how long each has been held, naming the culprit rather than guessing.
+        //
+        // Runs on a DEDICATED thread, not a Timer: Parallel.ForEach below saturates the thread pool,
+        // and Timer callbacks are queued to that same pool - so a pool-based watchdog is starved for
+        // the whole build and never fires (this is why the earlier Timer watchdog stayed silent under
+        // load). A dedicated thread checks on schedule regardless of pool pressure.
         int stallSec = StallWarnSeconds();
-        var watchdog = new System.Threading.Timer(_ =>
+        long stallMs = stallSec * 1000L;
+        var buildDone = new ManualResetEventSlim(false);
+        var watchdog = new Thread(() =>
         {
-            long cur = Interlocked.Read(ref progressBytes);
-            if (cur == Interlocked.Read(ref stallSeen) && cur > 0)
-                Log.For(root).Warn($"indexing has made no progress for ~{stallSec}s at " +
-                    $"{Volatile.Read(ref progressFiles):N0} files ({cur / 1048576.0:F0} MB) - a pathologically dense " +
-                    $"generated file may be stalling the build. Exclude it with CODECOMPASS_IGNORE=<dir> or lower " +
-                    $"CODECOMPASS_MAX_FILE_MB.");
-            Interlocked.Exchange(ref stallSeen, cur);
-        }, null, stallSec * 1000, stallSec * 1000);
+            long prevBytes = -1;
+            int dumps = 0;
+            while (!buildDone.Wait((int)stallMs))
+            {
+                long curBytes = Interlocked.Read(ref progressBytes);
+                int curFiles = Volatile.Read(ref progressFiles);
+                long now = clock.ElapsedMilliseconds;
+                bool hardStall = curBytes == prevBytes && curBytes > 0;
+                prevBytes = curBytes;
+
+                var held = inFlight.ToArray();
+                var stuck = held.Where(k => now - k.Value.StartMs >= stallMs).ToArray();
+                if (!(hardStall || stuck.Length > 0) || dumps >= 3) continue;
+                dumps++;
+
+                var log = Log.For(root);
+                log.Warn(stuck.Length > 0
+                    ? $"indexing slow: {stuck.Length} worker(s) held one file >{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB) - a slow-to-parse file is grinding a worker while others may idle."
+                    : $"indexing made no progress for ~{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB).");
+                if (held.Length == 0)
+                    log.Warn("  (no files in flight - the stall is in a post-parse/finalize step, not a single file)");
+                foreach (var kv in held.OrderByDescending(k => now - k.Value.StartMs))
+                    log.Warn($"  worker {kv.Key}: {kv.Value.Path} ({kv.Value.Size / 1048576.0:F1} MB) held {(now - kv.Value.StartMs) / 1000.0:F0}s");
+                log.Warn("If a file has been held many seconds it is the culprit: exclude it (CODECOMPASS_IGNORE) or " +
+                         "lower CODECOMPASS_MAX_SYMBOL_MB / CODECOMPASS_MAX_FILE_MB.");
+            }
+        }) { IsBackground = true, Name = "cc-index-watchdog" };
+        watchdog.Start();
 
         // Bound how much file content is read at once so a large file cap can't let every core
         // load a multi-GB file simultaneously and exhaust RAM. Scales with machine memory.
@@ -71,19 +108,29 @@ public static class RepositoryIndexer
         int textSegCounter = SegmentedIndex.NextSegmentNumber(dir);
         int symSegCounter = SegmentedSymbolIndex.NextSegmentNumber(dir);
         long totalBytes = 0;
+        long totalPostings = 0;
         var gate = new object();
 
         var sw = Stopwatch.StartNew();
 
         // Each worker fills private trigram + symbol segment buffers lock-free and flushes them
         // to disk at their byte budgets, so build RAM is bounded regardless of repo size.
+        //
+        // NoBuffering (one item at a time) instead of the default growing-chunk partitioner: file
+        // parse cost varies enormously (a dense/nested generated header can be 100x a normal file),
+        // and such files cluster together in directory order. With chunking, one worker grabs a chunk
+        // that is all-expensive and grinds it single-threaded while the other cores sit idle - the
+        // "single-threaded tail" seen on real generated-header repos. One-at-a-time hand-out keeps
+        // every core fed to the very end; the per-item sync cost is negligible next to read+parse.
         Parallel.ForEach(
-            walker.Walk(root),
+            Partitioner.Create(walker.Walk(root), EnumerablePartitionerOptions.NoBuffering),
             new ParallelOptions { MaxDegreeOfParallelism = cores },
             () => new BuildWorker(),
             (file, _, worker) =>
             {
                 reads.Acquire(file.Size); // cap total file bytes in flight across all workers
+                int tid = Environment.CurrentManagedThreadId;
+                inFlight[tid] = (file.RelativePath, file.Size, clock.ElapsedMilliseconds); // for the watchdog
                 try
                 {
                     byte[] bytes;
@@ -95,7 +142,9 @@ public static class RepositoryIndexer
                     var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
                     var hash = ContentHasher.Hash(bytes);
 
-                    worker.Text.AddDocument(file.RelativePath, TrigramIndex.ComputeTrigrams(content));
+                    var tg = TrigramIndex.ComputeTrigrams(content);
+                    worker.Text.AddDocument(file.RelativePath, tg);
+                    worker.TrigramPostings += tg.Length;
                     if (LanguageRegistry.ForPath(file.RelativePath) is not null)
                         foreach (var s in worker.Extractor.Extract(file.RelativePath, content))
                             worker.Symbols.Add(s);
@@ -108,7 +157,7 @@ public static class RepositoryIndexer
                     if (worker.Symbols.ApproxBytes >= symBudget) FlushSymbols(worker, dir, ref symSegCounter, symSegFiles);
                     return worker;
                 }
-                finally { reads.Release(file.Size); }
+                finally { inFlight.TryRemove(tid, out var _gone); reads.Release(file.Size); }
             },
             worker =>
             {
@@ -118,13 +167,16 @@ public static class RepositoryIndexer
                 {
                     foreach (var (rel, state) in worker.Snapshot) snapshot[rel] = state;
                     totalBytes += worker.Bytes;
+                    totalPostings += worker.TrigramPostings;
                 }
                 worker.Extractor.Dispose();
             });
 
         sw.Stop();
         progressTimer?.Dispose();
-        watchdog.Dispose();
+        buildDone.Set();           // stop the watchdog thread
+        watchdog.Join(1000);
+        buildDone.Dispose();
         onProgress?.Invoke(progressFiles, progressBytes);
 
         if (walker.OverCapSkipped > 0)
@@ -142,9 +194,9 @@ public static class RepositoryIndexer
         var symbols = SegmentedSymbolIndex.FromSegmentFiles(dir, symOrdered, symSegCounter, symBudget);
         SaveSnapshot(root, snapshot);
 
-        var stats = new IndexStats(text.DocumentCount, totalBytes, (int)text.TotalTerms,
+        var stats = new IndexStats(text.DocumentCount, totalBytes, totalPostings,
                                    symbols.Count, sw.Elapsed.TotalSeconds, text.IndexBytes, cores);
-        Log.For(root).Debug($"build stats: {stats.Files:N0} files, {stats.Trigrams:N0} trigrams, " +
+        Log.For(root).Debug($"build stats: {stats.Files:N0} files, {stats.TrigramPostings:N0} trigram postings, " +
                             $"{stats.Symbols:N0} symbols, index {stats.IndexBytes / 1048576.0:F0} MB, " +
                             $"{cores} core(s), {stats.Seconds:F1}s");
         return (text, symbols, stats);
@@ -223,6 +275,7 @@ public static class RepositoryIndexer
         public Dictionary<string, FileState> Snapshot { get; } = new(StringComparer.Ordinal);
         public TreeSitterSymbolExtractor Extractor { get; } = new();
         public long Bytes;
+        public long TrigramPostings; // sum of per-doc distinct-trigram counts (deterministic total)
     }
 
     public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, UpdateStats Stats) Update(string root)

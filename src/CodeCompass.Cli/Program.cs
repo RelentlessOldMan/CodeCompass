@@ -290,7 +290,7 @@ static int CmdIndex(string[] args)
 
     Console.WriteLine($"Indexed {s.Files:N0} files ({mb:F1} MB) in {s.Seconds:F2}s");
     Console.WriteLine($"Throughput: {throughput:F1} MB/s across {s.Cores} core(s)  ({perCore:F1} MB/s/core)");
-    Console.WriteLine($"Trigrams: {s.Trigrams:N0}   Symbols: {s.Symbols:N0}");
+    Console.WriteLine($"Trigram postings: {s.TrigramPostings:N0}   Symbols: {s.Symbols:N0}");
     Console.WriteLine($"Text index: {s.IndexBytes / (1024.0 * 1024.0):F1} MB ({ratio:F2}x corpus)");
     return 0;
 }

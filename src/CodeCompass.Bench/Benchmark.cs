@@ -15,7 +15,7 @@ public sealed record BenchResult(
     string Name,
     int Files,
     long Bytes,
-    int Trigrams,
+    long Trigrams,
     int Symbols,
     double BuildSeconds,
     double BuildMBps,
@@ -119,7 +119,7 @@ public static class Benchmark
         symbols.Dispose();
 
         return new BenchResult(
-            name, stats.Files, stats.Bytes, stats.Trigrams, stats.Symbols,
+            name, stats.Files, stats.Bytes, stats.TrigramPostings, stats.Symbols,
             stats.Seconds, mbps, stats.Cores, perCore, indexBytes, ratio,
             Percentile(latencies, 0.50), Percentile(latencies, 0.95), Percentile(latencies, 0.99),
             peakWsMb, managedMb, incSeconds, incFiles);
