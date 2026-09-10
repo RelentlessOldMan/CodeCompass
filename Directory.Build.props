@@ -1,0 +1,47 @@
+<Project>
+
+  <!--
+    Versioning: base is 1.0 (bump VersionPrefix by hand for real milestones). The patch number is
+    the git commit count, so it auto-bumps on every check-in; the informational version also carries
+    the short commit SHA so a user's reported version pins the exact commit. Falls back to
+    1.0.0+nogit when git isn't available (e.g. a source drop), so builds never fail on this.
+
+    AssemblyVersion stays 1.0.0.0 (stable, so assembly binding doesn't churn per commit).
+    FileVersion / InformationalVersion carry the real number for the .exe properties and the logs.
+  -->
+  <PropertyGroup>
+    <Company>RelentlessOldMan</Company>
+    <Product>CodeCompass</Product>
+    <VersionPrefix>1.0</VersionPrefix>
+    <CCGitCount>0</CCGitCount>
+    <CCGitSha>nogit</CCGitSha>
+    <!-- We already put the short SHA into InformationalVersion ourselves; stop the SDK from also
+         appending the full commit SHA (yields an ugly "1.0.52+short.full" double-SHA). -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <Target Name="CCStampVersion"
+          BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo"
+          Condition="'$(CCStamped)' != 'true'">
+    <Exec Command="git rev-list --count HEAD" ConsoleToMSBuild="true" ContinueOnError="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_CCCount" />
+      <Output TaskParameter="ExitCode" PropertyName="_CCCountRc" />
+    </Exec>
+    <Exec Command="git rev-parse --short=8 HEAD" ConsoleToMSBuild="true" ContinueOnError="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_CCSha" />
+      <Output TaskParameter="ExitCode" PropertyName="_CCShaRc" />
+    </Exec>
+    <PropertyGroup>
+      <CCGitCount Condition="'$(_CCCountRc)' == '0' and '$(_CCCount)' != ''">$(_CCCount)</CCGitCount>
+      <CCGitSha Condition="'$(_CCShaRc)' == '0' and '$(_CCSha)' != ''">$(_CCSha)</CCGitSha>
+      <Version>$(VersionPrefix).$(CCGitCount)</Version>
+      <AssemblyVersion>$(VersionPrefix).0.0</AssemblyVersion>
+      <FileVersion>$(VersionPrefix).$(CCGitCount).0</FileVersion>
+      <InformationalVersion>$(VersionPrefix).$(CCGitCount)+$(CCGitSha)</InformationalVersion>
+      <CCStamped>true</CCStamped>
+    </PropertyGroup>
+  </Target>
+
+</Project>

@@ -84,6 +84,7 @@ codecompass refs    <path> <name>     references (semantic C#/C++, lexical elsew
 codecompass symbols <path> <substr>   symbol-name search
 codecompass survey  <path>            report what the size caps skip + suggest config
 codecompass logs                      show the log folder and files
+codecompass version                   print the build version (e.g. 1.0.52+a76d3245)
 ```
 
 ## Tuning for huge or generated trees
@@ -103,6 +104,7 @@ generated bindings, giant tests). The knobs below tune coverage vs. that cost wi
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if indexing makes no progress for this long (default 60). |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
+| `CODECOMPASS_READ_BUDGET_MB` | Cap on total file bytes held in memory at once during a parallel build (default scales to RAM: ≈1/16th of available, clamped 256 MB–4 GB). Prevents N cores each loading a multi-GB file simultaneously when `MAX_FILE_MB` is large. A file bigger than the budget reads solo. |
 
 Files skipped for exceeding a cap are counted and logged (not silently dropped), so the coverage gap
 is visible. Known limitation: files over `MAX_FILE_MB` are absent from search, and files over
@@ -113,7 +115,7 @@ is visible. Known limitation: files over `MAX_FILE_MB` are absent from search, a
 Every knob above also lives in an optional **`.codecompass.json`** at the repo root, so settings
 travel with the repo instead of being set on every run. Precedence is **env var → config file →
 default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names),
-`threads`, `segmentMb`, `compactSegments`, `stallWarnSec`.
+`threads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`.
 
 ```json
 { "maxSymbolMb": 4, "ignore": ["generated", "thirdparty"] }

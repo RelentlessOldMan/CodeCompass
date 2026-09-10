@@ -100,7 +100,9 @@ codecompass search  &lt;path&gt; &lt;query&gt;     literal text search  -> file:
 codecompass def     &lt;path&gt; &lt;name&gt;      go-to-definition
 codecompass refs    &lt;path&gt; &lt;name&gt;      references (semantic C#/C++, lexical elsewhere)
 codecompass symbols &lt;path&gt; &lt;substr&gt;    symbol-name search
-codecompass survey  &lt;path&gt;            report what the size caps skip + suggest config</pre>
+codecompass survey  &lt;path&gt;            report what the size caps skip + suggest config
+codecompass logs                      show the log folder and files
+codecompass version                   print the build version (e.g. 1.0.52+a76d3245)</pre>
 
 <h2>Tuning for huge or generated trees</h2>
 <p>Indexing is robust on ordinary source at scale. The one hazard is <i>dense machine-generated files</i> (e.g. multi-MB
@@ -117,13 +119,14 @@ counted and logged, so the coverage gap is visible rather than silent.</p>
 <tr><td><code>CODECOMPASS_IGNORE</code></td><td style="text-align:left">Comma/semicolon-separated directory names to exclude (e.g. <code>generated,vendor</code>).</td></tr>
 <tr><td><code>CODECOMPASS_MAX_AUTO_MB</code></td><td style="text-align:left">Workspaces larger than this (default 100) are left for a one-time CLI build instead of auto-indexing in a tool call.</td></tr>
 <tr><td><code>CODECOMPASS_THREADS</code> / <code>CODECOMPASS_SEGMENT_MB</code></td><td style="text-align:left">Indexing parallelism / per-worker build-memory budget.</td></tr>
+<tr><td><code>CODECOMPASS_READ_BUDGET_MB</code></td><td style="text-align:left">Cap on total file bytes held in memory at once during a parallel build (default scales to RAM: ~1/16th of available, clamped 256&nbsp;MB&ndash;4&nbsp;GB). Stops N cores from each loading a multi-GB file at once when <code>MAX_FILE_MB</code> is large; an over-budget file reads solo.</td></tr>
 <tr><td><code>CODECOMPASS_ENFORCE=0</code></td><td style="text-align:left">Allow the agent to use Grep/Glob again (the hook redirects them to CodeCompass by default).</td></tr>
 </tbody>
 </table>
 <p>Every knob also lives in an optional <b><code>.codecompass.json</code></b> at the repo root, so settings travel with the
 repo (precedence: <b>env &rarr; config file &rarr; default</b>). Fields: <code>maxSymbolMb</code>, <code>maxFileMb</code>,
 <code>maxAutoMb</code>, <code>ignore</code> (directory names), <code>threads</code>, <code>segmentMb</code>,
-<code>compactSegments</code>, <code>stallWarnSec</code>. Run <code>codecompass survey &lt;path&gt;</code> first: it reports what
+<code>compactSegments</code>, <code>stallWarnSec</code>, <code>readBudgetMb</code>. Run <code>codecompass survey &lt;path&gt;</code> first: it reports what
 the caps skip, names the largest files, and suggests a change &mdash; with the O(n&sup2; ) caveat. It never auto-raises a cap;
 file size isn't a reliable signal of parse safety, so that call is left to the repo owner.</p>
 

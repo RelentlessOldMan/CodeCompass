@@ -33,7 +33,8 @@ $docs = Join-Path $root "docs/CodeCompass.html"
 if (Test-Path $docs) { Copy-Item $docs (Join-Path $root "plugin/CodeCompass.html") -Force }
 
 $size = [math]::Round(((Get-ChildItem $binDir -Recurse | Measure-Object Length -Sum).Sum / 1MB), 1)
+$version = (& $cli version) 2>$null
 Write-Host ""
-Write-Host "Plugin ready: $(Join-Path $root 'plugin')  (bin is $size MB)"
+Write-Host "Plugin ready: $(Join-Path $root 'plugin')  ($version, bin is $size MB)"
 Write-Host "Install for one session:   claude --plugin-dir `"$(Join-Path $root 'plugin')`""
 Write-Host "Install persistently:      /plugin add `"$(Join-Path $root 'plugin')`""

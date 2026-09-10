@@ -61,6 +61,10 @@ public static class RepositoryIndexer
             Interlocked.Exchange(ref stallSeen, cur);
         }, null, stallSec * 1000, stallSec * 1000);
 
+        // Bound how much file content is read at once so a large file cap can't let every core
+        // load a multi-GB file simultaneously and exhaust RAM. Scales with machine memory.
+        var reads = new ByteBudget(CodeCompassConfig.ReadBudgetBytes());
+
         var snapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
         var textSegFiles = new ConcurrentBag<(int Num, string Name)>();
         var symSegFiles = new ConcurrentBag<(int Num, string Name)>();
@@ -79,27 +83,32 @@ public static class RepositoryIndexer
             () => new BuildWorker(),
             (file, _, worker) =>
             {
-                byte[] bytes;
-                try { bytes = File.ReadAllBytes(file.FullPath); }
-                catch (Exception ex) { Log.For(root).Debug($"skipped unreadable file {file.RelativePath}: {ex.Message}"); return worker; }
-                if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return worker;
+                reads.Acquire(file.Size); // cap total file bytes in flight across all workers
+                try
+                {
+                    byte[] bytes;
+                    try { bytes = File.ReadAllBytes(file.FullPath); }
+                    catch (Exception ex) { Log.For(root).Debug($"skipped unreadable file {file.RelativePath}: {ex.Message}"); return worker; }
+                    if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return worker;
 
-                var content = TextDecoder.FromBytes(bytes);
-                var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
-                var hash = ContentHasher.Hash(bytes);
+                    var content = TextDecoder.FromBytes(bytes);
+                    var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
+                    var hash = ContentHasher.Hash(bytes);
 
-                worker.Text.AddDocument(file.RelativePath, TrigramIndex.ComputeTrigrams(content));
-                if (LanguageRegistry.ForPath(file.RelativePath) is not null)
-                    foreach (var s in worker.Extractor.Extract(file.RelativePath, content))
-                        worker.Symbols.Add(s);
-                worker.Snapshot[file.RelativePath] = new FileState(bytes.Length, mtime, hash);
-                worker.Bytes += bytes.Length;
-                Interlocked.Increment(ref progressFiles);
-                Interlocked.Add(ref progressBytes, bytes.Length);
+                    worker.Text.AddDocument(file.RelativePath, TrigramIndex.ComputeTrigrams(content));
+                    if (LanguageRegistry.ForPath(file.RelativePath) is not null)
+                        foreach (var s in worker.Extractor.Extract(file.RelativePath, content))
+                            worker.Symbols.Add(s);
+                    worker.Snapshot[file.RelativePath] = new FileState(bytes.Length, mtime, hash);
+                    worker.Bytes += bytes.Length;
+                    Interlocked.Increment(ref progressFiles);
+                    Interlocked.Add(ref progressBytes, bytes.Length);
 
-                if (worker.Text.ApproxBytes >= textBudget) FlushText(worker, dir, ref textSegCounter, textSegFiles);
-                if (worker.Symbols.ApproxBytes >= symBudget) FlushSymbols(worker, dir, ref symSegCounter, symSegFiles);
-                return worker;
+                    if (worker.Text.ApproxBytes >= textBudget) FlushText(worker, dir, ref textSegCounter, textSegFiles);
+                    if (worker.Symbols.ApproxBytes >= symBudget) FlushSymbols(worker, dir, ref symSegCounter, symSegFiles);
+                    return worker;
+                }
+                finally { reads.Release(file.Size); }
             },
             worker =>
             {

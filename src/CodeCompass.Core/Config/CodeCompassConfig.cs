@@ -16,6 +16,7 @@ public sealed class RepoConfig
     [JsonPropertyName("segmentMb")] public int? SegmentMb { get; set; }
     [JsonPropertyName("compactSegments")] public int? CompactSegments { get; set; }
     [JsonPropertyName("stallWarnSec")] public int? StallWarnSec { get; set; }
+    [JsonPropertyName("readBudgetMb")] public long? ReadBudgetMb { get; set; }
     [JsonPropertyName("ignore")] public string[]? Ignore { get; set; }
 }
 
@@ -128,6 +129,23 @@ public static class CodeCompassConfig
     {
         int? n = EnvInt("CODECOMPASS_COMPACT_SEGMENTS") ?? cfg.CompactSegments;
         return n is >= 2 ? n.Value : 64;
+    }
+
+    /// <summary>
+    /// Total file bytes allowed in flight during a parallel build. Bounds RAM when the file cap is
+    /// large: without it, every core could read a multi-GB file at once and blow up memory. Scales
+    /// with machine RAM (~1/16 of it, clamped 256 MB..4 GB); a single file bigger than the budget is
+    /// read alone. Override with CODECOMPASS_READ_BUDGET_MB / config readBudgetMb.
+    /// </summary>
+    public static long ReadBudgetBytes() => ReadBudgetBytes(_current);
+    public static long ReadBudgetBytes(RepoConfig cfg)
+    {
+        long? mb = EnvLong("CODECOMPASS_READ_BUDGET_MB") ?? cfg.ReadBudgetMb;
+        if (mb is > 0) return mb.Value * 1024 * 1024;
+        long avail;
+        try { avail = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { avail = 8L * 1024 * 1024 * 1024; }
+        if (avail <= 0) avail = 8L * 1024 * 1024 * 1024;
+        return Math.Clamp(avail / 16, 256L * 1024 * 1024, 4L * 1024 * 1024 * 1024);
     }
 
     /// <summary>Seconds of no indexing progress before a stall warning (default 60).</summary>

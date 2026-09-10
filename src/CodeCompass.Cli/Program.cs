@@ -13,6 +13,11 @@ using CodeCompass.Semantics;
 
 ProcessPerformance.RequestFullSpeed(); // opt out of EcoQoS so `index`/`update` run at full speed
 
+// Record the version + argv on every run so a user's log pins the exact build behind any report.
+// (Hook subcommands stay silent - their stdout is a protocol channel Claude Code parses.)
+if (args.Length > 0 && args[0] is not ("hook-block" or "hook-context"))
+    Log.Global.Info($"cli v{BuildInfo.Version}: {string.Join(' ', args)}");
+
 return args.Length == 0
     ? Usage()
     : args[0].ToLowerInvariant() switch
@@ -26,10 +31,19 @@ return args.Length == 0
         "watch" => CmdWatch(args),
         "survey" => CmdSurvey(args),
         "logs" => CmdLogs(),
+        "version" or "--version" or "-v" => CmdVersion(),
         "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
         "hook-context" => CmdHookContext(), // SessionStart hook: inject guidance
         _ => Usage(),
     };
+
+// Print the build version (e.g. 1.0.123+a1b2c3d4). Users quote this in bug reports so a
+// problem can be pinned to an exact commit.
+static int CmdVersion()
+{
+    Console.WriteLine($"CodeCompass {BuildInfo.Version}");
+    return 0;
+}
 
 static int Usage()
 {
@@ -44,6 +58,7 @@ static int Usage()
     Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#/C++, lexical elsewhere)");
     Console.Error.WriteLine("  codecompass survey  <path>               report what the size caps skip + suggest config");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
+    Console.Error.WriteLine("  codecompass version                      print the build version");
     return 1;
 }
 

@@ -16,7 +16,7 @@ var root = !string.IsNullOrEmpty(argRoot) && Directory.Exists(argRoot)
     ? argRoot
     : Directory.GetCurrentDirectory();
 
-Log.Global.Info($"mcp server starting, root={root}");
+Log.Global.Info($"mcp server v{BuildInfo.Version} starting, root={root}");
 Log.For(root).Info("mcp server attached to this repo");
 
 ServerContext.Init(root);
