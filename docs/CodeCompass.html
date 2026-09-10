@@ -69,6 +69,7 @@ CodeCompass exposes exactly <b>5 tools</b> with terse descriptions &mdash; that'
 <tr><td>Runs fully local, no GPU, no cloud</td><td style="text-align:left"><span class="yes">Yes</span></td></tr>
 <tr><td>Dozens-of-GB repos without exhausting RAM</td><td style="text-align:left"><span class="yes">Yes</span> &mdash; indexes are memory-mapped on disk</td></tr>
 <tr><td>MATLAB / other unlisted languages</td><td style="text-align:left"><span class="no">Lexical only</span> (text search works; no symbols)</td></tr>
+<tr><td>Very large files</td><td style="text-align:left"><span class="no">Capped</span> &mdash; &gt;5&nbsp;MB skipped from the index; &gt;1&nbsp;MB skipped from symbols but still text-searchable (both tunable)</td></tr>
 <tr><td>C/C++ find-references precision</td><td style="text-align:left"><span class="no">Best-effort</span> without a <code>compile_commands.json</code></td></tr>
 <tr><td>Semantic "meaning" / embedding search</td><td style="text-align:left"><span class="no">No</span> (deliberately &mdash; needs a model; weaker for real code nav)</td></tr>
 </tbody>
@@ -99,6 +100,25 @@ codecompass search  &lt;path&gt; &lt;query&gt;     literal text search  -> file:
 codecompass def     &lt;path&gt; &lt;name&gt;      go-to-definition
 codecompass refs    &lt;path&gt; &lt;name&gt;      references (semantic C#/C++, lexical elsewhere)
 codecompass symbols &lt;path&gt; &lt;substr&gt;    symbol-name search</pre>
+
+<h2>Tuning for huge or generated trees</h2>
+<p>Indexing is robust on ordinary source at scale. The one hazard is <i>dense machine-generated files</i> (e.g. multi-MB
+register-map headers that are millions of <code>#define</code> lines): tree-sitter's parse cost is roughly <b>O(n&sup2;)</b> on
+such content. That is bounded by default &mdash; <b>symbol extraction is skipped above <code>CODECOMPASS_MAX_SYMBOL_MB</code>
+(1&nbsp;MB)</b>, and those files are still fully trigram-indexed, so text search stays complete. In practice it never touches
+hand-written code: across the test corpora, every source file over 1&nbsp;MB was machine-generated. Files skipped for a cap are
+counted and logged, so the coverage gap is visible rather than silent.</p>
+<table>
+<thead><tr><th>Environment variable</th><th style="text-align:left">Effect</th></tr></thead>
+<tbody>
+<tr><td><code>CODECOMPASS_MAX_SYMBOL_MB</code></td><td style="text-align:left">Skip tree-sitter symbol extraction above this size (default 1). Raise it for large <i>valid</i> generated code whose symbols you want.</td></tr>
+<tr><td><code>CODECOMPASS_MAX_FILE_MB</code></td><td style="text-align:left">Per-file size cap for indexing entirely (default 5).</td></tr>
+<tr><td><code>CODECOMPASS_IGNORE</code></td><td style="text-align:left">Comma/semicolon-separated directory names to exclude (e.g. <code>generated,vendor</code>).</td></tr>
+<tr><td><code>CODECOMPASS_MAX_AUTO_MB</code></td><td style="text-align:left">Workspaces larger than this (default 100) are left for a one-time CLI build instead of auto-indexing in a tool call.</td></tr>
+<tr><td><code>CODECOMPASS_THREADS</code> / <code>CODECOMPASS_SEGMENT_MB</code></td><td style="text-align:left">Indexing parallelism / per-worker build-memory budget.</td></tr>
+<tr><td><code>CODECOMPASS_ENFORCE=0</code></td><td style="text-align:left">Allow the agent to use Grep/Glob again (the hook redirects them to CodeCompass by default).</td></tr>
+</tbody>
+</table>
 
 <h2>Performance</h2>
 <p class="muted">Measured on: <b>Intel Core i7-8700</b> (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro, .NET 8.

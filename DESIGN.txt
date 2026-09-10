@@ -289,5 +289,16 @@ Open questions and risks
 - The hard-block enforcement hook must be careful not to strand the agent when
   CodeCompass legitimately has no answer; the fallback path has to be reliable.
 
+- Tree-sitter parse cost is roughly O(n^2) on pathological content (dense,
+  machine-generated files such as multi-MB register-map headers of millions of
+  #define lines). A single such file could stall the whole index. Mitigation:
+  symbol extraction is skipped above CODECOMPASS_MAX_SYMBOL_MB (default 1 MB) -
+  the file is still trigram-indexed and text-searchable, and such files yield
+  almost no useful symbols. Measured across the test corpora, every source file
+  over 1 MB was machine-generated, so the cap never affects hand-written code.
+  The trigram layer itself scales linearly and is not affected. The binding
+  exposes no parse timeout, so a size cap is the available bound; a real per-file
+  parse timeout would be the more precise fix if the binding ever supports it.
+
 - Decided: build greenfield rather than adopt/fork an existing tool. We borrow
   designs (zoekt trigrams, Cursor Merkle diffing, tree-sitter) but own the code.

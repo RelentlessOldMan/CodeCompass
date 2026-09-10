@@ -35,6 +35,7 @@ editing it keeps just the changed files in memory. This is what lets an 87 GB re
 | Runs fully local, no GPU, no cloud | ✅ Yes |
 | Dozens-of-GB repos without exhausting RAM | ✅ indexes are memory-mapped on disk |
 | MATLAB / other unlisted languages | Lexical only (text search works; no symbols) |
+| Very large files | >5 MB skipped from the index; >1 MB skipped from symbols but still text-searchable (both tunable) |
 | C/C++ find-references precision | Best-effort without a `compile_commands.json` |
 | Semantic "meaning" / embedding search | ❌ No (deliberately — needs a model; weaker for real code nav) |
 
@@ -86,21 +87,25 @@ codecompass logs                      show the log folder and files
 
 ## Tuning for huge or generated trees
 
-Indexing is robust on ordinary source at scale, but a tree with many *dense machine-generated
-files* (e.g. multi-MB register-map headers that are millions of `#define` lines) can be
-pathologically slow to index. Knobs to handle that without editing source:
+Indexing is robust on ordinary source at scale. The one hazard is *dense machine-generated files*
+(e.g. multi-MB register-map headers that are millions of `#define` lines): tree-sitter's parse cost
+is ~O(n²) on such content, so a big one could once stall indexing. That is now bounded by default —
+**symbol extraction is skipped above `CODECOMPASS_MAX_SYMBOL_MB` (1 MB)**, and those files are still
+fully trigram-indexed, so text search stays complete. In practice this never touches hand-written
+code: across our test corpora *every* source file over 1 MB was machine-generated (bundled JS,
+generated bindings, giant tests). The knobs below tune coverage vs. that cost without editing source:
 
 | Env var | Effect |
 |---|---|
-| `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing (default 5). Lower it to skip large generated files. |
-| `CODECOMPASS_MAX_SYMBOL_MB` | Skip tree-sitter symbol extraction above this size (default 1). Large files are still trigram-indexed; this bounds tree-sitter's ~O(n²) parse cost so a giant generated header can't stall indexing. |
+| `CODECOMPASS_MAX_SYMBOL_MB` | Skip tree-sitter symbol extraction above this size (default 1). Bounds the ~O(n²) parse cost; raise it if you have large *valid* generated code whose symbols you want. |
+| `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing entirely (default 5). Lower it to skip large generated files from search too. |
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if indexing makes no progress for this long (default 60). |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
 
-Files skipped for exceeding the size cap are counted and logged (not silently dropped), so you can
-see the coverage gap. Note: files over the cap are currently absent from search — searching *over*
-the cap is a known limitation.
+Files skipped for exceeding a cap are counted and logged (not silently dropped), so the coverage gap
+is visible. Known limitation: files over `MAX_FILE_MB` are absent from search, and files over
+`MAX_SYMBOL_MB` are absent from go-to-definition (still text-searchable).
 
 ## Performance
 
