@@ -4,9 +4,10 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// tree-sitter parse cost is ~O(n^2) on pathological content; without a size cap a single huge
-// generated header can hang the whole index. Symbol extraction is skipped above the cap (the file
-// is still trigram-indexed and searchable).
+// tree-sitter parse cost is linear in size but the constant varies ~70x by content (see ParseSweep):
+// on the worst shape (deeply nested C++ templates) a single multi-MB generated header parses for tens
+// of seconds and stalls the index. Symbol extraction is skipped above the cap (the file is still
+// trigram-indexed and searchable).
 // Serialized with IndexLimitsTests (both drive the process-global CODECOMPASS_MAX_SYMBOL_MB env).
 [Collection("symbolcap-env")]
 public class SymbolExtractionLimitsTests

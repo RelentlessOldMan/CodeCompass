@@ -61,26 +61,31 @@ public class IndexLimitsTests
         Assert.Equal(4096, walker.LargestOverCapBytes);
     }
 
-    // Regression for the tree-sitter O(n^2) hang: a large, high-vocabulary generated header used to
-    // stall indexing indefinitely (parsed as C++). With the symbol-size cap it must index quickly
-    // and stay text-searchable. Pre-fix this file (~2.5 MB) took ~2 minutes; post-fix well under 1 s.
+    // Regression for the pathological-parse stall. tree-sitter parse cost is LINEAR in size, but the
+    // constant varies ~70x by content (see ParseSweep): deeply nested C++ template angle-brackets are
+    // the worst shape measured (~0.1 MB/s, so a multi-MB header is tens of seconds). As a .h this used
+    // to stall indexing; with the symbol-size cap the file is skipped for symbols yet stays fully
+    // text-searchable, so the build stays fast. If the cap regresses, the nested-template parse of a
+    // multi-MB file blows the time bound.
     [Fact]
     public void PathologicalLargeHeader_IndexesWithoutHanging_AndStaysSearchable()
     {
         using var repo = new TempRepo();
-        const string charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_ ";
-        var rnd = new Random(20260909);
-        var sb = new StringBuilder(2_600_000);
-        for (int i = 0; i < 2_500_000; i++)
-        {
-            sb.Append(charset[rnd.Next(charset.Length)]);
-            if (i % 80 == 79) sb.Append('\n');
-        }
+        // Deeply nested templates: "A<A<A<...int...>>>" - the genuinely slow-to-parse shape (each level
+        // is "A<" + a trailing ">"). ~2.4 MB, over the 1 MB symbol cap so extraction is skipped.
+        const int depth = 800_000; // 800k * 3 chars ~= 2.4 MB
+        var sb = new StringBuilder(depth * 3 + 64);
+        sb.Append("A x = ");
+        for (int i = 0; i < depth; i++) sb.Append("A<");
+        sb.Append("int");
+        for (int i = 0; i < depth; i++) sb.Append('>');
+        sb.Append(";\n");
         const string marker = "ZQXUNIQUEMARKER42";
-        sb.Append('\n').Append(marker).Append('\n');
+        sb.Append(marker).Append('\n');
         repo.WriteBytes("chipreg.h", Encoding.ASCII.GetBytes(sb.ToString())); // .h -> tree-sitter C++
 
-        // Build on a background thread with a generous bound; if the hang regresses, Join times out.
+        // Build on a background thread with a generous bound; if the cap regresses, the nested-template
+        // parse (uncapped ~2.4 MB at ~0.1 MB/s ~= 25 s+) stalls and Join times out.
         Exception? failure = null;
         var t = new System.Threading.Thread(() =>
         {
@@ -89,7 +94,7 @@ public class IndexLimitsTests
         }) { IsBackground = true };
         t.Start();
         Assert.True(t.Join(TimeSpan.FromSeconds(60)),
-            "indexing a pathological large header did not finish in 60s - the tree-sitter O(n^2) hang has regressed");
+            "indexing a pathological large header did not finish in 60s - the symbol-size cap has regressed");
         Assert.Null(failure);
 
         Assert.True(RepositoryIndexer.TryLoad(repo.Root, out var text, out var symbols));
