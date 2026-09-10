@@ -82,6 +82,7 @@ codecompass search  <path> <query>    literal text search  -> file:line:col
 codecompass def     <path> <name>     go-to-definition
 codecompass refs    <path> <name>     references (semantic C#/C++, lexical elsewhere)
 codecompass symbols <path> <substr>   symbol-name search
+codecompass survey  <path>            report what the size caps skip + suggest config
 codecompass logs                      show the log folder and files
 ```
 
@@ -106,6 +107,23 @@ generated bindings, giant tests). The knobs below tune coverage vs. that cost wi
 Files skipped for exceeding a cap are counted and logged (not silently dropped), so the coverage gap
 is visible. Known limitation: files over `MAX_FILE_MB` are absent from search, and files over
 `MAX_SYMBOL_MB` are absent from go-to-definition (still text-searchable).
+
+### Per-repo config file
+
+Every knob above also lives in an optional **`.codecompass.json`** at the repo root, so settings
+travel with the repo instead of being set on every run. Precedence is **env var → config file →
+default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names),
+`threads`, `segmentMb`, `compactSegments`, `stallWarnSec`.
+
+```json
+{ "maxSymbolMb": 4, "ignore": ["generated", "thirdparty"] }
+```
+
+Run **`codecompass survey <path>`** first — it reports what the current caps skip (files with no
+go-to-definition, files absent from search), names the largest, and suggests a concrete config
+change *with the O(n²) caveat*. It changes nothing; you decide. There is deliberately **no
+auto-bumping**: file size isn't a reliable signal of parse safety (a valid 5 MB file parses fast, a
+pathological one hangs), so raising a cap is a judgement only the repo owner can make.
 
 ## Performance
 

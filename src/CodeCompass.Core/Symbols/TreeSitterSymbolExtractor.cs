@@ -1,3 +1,4 @@
+using CodeCompass.Core.Config;
 using TreeSitter;
 
 namespace CodeCompass.Core.Symbols;
@@ -12,7 +13,7 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
 {
     private readonly Dictionary<string, (Language Language, Query Query)> _cache = new();
     private readonly HashSet<string> _failed = new();
-    private readonly int _maxChars = MaxSymbolChars();
+    private readonly int _maxChars = CodeCompassConfig.MaxSymbolChars();
 
     public IReadOnlyList<Symbol> Extract(string relativePath, string text)
     {
@@ -46,15 +47,6 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
                 node.StartPosition.Column + 1));
         }
         return results;
-    }
-
-    // Approx cap in characters (~bytes for ASCII source) above which we skip symbol extraction.
-    private static int MaxSymbolChars()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_MAX_SYMBOL_MB");
-        long mb = long.TryParse(env, out var v) && v > 0 ? v : 1;
-        long chars = mb * 1024 * 1024;
-        return chars > int.MaxValue ? int.MaxValue : (int)chars;
     }
 
     private (Language, Query)? GetOrLoad(LanguageDefinition def)

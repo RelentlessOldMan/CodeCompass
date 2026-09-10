@@ -1,4 +1,5 @@
 using CodeCompass.Core.Changes;
+using CodeCompass.Core.Config;
 using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing;
@@ -55,12 +56,7 @@ public static class ServerContext
 
     public static string Root { get; private set; } = "";
 
-    private static long AutoIndexLimitBytes()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_MAX_AUTO_MB");
-        long mb = int.TryParse(env, out var v) && v >= 0 ? v : 100;
-        return mb * 1024L * 1024;
-    }
+    private static long AutoIndexLimitBytes() => CodeCompassConfig.MaxAutoBytes();
 
     public static void Init(string root)
     {
@@ -71,6 +67,7 @@ public static class ServerContext
             oldWatcher = _watcher; // dispose after releasing the lock (see StopLiveIndex)
             _watcher = null;
             Root = Path.GetFullPath(root);
+            CodeCompassConfig.Load(Root); // per-repo .codecompass.json in effect for the size gate + build
             _text?.Dispose();
             _symbols?.Dispose();
             _snapshot?.Dispose();

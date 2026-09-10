@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using CodeCompass.Core.Changes;
+using CodeCompass.Core.Config;
 using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing.Segments;
@@ -32,6 +33,7 @@ public static class RepositoryIndexer
         string root, Action<int, long>? onProgress = null)
     {
         root = Path.GetFullPath(root);
+        CodeCompassConfig.Load(root);
         var dir = IndexStore.GetCacheDir(root);
         var ignore = new IgnoreRules();
         var walker = new FileWalker(ignore);
@@ -172,25 +174,12 @@ public static class RepositoryIndexer
         return text.SegmentCount >= threshold || symbols.SegmentCount >= threshold;
     }
 
-    private static int CompactSegmentThreshold()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS");
-        return int.TryParse(env, out var v) && v >= 2 ? v : 64;
-    }
+    private static int CompactSegmentThreshold() => CodeCompassConfig.CompactSegments();
 
-    private static int StallWarnSeconds()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_STALL_WARN_SEC");
-        return int.TryParse(env, out var s) && s >= 5 ? s : 60;
-    }
+    private static int StallWarnSeconds() => CodeCompassConfig.StallWarnSec();
 
-    /// <summary>Indexing parallelism: CODECOMPASS_THREADS if set (and valid), else all cores.</summary>
-    public static int DegreeOfParallelism()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_THREADS");
-        if (int.TryParse(env, out var n) && n > 0) return n;
-        return Environment.ProcessorCount;
-    }
+    /// <summary>Indexing parallelism: CODECOMPASS_THREADS / config `threads` if set, else all cores.</summary>
+    public static int DegreeOfParallelism() => CodeCompassConfig.Threads(Environment.ProcessorCount);
 
     /// <summary>
     /// Per-worker trigram/symbol segment byte budgets, scaled so total build buffers
@@ -200,8 +189,7 @@ public static class RepositoryIndexer
     public static (long Text, long Symbol) SegmentBudgets(int cores)
     {
         cores = Math.Max(1, cores);
-        var envMb = Environment.GetEnvironmentVariable("CODECOMPASS_SEGMENT_MB");
-        if (int.TryParse(envMb, out var mb) && mb > 0)
+        if (CodeCompassConfig.SegmentMbOverride() is int mb)
         {
             long t = mb * 1024L * 1024;
             return (t, Math.Max(2L * 1024 * 1024, t / 2));
@@ -231,6 +219,7 @@ public static class RepositoryIndexer
     public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, UpdateStats Stats) Update(string root)
     {
         root = Path.GetFullPath(root);
+        CodeCompassConfig.Load(root);
         var sw = Stopwatch.StartNew();
 
         if (!TryLoad(root, out var text, out var symbols)) return FullRebuild(root, text, symbols, sw);
@@ -352,6 +341,7 @@ public static class RepositoryIndexer
         string root, IEnumerable<string> changedFullPaths)
     {
         root = Path.GetFullPath(root);
+        CodeCompassConfig.Load(root);
         var ignore = new IgnoreRules();
         using var extractor = new TreeSitterSymbolExtractor();
         int added = 0, modified = 0, removed = 0;

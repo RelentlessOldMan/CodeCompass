@@ -1,3 +1,5 @@
+using CodeCompass.Core.Config;
+
 namespace CodeCompass.Core.Ignore;
 
 /// <summary>
@@ -45,25 +47,12 @@ public sealed class IgnoreRules
     public IgnoreRules(long? maxFileSizeBytes = null, IEnumerable<string>? extraIgnoredDirs = null)
     {
         _ignoredDirs = new HashSet<string>(DefaultIgnoredDirs, StringComparer.OrdinalIgnoreCase);
-        foreach (var d in EnvIgnoredDirs()) _ignoredDirs.Add(d);
+        foreach (var d in CodeCompassConfig.IgnoredDirs()) _ignoredDirs.Add(d); // env + .codecompass.json
         if (extraIgnoredDirs is not null)
             foreach (var d in extraIgnoredDirs)
                 _ignoredDirs.Add(d);
         _ignoredExtensions = DefaultIgnoredExtensions;
-        MaxFileSizeBytes = maxFileSizeBytes ?? EnvMaxFileSizeBytes();
-    }
-
-    private static long EnvMaxFileSizeBytes()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB");
-        return long.TryParse(env, out var mb) && mb > 0 ? mb * 1024 * 1024 : DefaultMaxFileSizeBytes;
-    }
-
-    private static IEnumerable<string> EnvIgnoredDirs()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_IGNORE");
-        if (string.IsNullOrWhiteSpace(env)) return Array.Empty<string>();
-        return env.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        MaxFileSizeBytes = maxFileSizeBytes ?? CodeCompassConfig.MaxFileBytes();
     }
 
     public bool IsIgnoredDirectory(string directoryName) => _ignoredDirs.Contains(directoryName);

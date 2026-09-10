@@ -24,6 +24,7 @@ return args.Length == 0
         "symbols" => CmdSymbols(args),
         "refs" => CmdRefs(args),
         "watch" => CmdWatch(args),
+        "survey" => CmdSurvey(args),
         "logs" => CmdLogs(),
         "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
         "hook-context" => CmdHookContext(), // SessionStart hook: inject guidance
@@ -41,8 +42,56 @@ static int Usage()
     Console.Error.WriteLine("  codecompass def     <path> <name>        exact symbol definition(s)");
     Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
     Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#/C++, lexical elsewhere)");
+    Console.Error.WriteLine("  codecompass survey  <path>               report what the size caps skip + suggest config");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
     return 1;
+}
+
+// Report what the current caps would skip, so an operator can decide whether to raise them
+// (in .codecompass.json or via env). Never changes anything.
+static int CmdSurvey(string[] args)
+{
+    if (args.Length < 2) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
+
+    var r = Surveyor.Survey(root);
+    static double Mb(long b) => b / 1048576.0;
+
+    Console.WriteLine($"Indexed:     {r.IndexedFiles:N0} files ({Mb(r.IndexedBytes):F0} MB)");
+    Console.WriteLine($"Symbol cap:  {Mb(r.MaxSymbolBytes):F0} MB   (maxSymbolMb / CODECOMPASS_MAX_SYMBOL_MB)");
+    Console.WriteLine($"File cap:    {Mb(r.MaxFileBytes):F0} MB   (maxFileMb / CODECOMPASS_MAX_FILE_MB)");
+
+    Console.WriteLine();
+    if (r.SymbolSkipped.Count == 0)
+    {
+        Console.WriteLine("No files over the symbol cap - every eligible file gets go-to-definition.");
+    }
+    else
+    {
+        Console.WriteLine($"{r.SymbolSkipped.Count:N0} file(s) over the symbol cap - text-searchable but NO go-to-definition:");
+        foreach (var (p, b) in r.SymbolSkipped.Take(5)) Console.WriteLine($"    {Mb(b),6:F1} MB  {p}");
+        if (r.SymbolSkipped.Count > 5) Console.WriteLine($"    ... and {r.SymbolSkipped.Count - 5:N0} more");
+        int suggest = (int)Math.Ceiling(Mb(r.SymbolSkipped[0].Bytes));
+        Console.WriteLine($"  If these are valid code whose symbols you want, set \"maxSymbolMb\": {suggest} in .codecompass.json.");
+        Console.WriteLine("  Caution: tree-sitter parse cost is ~O(n^2); raise conservatively - a genuinely pathological");
+        Console.WriteLine("  (dense machine-generated) file can stall indexing. These are usually generated, low-symbol-value files.");
+    }
+
+    Console.WriteLine();
+    if (r.OverFileCap.Count == 0)
+    {
+        Console.WriteLine("No files over the file cap - nothing is excluded from search by size.");
+    }
+    else
+    {
+        Console.WriteLine($"{r.OverFileCap.Count:N0} file(s) over the file cap - absent from the index (not searchable):");
+        foreach (var (p, b) in r.OverFileCap.Take(5)) Console.WriteLine($"    {Mb(b),6:F1} MB  {p}");
+        if (r.OverFileCap.Count > 5) Console.WriteLine($"    ... and {r.OverFileCap.Count - 5:N0} more");
+        int suggest = (int)Math.Ceiling(Mb(r.OverFileCap[0].Bytes));
+        Console.WriteLine($"  To include them in text search, set \"maxFileMb\": {suggest} in .codecompass.json.");
+    }
+    return 0;
 }
 
 // Print the central log location and current log files - the one place to look when debugging.

@@ -80,15 +80,17 @@ public class IndexLimitsTests
         sb.Append('\n').Append(marker).Append('\n');
         repo.WriteBytes("chipreg.h", Encoding.ASCII.GetBytes(sb.ToString())); // .h -> tree-sitter C++
 
-        // Build on a worker with a generous bound; if the hang regresses, this times out and fails.
-        var build = Task.Run(() =>
+        // Build on a background thread with a generous bound; if the hang regresses, Join times out.
+        Exception? failure = null;
+        var t = new System.Threading.Thread(() =>
         {
-            var b = RepositoryIndexer.Build(repo.Root);
-            b.Text.Dispose();
-            b.Symbols.Dispose();
-        });
-        Assert.True(build.Wait(TimeSpan.FromSeconds(60)),
+            try { var b = RepositoryIndexer.Build(repo.Root); b.Text.Dispose(); b.Symbols.Dispose(); }
+            catch (Exception ex) { failure = ex; }
+        }) { IsBackground = true };
+        t.Start();
+        Assert.True(t.Join(TimeSpan.FromSeconds(60)),
             "indexing a pathological large header did not finish in 60s - the tree-sitter O(n^2) hang has regressed");
+        Assert.Null(failure);
 
         Assert.True(RepositoryIndexer.TryLoad(repo.Root, out var text, out var symbols));
         using (text)
