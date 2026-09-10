@@ -30,6 +30,8 @@ return args.Length == 0
         "refs" => CmdRefs(args),
         "watch" => CmdWatch(args),
         "survey" => CmdSurvey(args),
+        "symstats" => CmdSymStats(args),
+        "parsebench" => CmdParseBench(args),
         "logs" => CmdLogs(),
         "version" or "--version" or "-v" => CmdVersion(),
         "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
@@ -57,6 +59,8 @@ static int Usage()
     Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
     Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#/C++, lexical elsewhere)");
     Console.Error.WriteLine("  codecompass survey  <path>               report what the size caps skip + suggest config");
+    Console.Error.WriteLine("  codecompass symstats <path>              profile symbol-file sizes + parse cost per language");
+    Console.Error.WriteLine("  codecompass parsebench                   tree-sitter parse-time vs size sweep (synthetic)");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
     Console.Error.WriteLine("  codecompass version                      print the build version");
     return 1;
@@ -89,8 +93,9 @@ static int CmdSurvey(string[] args)
         if (r.SymbolSkipped.Count > 5) Console.WriteLine($"    ... and {r.SymbolSkipped.Count - 5:N0} more");
         int suggest = (int)Math.Ceiling(Mb(r.SymbolSkipped[0].Bytes));
         Console.WriteLine($"  If these are valid code whose symbols you want, set \"maxSymbolMb\": {suggest} in .codecompass.json.");
-        Console.WriteLine("  Caution: tree-sitter parse cost is ~O(n^2); raise conservatively - a genuinely pathological");
-        Console.WriteLine("  (dense machine-generated) file can stall indexing. These are usually generated, low-symbol-value files.");
+        Console.WriteLine("  Caution: parse cost is linear but the constant varies ~70x by content; a big degenerate");
+        Console.WriteLine("  file can take tens of seconds. Run 'symstats'/'parsebench' first. These are usually generated,");
+        Console.WriteLine("  low-symbol-value files.");
     }
 
     Console.WriteLine();
@@ -106,6 +111,114 @@ static int CmdSurvey(string[] args)
         int suggest = (int)Math.Ceiling(Mb(r.OverFileCap[0].Bytes));
         Console.WriteLine($"  To include them in text search, set \"maxFileMb\": {suggest} in .codecompass.json.");
     }
+    return 0;
+}
+
+// Profile a real repo: for each language, how big do files that actually yield symbols get, and
+// where does tree-sitter's parse cost start to hurt. This is the data behind a maxSymbolMb choice.
+// Safe to run on huge trees - it scans ascending by size and times out per file (never hangs).
+static int CmdSymStats(string[] args)
+{
+    if (args.Length < 2) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
+
+    static string Sz(long b) =>
+        b >= 1048576 ? $"{b / 1048576.0,6:F1} MB" : $"{b / 1024.0,6:F1} KB";
+
+    Console.Error.Write("profiling (parsing every source file, ignoring the symbol cap)...");
+    var r = SymbolProfiler.Profile(root);
+    Console.Error.Write("\r" + new string(' ', 64) + "\r");
+
+    Console.WriteLine($"Per-file parse timeout: {r.TimeoutMs / 1000.0:F0}s   (a file over this stops that language's scan)");
+    Console.WriteLine();
+    Console.WriteLine($"{"ext",-6} {"lang",-11} {"files",6} {"w/syms",6}   " +
+                      $"{"symbol-bearing size (p50/p95/max)",-34}  slowest parse");
+    foreach (var p in r.Languages)
+    {
+        string sizes = p.FilesWithSymbols > 0
+            ? $"{Sz(p.SymbolBearingP50)} / {Sz(p.SymbolBearingP95)} / {Sz(p.SymbolBearingMax)}"
+            : "(none produced symbols)";
+        Console.WriteLine($"{p.Extension,-6} {p.Language,-11} {p.FilesParsed,6} {p.FilesWithSymbols,6}   " +
+                          $"{sizes,-34}  {p.SlowestMs,7:F0} ms @ {Sz(p.SlowestBytes)}");
+        if (p.FilesWithSymbols > 0)
+            Console.WriteLine($"         largest with symbols: {p.SymbolBearingMaxPath}");
+        if (p.Knee is not null)
+        {
+            var k = p.Knee;
+            string how = k.TimedOut ? "TIMED OUT" : $"{k.ParseMs:F0} ms";
+            Console.WriteLine($"         [!] parse cost knee: {Sz(k.Bytes)} took {how} ({k.Path})");
+            if (p.LargerNotProfiled > 0)
+                Console.WriteLine($"             {p.LargerNotProfiled:N0} larger file(s) up to {Sz(p.LargerMaxBytes)} skipped (would only be slower)");
+        }
+        else if (p.LargerNotProfiled > 0)
+        {
+            Console.WriteLine($"         {p.LargerNotProfiled:N0} file(s) up to {Sz(p.LargerMaxBytes)} over the profiling ceiling (not parsed)");
+        }
+    }
+
+    // The headline: the two numbers that bracket a good cap.
+    long maxSym = r.Languages.Count > 0 ? r.Languages.Max(p => p.SymbolBearingMax) : 0;
+    var firstSlow = r.All.Where(p => p.TimedOut || p.ParseMs >= 1000).OrderBy(p => p.Bytes).FirstOrDefault();
+    Console.WriteLine();
+    Console.WriteLine($"Largest file that actually produced symbols: {Sz(maxSym)}");
+    if (firstSlow is not null)
+        Console.WriteLine($"Smallest file whose parse got slow (>=1s):   {Sz(firstSlow.Bytes)}  ({firstSlow.Path})");
+    else
+        Console.WriteLine("No file's parse reached 1s - tree-sitter is comfortable across this repo.");
+    Console.WriteLine("Set maxSymbolMb above the first line to cover real symbols; keep it below the second so a");
+    Console.WriteLine("slow-to-parse file can't stall indexing. (Run 'parsebench' to see the parse-cost curve.)");
+    return 0;
+}
+
+// Synthetic tree-sitter parse-cost sweep: doubling file sizes, ordinary code vs the pathological
+// header shape, to show where cost goes quadratic. No repo needed - deterministic characterization.
+static int CmdParseBench(string[] args)
+{
+    var exts = args.Skip(1).Where(a => a.StartsWith('.')).ToArray();
+    static string Sz(long b) => b >= 1048576 ? $"{b / 1048576.0,5:F0} MB" : $"{b / 1024.0,5:F0} KB";
+
+    Console.Error.Write("sweeping (this parses progressively larger synthetic files)...");
+    var series = ParseSweep.Run(extensions: exts.Length > 0 ? exts : null);
+    Console.Error.Write("\r" + new string(' ', 64) + "\r");
+
+    foreach (var s in series)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"{s.Extension} / {s.Shape}   (growth ~2x per row = linear, ~4x = quadratic)");
+        Console.WriteLine($"  {"size",8}  {"parse",10}  {"MB/s",7}  {"growth",7}  symbols");
+        foreach (var pt in s.Points)
+        {
+            string mbps = pt.ParseMs > 0 ? $"{pt.Bytes / 1048576.0 / (pt.ParseMs / 1000.0),7:F1}" : "      -";
+            string growth = pt.GrowthFactor > 0 ? $"{pt.GrowthFactor,6:F1}x" : "      -";
+            string parse = pt.TimedOut ? "TIMED OUT" : $"{pt.ParseMs,8:F0} ms";
+            string syms = pt.Symbols < 0 ? "err" : pt.Symbols.ToString("N0");
+            Console.WriteLine($"  {Sz(pt.Bytes),8}  {parse,10}  {mbps}  {growth}  {syms}");
+        }
+    }
+    // Summary: steady-state throughput per shape (from the largest completed point), slowest first,
+    // with the projected parse time at the current symbol cap. This is the actionable read.
+    long capBytes = CodeCompass.Core.Config.CodeCompassConfig.MaxSymbolChars();
+    Console.WriteLine();
+    Console.WriteLine("Summary - effective throughput (linear across sizes; the constant is what varies):");
+    Console.WriteLine($"  {"shape",-16} {"ext",-5} {"MB/s",7}   projected parse @ {capBytes / 1048576.0:F0} MB cap");
+    var rows = series
+        .Select(s =>
+        {
+            var last = s.Points.LastOrDefault(p => !p.TimedOut && p.ParseMs > 0);
+            double mbps = last is not null ? last.Bytes / 1048576.0 / (last.ParseMs / 1000.0) : 0;
+            return (s.Shape, s.Extension, Mbps: mbps, AnyTimeout: s.Points.Any(p => p.TimedOut));
+        })
+        .OrderBy(r => r.Mbps == 0 ? double.MaxValue : r.Mbps);
+    foreach (var r in rows)
+    {
+        string atCap = r.Mbps > 0 ? $"~{capBytes / 1048576.0 / r.Mbps:F1}s" : "n/a";
+        string flag = r.AnyTimeout ? "  (timed out at a larger size)" : "";
+        Console.WriteLine($"  {r.Shape,-16} {r.Extension,-5} {r.Mbps,7:F2}   {atCap}{flag}");
+    }
+    Console.WriteLine();
+    Console.WriteLine("Growth stays ~2x per doubling (linear) - no quadratic explosion on this grammar. The risk");
+    Console.WriteLine("is a slow constant x a large file; the symbol cap bounds per-file parse time regardless.");
     return 0;
 }
 

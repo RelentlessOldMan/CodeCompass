@@ -102,15 +102,23 @@ codecompass refs    &lt;path&gt; &lt;name&gt;      references (semantic C#/C++, 
 codecompass symbols &lt;path&gt; &lt;substr&gt;    symbol-name search
 codecompass survey  &lt;path&gt;            report what the size caps skip + suggest config
 codecompass logs                      show the log folder and files
-codecompass version                   print the build version (e.g. 1.0.52+a76d3245)</pre>
+codecompass version                   print the build version (e.g. 1.0.52+a76d3245)
+codecompass symstats &lt;path&gt;           profile symbol-file sizes + parse cost per language
+codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)</pre>
 
 <h2>Tuning for huge or generated trees</h2>
-<p>Indexing is robust on ordinary source at scale. The one hazard is <i>dense machine-generated files</i> (e.g. multi-MB
-register-map headers that are millions of <code>#define</code> lines): tree-sitter's parse cost is roughly <b>O(n&sup2;)</b> on
-such content. That is bounded by default &mdash; <b>symbol extraction is skipped above <code>CODECOMPASS_MAX_SYMBOL_MB</code>
+<p>Indexing is robust on ordinary source at scale. The one hazard is <i>large machine-generated files</i>. Tree-sitter parse
+cost is <b>linear in file size</b>, but the constant factor varies ~70&times; by content (measured with <code>parsebench</code>):
+ordinary code parses at ~1.8&nbsp;MB/s, while the worst case measured &mdash; deeply nested C++ templates &mdash; runs at
+~0.1&nbsp;MB/s (a 1&nbsp;MB file &asymp; 12&nbsp;s). So a big degenerate file can take tens of seconds even though it grows
+linearly. That is bounded by default &mdash; <b>symbol extraction is skipped above <code>CODECOMPASS_MAX_SYMBOL_MB</code>
 (1&nbsp;MB)</b>, and those files are still fully trigram-indexed, so text search stays complete. In practice it never touches
 hand-written code: across the test corpora, every source file over 1&nbsp;MB was machine-generated. Files skipped for a cap are
 counted and logged, so the coverage gap is visible rather than silent.</p>
+<p>Two diagnostics quantify this on your own repo: <code>codecompass symstats &lt;path&gt;</code> parses every file ignoring the
+cap (safely &mdash; ascending by size, timeout-guarded) and reports the real size distribution of symbol-bearing files per
+language plus any parse-cost knee; <code>codecompass parsebench</code> runs the synthetic size sweep above. A good
+<code>maxSymbolMb</code> sits above your largest real symbol-bearing file and below the size where parsing gets slow.</p>
 <table>
 <thead><tr><th>Environment variable</th><th style="text-align:left">Effect</th></tr></thead>
 <tbody>

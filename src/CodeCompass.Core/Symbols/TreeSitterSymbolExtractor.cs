@@ -26,6 +26,22 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
         // (text search works). Tunable via CODECOMPASS_MAX_SYMBOL_MB (default 1 MB).
         if (text.Length > _maxChars) return Array.Empty<Symbol>();
 
+        return ExtractCore(def, relativePath, text);
+    }
+
+    /// <summary>Parse regardless of the size cap. Diagnostic-only: the <c>symstats</c> profiler uses
+    /// this to measure the real parse-cost curve and the true size distribution of symbol-bearing
+    /// files. The cap in <see cref="Extract"/> is what protects the indexing hot path - do not call
+    /// this there.</summary>
+    public IReadOnlyList<Symbol> ExtractUncapped(string relativePath, string text)
+    {
+        var def = LanguageRegistry.ForPath(relativePath);
+        if (def is null) return Array.Empty<Symbol>();
+        return ExtractCore(def, relativePath, text);
+    }
+
+    private IReadOnlyList<Symbol> ExtractCore(LanguageDefinition def, string relativePath, string text)
+    {
         var loaded = GetOrLoad(def);
         if (loaded is null) return Array.Empty<Symbol>();
 

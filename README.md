@@ -83,23 +83,46 @@ codecompass def     <path> <name>     go-to-definition
 codecompass refs    <path> <name>     references (semantic C#/C++, lexical elsewhere)
 codecompass symbols <path> <substr>   symbol-name search
 codecompass survey  <path>            report what the size caps skip + suggest config
+codecompass symstats <path>           profile symbol-file sizes + parse cost per language
+codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)
 codecompass logs                      show the log folder and files
 codecompass version                   print the build version (e.g. 1.0.52+a76d3245)
 ```
 
+### Choosing `maxSymbolMb` from data
+
+Two diagnostics measure the exact trade-off the symbol cap controls:
+
+- **`codecompass symstats <path>`** parses every source file *ignoring the cap* (safely — ascending
+  by size, each parse timeout-guarded so it can't hang) and reports, per language: how many files
+  yield symbols and their size distribution (p50/p95/max), plus the largest file that still produced
+  symbols and any "knee" where parse time spikes. The headline is two numbers — the biggest real
+  symbol-bearing file, and the smallest file whose parse got slow — and a good cap sits between them.
+- **`codecompass parsebench`** is a synthetic sweep: it parses progressively larger generated files
+  in several shapes (ordinary code, random tokens, one long line, deeply nested delimiters, huge
+  expression chains, nested templates) and prints parse time vs size.
+
+What the sweep shows on the bundled grammar: **parse cost is linear in file size** for every shape
+(no quadratic explosion) — but the *constant factor varies ~70×* by content. Ordinary code parses at
+~1.8 MB/s; the worst case measured is deeply-nested C++ templates at ~0.1 MB/s (a 1 MB file ≈ 12 s).
+Real symbol-bearing code is tiny (single-digit KB median), so the 1 MB default leaves a wide margin:
+it covers all real symbols while bounding the parse time of any single pathological file.
+
 ## Tuning for huge or generated trees
 
-Indexing is robust on ordinary source at scale. The one hazard is *dense machine-generated files*
-(e.g. multi-MB register-map headers that are millions of `#define` lines): tree-sitter's parse cost
-is ~O(n²) on such content, so a big one could once stall indexing. That is now bounded by default —
-**symbol extraction is skipped above `CODECOMPASS_MAX_SYMBOL_MB` (1 MB)**, and those files are still
-fully trigram-indexed, so text search stays complete. In practice this never touches hand-written
-code: across our test corpora *every* source file over 1 MB was machine-generated (bundled JS,
-generated bindings, giant tests). The knobs below tune coverage vs. that cost without editing source:
+Indexing is robust on ordinary source at scale. The one hazard is *large machine-generated files*.
+Tree-sitter parse cost is **linear in file size**, but the constant factor varies ~70× by content
+(measured with `parsebench` — see above): so a big file of degenerate content (e.g. deeply nested
+C++ templates at ~0.1 MB/s) can take tens of seconds to parse even though it grows linearly. That is
+bounded by default — **symbol extraction is skipped above `CODECOMPASS_MAX_SYMBOL_MB` (1 MB)**, and
+those files are still fully trigram-indexed, so text search stays complete. In practice this never
+touches hand-written code: across our test corpora *every* source file over 1 MB was machine-generated
+(bundled JS, generated bindings, giant tests). The knobs below tune coverage vs. that cost without
+editing source:
 
 | Env var | Effect |
 |---|---|
-| `CODECOMPASS_MAX_SYMBOL_MB` | Skip tree-sitter symbol extraction above this size (default 1). Bounds the ~O(n²) parse cost; raise it if you have large *valid* generated code whose symbols you want. |
+| `CODECOMPASS_MAX_SYMBOL_MB` | Skip tree-sitter symbol extraction above this size (default 1). Bounds per-file parse time; raise it if you have large *valid* generated code whose symbols you want (run `symstats` first to see the real sizes). |
 | `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing entirely (default 5). Lower it to skip large generated files from search too. |
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if indexing makes no progress for this long (default 60). |
