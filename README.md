@@ -92,7 +92,8 @@ pathologically slow to index. Knobs to handle that without editing source:
 
 | Env var | Effect |
 |---|---|
-| `CODECOMPASS_MAX_FILE_MB` | Per-file size cap (default 5). Lower it to skip large generated files. |
+| `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing (default 5). Lower it to skip large generated files. |
+| `CODECOMPASS_MAX_SYMBOL_MB` | Skip tree-sitter symbol extraction above this size (default 1). Large files are still trigram-indexed; this bounds tree-sitter's ~O(n²) parse cost so a giant generated header can't stall indexing. |
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if indexing makes no progress for this long (default 60). |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |

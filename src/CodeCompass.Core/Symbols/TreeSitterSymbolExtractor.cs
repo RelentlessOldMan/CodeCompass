@@ -12,11 +12,18 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
 {
     private readonly Dictionary<string, (Language Language, Query Query)> _cache = new();
     private readonly HashSet<string> _failed = new();
+    private readonly int _maxChars = MaxSymbolChars();
 
     public IReadOnlyList<Symbol> Extract(string relativePath, string text)
     {
         var def = LanguageRegistry.ForPath(relativePath);
         if (def is null) return Array.Empty<Symbol>();
+
+        // Guard: tree-sitter parse cost is ~O(n^2) on pathological content (e.g. huge machine-
+        // generated headers), which can hang the whole index. Skip symbol extraction for very
+        // large files - they yield almost no useful symbols and are still fully trigram-indexed
+        // (text search works). Tunable via CODECOMPASS_MAX_SYMBOL_MB (default 1 MB).
+        if (text.Length > _maxChars) return Array.Empty<Symbol>();
 
         var loaded = GetOrLoad(def);
         if (loaded is null) return Array.Empty<Symbol>();
@@ -39,6 +46,15 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
                 node.StartPosition.Column + 1));
         }
         return results;
+    }
+
+    // Approx cap in characters (~bytes for ASCII source) above which we skip symbol extraction.
+    private static int MaxSymbolChars()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_MAX_SYMBOL_MB");
+        long mb = long.TryParse(env, out var v) && v > 0 ? v : 1;
+        long chars = mb * 1024 * 1024;
+        return chars > int.MaxValue ? int.MaxValue : (int)chars;
     }
 
     private (Language, Query)? GetOrLoad(LanguageDefinition def)
