@@ -1,5 +1,8 @@
 using System;
 using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Walking;
 using Xunit;
@@ -9,6 +12,9 @@ namespace CodeCompass.Core.Tests;
 // Escape hatches + visibility for the "dense generated headers" pathology: an operator can lower
 // the size cap or exclude a directory without editing source, and over-cap skips are counted
 // (not silent).
+// Shares CODECOMPASS_MAX_SYMBOL_MB with SymbolExtractionLimitsTests, so the collection serializes
+// the two classes (the pathological-header test relies on the default cap being in effect).
+[Collection("symbolcap-env")]
 public class IndexLimitsTests
 {
     [Fact]
@@ -53,5 +59,40 @@ public class IndexLimitsTests
         Assert.Equal(1, walker.OverCapSkipped);
         Assert.EndsWith("huge.cs", walker.LargestOverCapPath);
         Assert.Equal(4096, walker.LargestOverCapBytes);
+    }
+
+    // Regression for the tree-sitter O(n^2) hang: a large, high-vocabulary generated header used to
+    // stall indexing indefinitely (parsed as C++). With the symbol-size cap it must index quickly
+    // and stay text-searchable. Pre-fix this file (~2.5 MB) took ~2 minutes; post-fix well under 1 s.
+    [Fact]
+    public void PathologicalLargeHeader_IndexesWithoutHanging_AndStaysSearchable()
+    {
+        using var repo = new TempRepo();
+        const string charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_ ";
+        var rnd = new Random(20260909);
+        var sb = new StringBuilder(2_600_000);
+        for (int i = 0; i < 2_500_000; i++)
+        {
+            sb.Append(charset[rnd.Next(charset.Length)]);
+            if (i % 80 == 79) sb.Append('\n');
+        }
+        const string marker = "ZQXUNIQUEMARKER42";
+        sb.Append('\n').Append(marker).Append('\n');
+        repo.WriteBytes("chipreg.h", Encoding.ASCII.GetBytes(sb.ToString())); // .h -> tree-sitter C++
+
+        // Build on a worker with a generous bound; if the hang regresses, this times out and fails.
+        var build = Task.Run(() =>
+        {
+            var b = RepositoryIndexer.Build(repo.Root);
+            b.Text.Dispose();
+            b.Symbols.Dispose();
+        });
+        Assert.True(build.Wait(TimeSpan.FromSeconds(60)),
+            "indexing a pathological large header did not finish in 60s - the tree-sitter O(n^2) hang has regressed");
+
+        Assert.True(RepositoryIndexer.TryLoad(repo.Root, out var text, out var symbols));
+        using (text)
+        using (symbols)
+            Assert.NotEmpty(text.Search(marker)); // still fully text-searchable despite skipped symbols
     }
 }

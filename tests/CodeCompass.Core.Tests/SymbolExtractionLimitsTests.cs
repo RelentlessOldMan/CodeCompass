@@ -7,6 +7,8 @@ namespace CodeCompass.Core.Tests;
 // tree-sitter parse cost is ~O(n^2) on pathological content; without a size cap a single huge
 // generated header can hang the whole index. Symbol extraction is skipped above the cap (the file
 // is still trigram-indexed and searchable).
+// Serialized with IndexLimitsTests (both drive the process-global CODECOMPASS_MAX_SYMBOL_MB env).
+[Collection("symbolcap-env")]
 public class SymbolExtractionLimitsTests
 {
     [Fact]
