@@ -93,11 +93,13 @@ codecompass version                   print the build version (e.g. 1.0.52+a76d3
 
 Two diagnostics measure the exact trade-off the symbol cap controls:
 
-- **`codecompass symstats <path>`** parses every source file *ignoring the cap* (safely — ascending
-  by size, each parse timeout-guarded so it can't hang) and reports, per language: how many files
-  yield symbols and their size distribution (p50/p95/max), plus the largest file that still produced
-  symbols and any "knee" where parse time spikes. The headline is two numbers — the biggest real
-  symbol-bearing file, and the smallest file whose parse got slow — and a good cap sits between them.
+- **`codecompass symstats <path>`** reports, per language, the file-size distribution (p50/p95/max)
+  and whether the big files actually yield symbols and how fast they parse. It's cheap on a huge repo:
+  the size distribution comes from `stat` only (no parsing), and tree-sitter runs *ignoring the cap*
+  only on the **largest ~100 files per language** — the cap-relevant ones — sequentially and
+  timeout-guarded, so it can neither hang nor crawl. Add `--full` to parse every file (small repos).
+  The headline is two numbers — the biggest real symbol-bearing file, and the smallest file whose
+  parse got slow — and a good cap sits between them.
 - **`codecompass parsebench`** is a synthetic sweep: it parses progressively larger generated files
   in several shapes (ordinary code, random tokens, one long line, deeply nested delimiters, huge
   expression chains, nested templates) and prints parse time vs size.

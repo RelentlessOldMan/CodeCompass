@@ -7,33 +7,47 @@ using CodeCompass.Core.Text;
 namespace CodeCompass.Core.Indexing;
 
 /// <summary>
-/// Answers two questions a person needs to set <c>maxSymbolMb</c> sensibly, measured on a real repo:
-/// (1) how big do files that actually yield symbols get, per language, and (2) where does tree-sitter's
-/// ~O(n^2) parse cost start to hurt. It parses each eligible source file <b>ignoring the symbol cap</b>
-/// (that is the point - to see past it), but does so safely: files are visited in ascending size order
-/// per language and each parse runs on a worker thread joined with a timeout, so a pathological file is
-/// recorded and stops that language's scan rather than hanging the tool. Read-only; changes nothing.
+/// Answers the questions needed to set <c>maxSymbolMb</c> from data on a real repo: how big files get
+/// per language, whether the big ones actually yield symbols, and where parse cost starts to hurt.
+///
+/// Two cost tiers, so this is cheap even on a multi-GB repo:
+///  * The file-size distribution per language is gathered from <c>stat</c> only - no parsing - so it
+///    is essentially free across millions of files.
+///  * tree-sitter is only run to learn symbol yield + parse cost, and by default only on the LARGEST
+///    <c>maxParsePerLang</c> files per language (the cap-relevant ones; small files are known-fast and
+///    aren't the decision). <c>full</c> parses everything. Parsing is sequential, ascending by size,
+///    each parse joined with a timeout (a slow file becomes the language's "knee" and stops its scan),
+///    with a hard read ceiling and a global wall-clock budget - so it can neither hang nor crawl.
+/// Read-only; changes nothing.
 /// </summary>
 public sealed record FileParse(string Path, long Bytes, int Symbols, double ParseMs, bool TimedOut);
 
 public sealed record LanguageProfile(
     string Extension,
     string Language,
+    // Candidate population - every grammar-eligible file, from stat only (no parse):
+    int CandidateFiles,
+    long CandidateP50,
+    long CandidateP95,
+    long CandidateMax,
+    string CandidateMaxPath,
+    // Parsed sample (the largest files, or all under `full`):
     int FilesParsed,
     int FilesWithSymbols,
-    long SymbolBearingP50,
-    long SymbolBearingP95,
-    long SymbolBearingMax,
-    string SymbolBearingMaxPath,
+    long LargestSymbolBearing,        // largest parsed file that yielded >=1 symbol
+    string LargestSymbolBearingPath,
     double SlowestMs,
     long SlowestBytes,
-    FileParse? Knee,          // the file that tripped the timeout / slow-stop (null if none did)
-    int LargerNotProfiled,    // files in this language above the knee we deliberately skipped
-    long LargerMaxBytes);
+    FileParse? Knee,                  // the file that tripped the timeout / slow-stop (null if none did)
+    int NotParsed,                    // eligible files we did NOT parse (sampled out / over ceiling / after knee / budget)
+    long NotParsedMaxBytes);
 
 public sealed record SymbolProfileReport(
     long TimeoutMs,
     long HardCeilingBytes,
+    int MaxParsePerLang,
+    bool Full,
+    bool BudgetExhausted,
     IReadOnlyList<LanguageProfile> Languages,
     IReadOnlyList<FileParse> All);
 
@@ -42,8 +56,20 @@ public static class SymbolProfiler
     /// <param name="timeoutMs">Per-file parse timeout. A file that exceeds it is recorded as the
     /// language's knee and larger files in that language are skipped (they can only be worse).</param>
     /// <param name="hardCeilingBytes">Never even read files bigger than this (avoids OOM on absurd
-    /// files); they are counted as "not profiled".</param>
-    public static SymbolProfileReport Profile(string root, long timeoutMs = 20_000, long hardCeilingBytes = 64L * 1024 * 1024)
+    /// files); they are counted as not-parsed.</param>
+    /// <param name="maxParsePerLang">Parse at most this many files per language - the largest ones -
+    /// unless <paramref name="full"/>. Keeps a huge repo fast; the size distribution still covers all
+    /// files (it is stat-only).</param>
+    /// <param name="full">Parse every eligible file (small repos / exhaustive runs).</param>
+    /// <param name="budgetMs">Global wall-clock budget across all parsing; when exceeded, stop and
+    /// report what was covered rather than run unbounded.</param>
+    public static SymbolProfileReport Profile(
+        string root,
+        long timeoutMs = 20_000,
+        long hardCeilingBytes = 64L * 1024 * 1024,
+        int maxParsePerLang = 100,
+        bool full = false,
+        long budgetMs = 120_000)
     {
         root = Path.GetFullPath(root);
         CodeCompassConfig.Load(root);
@@ -51,6 +77,7 @@ public static class SymbolProfiler
 
         // Collect every file that a grammar covers, grouped by extension (so .h and .cpp - same
         // grammar, very different cost - report separately, which is exactly the interesting split).
+        // This is stat-only, so it is cheap even for a repo with millions of files.
         var byExt = new Dictionary<string, List<(string Rel, string Full, long Size)>>(StringComparer.OrdinalIgnoreCase);
         var stack = new Stack<string>();
         stack.Push(root);
@@ -85,28 +112,49 @@ public static class SymbolProfiler
         using var extractor = new TreeSitterSymbolExtractor();
         var profiles = new List<LanguageProfile>();
         var all = new List<FileParse>();
+        var budget = Stopwatch.StartNew();
+        bool budgetExhausted = false;
 
         foreach (var (ext, list) in byExt.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
             list.Sort((a, b) => a.Size.CompareTo(b.Size)); // ascending: never surprise-hang on the biggest first
             var lang = LanguageRegistry.ForExtension(ext)!.Key;
 
+            // Candidate distribution (free - stat only, whole population).
+            var sizes = list.Select(f => f.Size).ToList(); // already ascending
+            long candP50 = Percentile(sizes, 0.50), candP95 = Percentile(sizes, 0.95);
+            long candMax = sizes.Count > 0 ? sizes[^1] : 0;
+            string candMaxPath = list.Count > 0 ? list[^1].Rel : "";
+
             // Warm the grammar/query load so its one-time cost isn't charged to the first real file.
             try { extractor.ExtractUncapped("warm" + ext, "int x;"); } catch { /* best effort */ }
 
+            // Parse set: the largest maxParsePerLang files (still ascending, for the knee logic), or all.
+            int skipSmall = full ? 0 : Math.Max(0, list.Count - maxParsePerLang);
+            long notParsedMax = skipSmall > 0 ? list[skipSmall - 1].Size : 0; // largest of the sampled-out small files
+            int notParsed = skipSmall;
+
             var parses = new List<FileParse>();
             FileParse? knee = null;
-            int largerNotProfiled = 0;
-            long largerMax = 0;
 
-            foreach (var (rel, full, size) in list)
+            for (int i = skipSmall; i < list.Count; i++)
             {
-                if (knee is not null) { largerNotProfiled++; largerMax = Math.Max(largerMax, size); continue; }
-                if (size > hardCeilingBytes) { largerNotProfiled++; largerMax = Math.Max(largerMax, size); continue; }
+                var (rel, full2, size) = list[i];
+                if (knee is not null || budgetExhausted || size > hardCeilingBytes)
+                {
+                    notParsed++; notParsedMax = Math.Max(notParsedMax, size);
+                    continue;
+                }
+                if (budget.ElapsedMilliseconds > budgetMs)
+                {
+                    budgetExhausted = true;
+                    notParsed++; notParsedMax = Math.Max(notParsedMax, size);
+                    continue;
+                }
 
                 string text;
-                try { text = TextDecoder.FromBytes(File.ReadAllBytes(full)); }
-                catch { continue; }
+                try { text = TextDecoder.FromBytes(File.ReadAllBytes(full2)); }
+                catch { notParsed++; notParsedMax = Math.Max(notParsedMax, size); continue; }
 
                 var (ms, count, timedOut) = TimeParse(extractor, rel, text, timeoutMs);
                 var fp = new FileParse(rel, size, count, ms, timedOut);
@@ -118,29 +166,26 @@ public static class SymbolProfiler
                 if (timedOut || ms >= timeoutMs / 2.0) knee = fp;
             }
 
-            var withSym = parses.Where(p => p.Symbols > 0).Select(p => p.Bytes).OrderBy(b => b).ToList();
+            var withSym = parses.Where(p => p.Symbols > 0).ToList();
             var slowest = parses.Count > 0 ? parses.OrderByDescending(p => p.ParseMs).First() : null;
-            string maxPath = withSym.Count > 0
-                ? parses.Where(p => p.Symbols > 0).OrderByDescending(p => p.Bytes).First().Path
-                : "";
+            var largestSym = withSym.Count > 0 ? withSym.OrderByDescending(p => p.Bytes).First() : null;
 
             profiles.Add(new LanguageProfile(
                 ext, lang,
+                list.Count, candP50, candP95, candMax, candMaxPath,
                 parses.Count,
                 withSym.Count,
-                Percentile(withSym, 0.50),
-                Percentile(withSym, 0.95),
-                withSym.Count > 0 ? withSym[^1] : 0,
-                maxPath,
+                largestSym?.Bytes ?? 0,
+                largestSym?.Path ?? "",
                 slowest?.ParseMs ?? 0,
                 slowest?.Bytes ?? 0,
                 knee,
-                largerNotProfiled,
-                largerMax));
+                notParsed,
+                notParsedMax));
         }
 
-        profiles.Sort((a, b) => b.SymbolBearingMax.CompareTo(a.SymbolBearingMax));
-        return new SymbolProfileReport(timeoutMs, hardCeilingBytes, profiles, all);
+        profiles.Sort((a, b) => b.CandidateMax.CompareTo(a.CandidateMax));
+        return new SymbolProfileReport(timeoutMs, hardCeilingBytes, maxParsePerLang, full, budgetExhausted, profiles, all);
     }
 
     // Run one parse on a worker thread and join with a timeout. tree-sitter is native and can't be

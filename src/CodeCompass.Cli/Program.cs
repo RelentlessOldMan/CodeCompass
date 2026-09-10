@@ -59,7 +59,7 @@ static int Usage()
     Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
     Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#/C++, lexical elsewhere)");
     Console.Error.WriteLine("  codecompass survey  <path>               report what the size caps skip + suggest config");
-    Console.Error.WriteLine("  codecompass symstats <path>              profile symbol-file sizes + parse cost per language");
+    Console.Error.WriteLine("  codecompass symstats <path> [--full]     profile symbol-file sizes + parse cost per language");
     Console.Error.WriteLine("  codecompass parsebench                   tree-sitter parse-time vs size sweep (synthetic)");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
     Console.Error.WriteLine("  codecompass version                      print the build version");
@@ -114,60 +114,57 @@ static int CmdSurvey(string[] args)
     return 0;
 }
 
-// Profile a real repo: for each language, how big do files that actually yield symbols get, and
-// where does tree-sitter's parse cost start to hurt. This is the data behind a maxSymbolMb choice.
-// Safe to run on huge trees - it scans ascending by size and times out per file (never hangs).
+// Profile a real repo: how big files get per language (free - stat only), whether the big ones yield
+// symbols, and where parse cost starts to hurt. The data behind a maxSymbolMb choice. Safe on huge
+// trees: the size distribution covers all files without parsing; tree-sitter runs only on the largest
+// N files per language (--full to parse all), sequentially, timeout-guarded - it can't hang or crawl.
 static int CmdSymStats(string[] args)
 {
-    if (args.Length < 2) return Usage();
-    var root = Path.GetFullPath(args[1]);
+    bool full = args.Any(a => a is "--full" or "-full");
+    var pathArg = args.Skip(1).FirstOrDefault(a => !a.StartsWith('-'));
+    if (pathArg is null) return Usage();
+    var root = Path.GetFullPath(pathArg);
     if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
 
     static string Sz(long b) =>
         b >= 1048576 ? $"{b / 1048576.0,6:F1} MB" : $"{b / 1024.0,6:F1} KB";
 
-    Console.Error.Write("profiling (parsing every source file, ignoring the symbol cap)...");
-    var r = SymbolProfiler.Profile(root);
-    Console.Error.Write("\r" + new string(' ', 64) + "\r");
+    Console.Error.Write(full ? "profiling (parsing every source file)..." : "profiling (sizes for all files; parsing the largest per language)...");
+    var r = SymbolProfiler.Profile(root, full: full);
+    Console.Error.Write("\r" + new string(' ', 72) + "\r");
 
-    Console.WriteLine($"Per-file parse timeout: {r.TimeoutMs / 1000.0:F0}s   (a file over this stops that language's scan)");
+    string scope = r.Full ? "parsed ALL files" : $"parsed the largest {r.MaxParsePerLang}/language (--full for all)";
+    Console.WriteLine($"Scope: sizes from all files (no parse); {scope}. Per-file timeout {r.TimeoutMs / 1000.0:F0}s.");
     Console.WriteLine();
-    Console.WriteLine($"{"ext",-6} {"lang",-11} {"files",6} {"w/syms",6}   " +
-                      $"{"symbol-bearing size (p50/p95/max)",-34}  slowest parse");
+    Console.WriteLine($"{"ext",-6} {"lang",-11} {"files",7}  {"file size p50/p95/max",-26}  {"parsed",6} {"w/syms",6}  slowest parse");
     foreach (var p in r.Languages)
     {
-        string sizes = p.FilesWithSymbols > 0
-            ? $"{Sz(p.SymbolBearingP50)} / {Sz(p.SymbolBearingP95)} / {Sz(p.SymbolBearingMax)}"
-            : "(none produced symbols)";
-        Console.WriteLine($"{p.Extension,-6} {p.Language,-11} {p.FilesParsed,6} {p.FilesWithSymbols,6}   " +
-                          $"{sizes,-34}  {p.SlowestMs,7:F0} ms @ {Sz(p.SlowestBytes)}");
+        string cand = $"{Sz(p.CandidateP50)} /{Sz(p.CandidateP95)} /{Sz(p.CandidateMax)}";
+        Console.WriteLine($"{p.Extension,-6} {p.Language,-11} {p.CandidateFiles,7}  {cand,-26}  {p.FilesParsed,6} {p.FilesWithSymbols,6}  {p.SlowestMs,6:F0} ms @ {Sz(p.SlowestBytes)}");
+        Console.WriteLine($"         largest file: {p.CandidateMaxPath}");
         if (p.FilesWithSymbols > 0)
-            Console.WriteLine($"         largest with symbols: {p.SymbolBearingMaxPath}");
+            Console.WriteLine($"         largest parsed file WITH symbols: {Sz(p.LargestSymbolBearing)}  {p.LargestSymbolBearingPath}");
         if (p.Knee is not null)
         {
             var k = p.Knee;
             string how = k.TimedOut ? "TIMED OUT" : $"{k.ParseMs:F0} ms";
-            Console.WriteLine($"         [!] parse cost knee: {Sz(k.Bytes)} took {how} ({k.Path})");
-            if (p.LargerNotProfiled > 0)
-                Console.WriteLine($"             {p.LargerNotProfiled:N0} larger file(s) up to {Sz(p.LargerMaxBytes)} skipped (would only be slower)");
-        }
-        else if (p.LargerNotProfiled > 0)
-        {
-            Console.WriteLine($"         {p.LargerNotProfiled:N0} file(s) up to {Sz(p.LargerMaxBytes)} over the profiling ceiling (not parsed)");
+            Console.WriteLine($"         [!] parse cost knee: {Sz(k.Bytes)} took {how} ({k.Path}) - larger files not parsed");
         }
     }
 
     // The headline: the two numbers that bracket a good cap.
-    long maxSym = r.Languages.Count > 0 ? r.Languages.Max(p => p.SymbolBearingMax) : 0;
+    long maxSym = r.Languages.Count > 0 ? r.Languages.Max(p => p.LargestSymbolBearing) : 0;
     var firstSlow = r.All.Where(p => p.TimedOut || p.ParseMs >= 1000).OrderBy(p => p.Bytes).FirstOrDefault();
     Console.WriteLine();
     Console.WriteLine($"Largest file that actually produced symbols: {Sz(maxSym)}");
     if (firstSlow is not null)
         Console.WriteLine($"Smallest file whose parse got slow (>=1s):   {Sz(firstSlow.Bytes)}  ({firstSlow.Path})");
     else
-        Console.WriteLine("No file's parse reached 1s - tree-sitter is comfortable across this repo.");
+        Console.WriteLine("No parsed file's parse reached 1s - tree-sitter is comfortable on the files sampled.");
     Console.WriteLine("Set maxSymbolMb above the first line to cover real symbols; keep it below the second so a");
     Console.WriteLine("slow-to-parse file can't stall indexing. (Run 'parsebench' to see the parse-cost curve.)");
+    if (r.BudgetExhausted)
+        Console.WriteLine("NOTE: hit the wall-clock budget - some large files went unparsed. Re-run with --full for complete coverage.");
     return 0;
 }
 

@@ -115,10 +115,12 @@ linearly. That is bounded by default &mdash; <b>symbol extraction is skipped abo
 (1&nbsp;MB)</b>, and those files are still fully trigram-indexed, so text search stays complete. In practice it never touches
 hand-written code: across the test corpora, every source file over 1&nbsp;MB was machine-generated. Files skipped for a cap are
 counted and logged, so the coverage gap is visible rather than silent.</p>
-<p>Two diagnostics quantify this on your own repo: <code>codecompass symstats &lt;path&gt;</code> parses every file ignoring the
-cap (safely &mdash; ascending by size, timeout-guarded) and reports the real size distribution of symbol-bearing files per
-language plus any parse-cost knee; <code>codecompass parsebench</code> runs the synthetic size sweep above. A good
-<code>maxSymbolMb</code> sits above your largest real symbol-bearing file and below the size where parsing gets slow.</p>
+<p>Two diagnostics quantify this on your own repo: <code>codecompass symstats &lt;path&gt;</code> reports the per-language file-size
+distribution (from <code>stat</code> only &mdash; free, so it is cheap on a huge repo) and runs tree-sitter, ignoring the cap,
+only on the largest ~100 files per language (sequential, timeout-guarded &mdash; it can neither hang nor crawl; add
+<code>--full</code> to parse everything) to show whether the big files yield symbols and where parse cost spikes;
+<code>codecompass parsebench</code> runs the synthetic size sweep above. A good <code>maxSymbolMb</code> sits above your
+largest real symbol-bearing file and below the size where parsing gets slow.</p>
 <table>
 <thead><tr><th>Environment variable</th><th style="text-align:left">Effect</th></tr></thead>
 <tbody>
