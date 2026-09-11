@@ -128,7 +128,13 @@ public static class RepositoryIndexer
             () => new BuildWorker(),
             (file, _, worker) =>
             {
-                reads.Acquire(file.Size); // cap total file bytes in flight across all workers
+                // Reserve the real processing footprint, not just the raw size: while trigrams are
+                // computed the raw bytes (1x) and the decoded UTF-16 string (2x) are both live, so
+                // peak is ~3x the file size. Reserving 3x makes the budget's RAM-scaling honest -
+                // "budget of N bytes" then genuinely fits a file up to ~N/3, and a bigger one reserves
+                // the whole budget and runs solo (ByteBudget clamps the reservation, so no deadlock).
+                long footprint = ProcessingFootprint(file.Size);
+                reads.Acquire(footprint);
                 int tid = Environment.CurrentManagedThreadId;
                 inFlight[tid] = (file.RelativePath, file.Size, clock.ElapsedMilliseconds); // for the watchdog
                 try
@@ -157,7 +163,7 @@ public static class RepositoryIndexer
                     if (worker.Symbols.ApproxBytes >= symBudget) FlushSymbols(worker, dir, ref symSegCounter, symSegFiles);
                     return worker;
                 }
-                finally { inFlight.TryRemove(tid, out var _gone); reads.Release(file.Size); }
+                finally { inFlight.TryRemove(tid, out var _gone); reads.Release(footprint); }
             },
             worker =>
             {
@@ -238,6 +244,13 @@ public static class RepositoryIndexer
     private static int CompactSegmentThreshold() => CodeCompassConfig.CompactSegments();
 
     private static int StallWarnSeconds() => CodeCompassConfig.StallWarnSec();
+
+    // Approximate peak RAM to hold one file in flight while it's indexed: raw bytes (1x) + the decoded
+    // UTF-16 string (2x) live simultaneously during trigram computation (~3x). Used to reserve against
+    // the read budget so its RAM-scaling is honest for large files. Guards against long overflow.
+    private const long ProcessingFootprintMultiple = 3;
+    private static long ProcessingFootprint(long fileSize) =>
+        fileSize > long.MaxValue / ProcessingFootprintMultiple ? long.MaxValue : fileSize * ProcessingFootprintMultiple;
 
     /// <summary>Indexing parallelism: CODECOMPASS_THREADS / config `threads` if set, else all cores.</summary>
     public static int DegreeOfParallelism() => CodeCompassConfig.Threads(Environment.ProcessorCount);

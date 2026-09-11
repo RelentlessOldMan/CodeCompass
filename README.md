@@ -129,7 +129,7 @@ editing source:
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if a build stalls or a single file is held longer than this (default 60, min 5). The warning names the exact file(s) each worker is stuck on, so a pathologically slow file is identified rather than guessed. |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
-| `CODECOMPASS_READ_BUDGET_MB` | Cap on total file bytes held in memory at once during a parallel build (default scales to RAM: ≈1/16th of available, clamped 256 MB–4 GB). Prevents N cores each loading a multi-GB file simultaneously when `MAX_FILE_MB` is large. A file bigger than the budget reads solo. |
+| `CODECOMPASS_READ_BUDGET_MB` | Cap on in-flight file processing memory during a parallel build (default scales to RAM: ≈1/16th of available, clamped 256 MB–4 GB). Reservations count the real footprint (~3× file size: raw bytes + decoded UTF-16 string), so the budget genuinely fits files up to ≈budget/3 and prevents N cores each loading a big file at once when `MAX_FILE_MB` is large. A file bigger than the budget reserves it all and reads solo (blocking others until done) — no deadlock. |
 
 Files skipped for exceeding a cap are counted and logged (not silently dropped), so the coverage gap
 is visible. Known limitation: files over `MAX_FILE_MB` are absent from search, and files over
