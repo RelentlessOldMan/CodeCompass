@@ -93,9 +93,9 @@ static int CmdSurvey(string[] args)
         if (r.SymbolSkipped.Count > 5) Console.WriteLine($"    ... and {r.SymbolSkipped.Count - 5:N0} more");
         int suggest = (int)Math.Ceiling(Mb(r.SymbolSkipped[0].Bytes));
         Console.WriteLine($"  If these are valid code whose symbols you want, set \"maxSymbolMb\": {suggest} in .codecompass.json.");
-        Console.WriteLine("  Caution: parse cost is linear but the constant varies ~70x by content; a big degenerate");
-        Console.WriteLine("  file can take tens of seconds. Run 'symstats'/'parsebench' first. These are usually generated,");
-        Console.WriteLine("  low-symbol-value files.");
+        Console.WriteLine("  Raising it is safe: above 1 MB, files that are overwhelmingly numeric/hex data (generated");
+        Console.WriteLine("  arrays - slow to parse, zero symbols) are auto-skipped by content, so only real code is parsed.");
+        Console.WriteLine("  Run 'symstats'/'parsebench' first to see sizes and parse cost.");
     }
 
     Console.WriteLine();
