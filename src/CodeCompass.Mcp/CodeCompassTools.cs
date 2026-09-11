@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Linq;
 using System.Text;
 using CodeCompass.Core.Text;
 using CodeCompass.Semantics;
@@ -70,27 +71,34 @@ public static class CodeCompassTools
         [Description("Maximum number of results.")] int maxResults = 100)
         => ServerContext.Query((text, _) =>
     {
+        // Collect one past the cap across all sources (C# semantic, C/C++ semantic, then lexical in
+        // other files) so truncation is detected by the same overflow probe the other tools use -
+        // exact, not a fuzzy threshold. Kind tags let the footer report the shown breakdown.
+        int probe = maxResults + 1;
+        var hits = new List<(string Line, char Kind)>();
+        foreach (var s in ServerContext.CSharp.FindReferences(name, probe))
+            hits.Add(($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
+        foreach (var s in ServerContext.Cpp.FindReferences(name, probe))
+            hits.Add(($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
+
+        if (hits.Count <= maxResults)
+            foreach (var m in text.Search(name, probe * 5))
+            {
+                if (SemanticCoverage.IsCovered(m.Path)) continue;             // semantic files handled above
+                if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
+                hits.Add(($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}", 'l'));
+                if (hits.Count > maxResults) break;                          // got the overflow row
+            }
+
+        if (hits.Count == 0) return $"No references found for \"{name}\".";
+
+        bool truncated = hits.Count > maxResults;
+        var shown = hits.Take(maxResults).ToList();
         var sb = new StringBuilder();
-        var cs = ServerContext.CSharp.FindReferences(name, maxResults);
-        foreach (var s in cs) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
-
-        var cpp = ServerContext.Cpp.FindReferences(name, maxResults);
-        foreach (var s in cpp) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
-
-        int semantic = cs.Count + cpp.Count;
-        int lexical = 0;
-        foreach (var m in text.Search(name, maxResults * 5))
-        {
-            if (SemanticCoverage.IsCovered(m.Path)) continue;
-            if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
-            sb.AppendLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
-            if (semantic + ++lexical >= maxResults) break;
-        }
-
-        if (semantic == 0 && lexical == 0) return $"No references found for \"{name}\".";
-        sb.Append($"({cs.Count} C# + {cpp.Count} C/C++ semantic reference(s); {lexical} lexical in other files)");
-        if (semantic + lexical >= maxResults)
-            sb.Append($" - capped at {maxResults}; MORE MAY EXIST, raise the limit or narrow the query");
+        foreach (var (line, _) in shown) sb.AppendLine(line);
+        int cs = shown.Count(h => h.Kind == 'c'), cpp = shown.Count(h => h.Kind == 'p'), lex = shown.Count(h => h.Kind == 'l');
+        sb.Append($"({cs} C# + {cpp} C/C++ semantic reference(s); {lex} lexical in other files)");
+        if (truncated) sb.Append(" - MORE EXIST, narrow the query or raise the limit");
         return sb.ToString();
     });
 

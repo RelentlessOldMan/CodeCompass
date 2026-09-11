@@ -136,6 +136,30 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void FindReferences_SignalsTruncationExactlyAtCap()
+    {
+        using var repo = new TempRepo();
+        // 6 non-semantic (.py) files each referencing `handler` as a whole word -> lexical refs.
+        for (int i = 0; i < 6; i++) repo.Write($"m{i}.py", "def go():\n    handler()\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+
+            // Cap below the true count -> must signal truncation with the shared 'MORE EXIST' sentinel.
+            var capped = CodeCompassTools.FindReferences("handler", maxResults: 3);
+            Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(capped, "\\.py:").Count);
+            Assert.Contains("MORE EXIST", capped);
+
+            // Cap above the true count -> exact, no false 'MAY EXIST' (the old threshold bug).
+            var full = CodeCompassTools.FindReferences("handler", maxResults: 50);
+            Assert.DoesNotContain("MORE EXIST", full);
+            Assert.DoesNotContain("MAY EXIST", full);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
     public void ConcurrentSearchAndReindex_DoesNotCrash()
     {
         using var repo = NewIndexedRepo();
