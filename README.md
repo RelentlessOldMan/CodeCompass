@@ -151,6 +151,18 @@ is always visible (`codecompass survey` / `codecompass logs`).
 - Precise C/C++ semantics need a compile database (`compile_commands.json`); without one it degrades
   to syntactic. No embeddings / semantic-meaning search. Single machine, single user.
 
+### Reproducing the large / generated-file cases locally
+
+Big corpora are never committed (`.corpus/` is gitignored); regenerate them with the bundled scripts:
+
+- **`make-bigfile-corpus.ps1`** — writes one ~2 GB register-map header (`#define HEY_MOM_MY_CHIP_…`)
+  with unique markers scattered through it, to exercise streaming indexing + the block/positional
+  search. `-Run` indexes it and searches (a marker near EOF is found in ms via the positional index;
+  `HEY` shows the truncation signal). `-SizeGB 0.2` for a quick check.
+- **`make-pathological-corpus.ps1`** — the slow-to-parse shapes (nested templates, etc.) that stress
+  tree-sitter; `-Run` demonstrates the symbol cap handling them.
+- **`make-megacorpus.ps1`** — aggregates fetched repos into a >10 GB tree for scale runs.
+
 ### Per-repo config file
 
 Every knob above also lives in an optional **`.codecompass.json`** at the repo root, so settings
