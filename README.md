@@ -132,8 +132,21 @@ editing source:
 | `CODECOMPASS_READ_BUDGET_MB` | Cap on in-flight file processing memory during a parallel build (default scales to RAM: ≈1/16th of available, clamped 256 MB–4 GB). Reservations count the real footprint (~3× file size: raw bytes + decoded UTF-16 string), so the budget genuinely fits files up to ≈budget/3 and prevents N cores each loading a big file at once when `MAX_FILE_MB` is large. A file bigger than the budget reserves it all and reads solo (blocking others until done) — no deadlock. |
 
 Files skipped for exceeding a cap are counted and logged (not silently dropped), so the coverage gap
-is visible. Known limitation: files over `MAX_FILE_MB` are absent from search, and files over
-`MAX_SYMBOL_MB` are absent from go-to-definition (still text-searchable).
+is always visible (`codecompass survey` / `codecompass logs`).
+
+**Limitations (by design — know where the edges are):**
+
+- Files over `MAX_FILE_MB` (default 5) are absent from search entirely.
+- Files over `MAX_SYMBOL_MB` (default 1), or classified as numeric/hex data above 1 MB when the cap
+  is raised, have no go-to-definition (still text-searchable).
+- Files over **~1 GB are not indexed at all** — each file is decoded into a single string, and .NET
+  caps a string near ~1 GB of text (and a byte array at 2 GB), independent of machine RAM. Such files
+  are skipped and logged, not crashed on. (Lifting this would need streaming/chunked indexing; not
+  built, because files that large are ~always generated data with negligible unique search value.)
+- `#define`/macro definitions are **not** captured as symbols (they'd explode the symbol index on
+  register-map code); the names are still findable via `search_code`.
+- Precise C/C++ semantics need a compile database (`compile_commands.json`); without one it degrades
+  to syntactic. No embeddings / semantic-meaning search. Single machine, single user.
 
 ### Per-repo config file
 
@@ -148,9 +161,11 @@ default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of d
 
 Run **`codecompass survey <path>`** first — it reports what the current caps skip (files with no
 go-to-definition, files absent from search), names the largest, and suggests a concrete config
-change *with the O(n²) caveat*. It changes nothing; you decide. There is deliberately **no
-auto-bumping**: file size isn't a reliable signal of parse safety (a valid 5 MB file parses fast, a
-pathological one hangs), so raising a cap is a judgement only the repo owner can make.
+change. It changes nothing; you decide. There is deliberately **no auto-bumping**: file size isn't a
+reliable signal of parse safety (a valid 5 MB file parses fast, a degenerate one is ~25× slower), so
+raising a cap is a judgement only the repo owner can make. Raising the symbol cap is safe from the
+data-blob crawl — above 1 MB, overwhelmingly numeric/hex files are auto-skipped for symbols by
+content (see *Tuning* above).
 
 ## Performance
 

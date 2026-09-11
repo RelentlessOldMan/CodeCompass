@@ -6,8 +6,14 @@ A fully-local code search and retrieval engine that gives AI coding agents
 codebases, so the agent stops burning tokens reading whole files and grepping
 blindly.
 
-Status: design / pre-build. This document is the north star. Nothing here is
-built yet.
+Status: built and in use. All six build phases below are complete, plus a long
+tail of hardening for scale. This document is both the north star and a record
+of the design decisions - especially the ones learned the hard way while making
+indexing survive very large, partly machine-generated codebases. Where a
+decision has a non-obvious "why", it is written down here, because the reasons
+matter more than the code. The build carries a git-derived version
+(1.0.<commit-count>+<short-sha>, reported by `codecompass version` and in the
+logs) so a user's report pins an exact commit.
 
 
 The problem
@@ -107,12 +113,14 @@ Think of it as an agent-facing front door, a background brain that owns the
 index, and the intelligence layers underneath.
 
 The agent side. Claude Code talks to CodeCompass over MCP - the standard way to
-give an agent custom tools. CodeCompass exposes a small set of tools such as
+give an agent custom tools. CodeCompass exposes exactly five tools, deliberately
+kept minimal so the tool surface itself costs the agent almost no tokens to carry:
 search_code (ranked text matches with line ranges), find_definition (where a
-symbol is defined), find_references (everywhere a symbol is used), and
-get_symbol (pull a specific function/class/type by name). Alongside the MCP
-server, a hook watches for the agent trying to grep or glob and steers it to
-CodeCompass instead.
+symbol is defined), find_references (everywhere a symbol is used), search_symbols
+(find symbols by name), and reindex (refresh the index on demand). Alongside the
+MCP server, a hook watches for the agent trying to grep or glob and steers it to
+CodeCompass instead. Everything else the tool can do - survey, symstats,
+parsebench, logs, version - is CLI-only, so it never enlarges the agent's tool set.
 
 The brain. A background indexing service owns the on-disk index and keeps it
 current. It walks the tree, filters out junk, watches for changes, detects what
@@ -238,7 +246,8 @@ Build phases
    symbol search.
 
 3. MCP server exposing search_code, find_definition, find_references,
-   get_symbol. Wire it into Claude Code manually and feel the difference.
+   search_symbols, and reindex. Wire it into Claude Code manually and feel the
+   difference.
 
 4. Semantic layers: Roslyn for C#, then clang/ClangSharp for C/C++.
 
@@ -247,12 +256,21 @@ Build phases
 6. Package as a Claude Code plugin: bundle the MCP server, the hard-block
    grep-redirect hook, and the agent instructions into a one-command install.
 
+All six phases are complete. Beyond them, the bulk of the work has been hardening
+for scale and correctness: on-disk memory-mapped trigram and symbol indexes, an
+on-disk change-detection snapshot, RAM-scaled build and read budgets, in-index
+segment compaction, opting out of Windows E-core/EcoQoS throttling during a build,
+a per-repo .codecompass.json config, the diagnostics (survey/symstats/parsebench),
+and the large-file/generated-code handling described under "Scaling, huge files,
+and generated code". Correctness is guarded by a growing unit-test suite
+(150-plus tests) including the pathological cases that once broke indexing.
+
 
 Diagnostics and logging
 -----------------------
 
-Because CodeCompass runs unattended on other people's machines (a friend's 87 GB
-repo, inside Claude Code where its stderr is invisible), it keeps a self-limiting
+Because CodeCompass runs unattended on other people's machines (a very large,
+tens-of-GB repo, inside Claude Code where its stderr is invisible), it keeps a self-limiting
 log on disk so a problem can be diagnosed after the fact. Everything lives in one
 folder, %LOCALAPPDATA%\CodeCompass\logs, alongside the index caches, so there is a
 single place to look or clear.
@@ -275,6 +293,172 @@ opt-in for chasing a specific issue. The CLI exposes "codecompass logs" to print
 the folder and current files.
 
 
+Scaling, huge files, and generated code
+---------------------------------------
+
+Most of the hard problems in this project were not about search quality; they
+were about surviving very large, partly machine-generated trees without hanging,
+crashing, or exhausting a laptop's memory. The design below is the answer, and
+the "why" behind each piece is the point.
+
+Memory is bounded regardless of repo size. Both indexes (trigram and symbol) are
+built by streaming to disk in segments at a byte budget and then read back
+through memory-mapped files, so neither building nor searching holds the whole
+index in RAM. The change-detection ledger is on disk too (mmap base + small
+in-memory overlay, described above). The per-build segment buffers are sized to a
+fraction of available RAM, and the amount of file content read at once is capped
+by a budget that also scales to RAM. The result, measured on a tens-of-GB repo:
+a first build fits in a few GB of RAM and search fits in hundreds of MB, on an
+ordinary 16 GB machine. Memory does not grow with the size of the index.
+
+The in-flight read budget deserves a note, because "scaled to RAM" is more subtle
+than it looks. A worker that indexes a text file briefly holds the raw bytes and
+the decoded UTF-16 string at the same time - about 3x the file size. So the
+budget reserves ~3x a file's size before reading it, which makes the RAM math
+honest: a budget of N genuinely fits a file up to ~N/3, and a file larger than
+the whole budget reserves all of it and is processed alone (blocking others until
+it finishes, never deadlocking). This is what stops N cores from each pulling a
+multi-hundred-MB file simultaneously and blowing up memory when the file cap is
+raised. The budget throttles concurrency, not single-file size: a big file still
+indexes, it just runs solo.
+
+Two coverage caps, and why they exist. Both are visible, tunable, and logged
+(never silent), and `codecompass survey` reports exactly what they skip.
+
+- File cap (CODECOMPASS_MAX_FILE_MB, default 5). Above this, a file is not indexed
+  at all. Why: it bounds read cost, and enormous generated files (multi-hundred-MB
+  data or bundle files) add almost nothing to a trigram index anyway - trigrams
+  deduplicate such repetitive content down to a rounding error, so the index
+  barely grows even as bytes read climb. The cost of including them is read time,
+  not index size.
+
+- Symbol cap (CODECOMPASS_MAX_SYMBOL_MB, default 1). Above this, a file is still
+  fully text-searchable but gets no symbol extraction (no go-to-definition). Why:
+  parse cost. See below.
+
+Parse cost is linear - but the constant varies ~70x by content. This corrects an
+earlier assumption. We first believed tree-sitter parsing was ~O(n^2) on dense
+generated content; direct measurement (the `parsebench` sweep) disproved that -
+parse time grows linearly with file size for every content shape tried. What
+varies enormously is the constant factor. Ordinary source parses at ~1.8 MB/s;
+the worst shapes are far slower: deeply nested C++ template expressions at
+~0.1 MB/s, and - the one that matters in practice - large machine-generated
+numeric "data-blob" files at ~1 MB/s, roughly 25x slower than code.
+
+The data-blob problem, and the crawl it caused. The real hazard at scale turned
+out to be large, machine-generated numeric data files: test-vector and data-buffer
+sources that are essentially one giant array initializer of hex or decimal
+literals. They have three bad properties at once - multi-MB size, ~25x-slow parse
+(a million tiny numeric tokens make a huge parse tree), and zero extractable
+symbols. On a real tens-of-GB tree, raising the symbol cap so these got parsed
+made a build "crawl": it raced to ~99% then wedged for minutes. A thread-stack
+capture of the wedged process settled what it was - roughly all worker threads
+parked in native tree-sitter parse of these files. Not a lock, not garbage
+collection, not a finalization step, and not scheduling (switching the work
+partitioner to hand out one file at a time made no difference, because the slow
+files are simply slow, not badly balanced). It is parallel native parse of files
+that are expensive and worthless to parse.
+
+How we handle it, in layers:
+
+- At default settings the problem cannot occur. Every one of these data-blob files
+  is larger than 1 MB, so the default symbol cap already skips all of them, and
+  the crawl never happens. This is not luck: measured across large corpora,
+  essentially every source file over 1 MB is machine-generated, and effectively
+  all files that contain real, extractable symbols are under 1 MB. So the 1 MB cap
+  costs almost nothing in real symbol coverage while removing the entire hazard.
+
+- If the symbol cap is raised (to get symbols out of large hand-written code),
+  a fixed, non-configurable content check engages, but only for files above 1 MB
+  - i.e. only for the files a raised cap newly admits. It skips symbol extraction
+  when a file is overwhelmingly numeric/hex data. The signal is cheap and robust:
+  the density of letters that fall outside numeric-literal context. Hex digits
+  (a-f/A-F) and the "0x" prefix (x/X) are not counted; every other letter is.
+  Real code and even register-map #define headers are full of such letters
+  (roughly 25-40%); a numeric/hex data array has almost none (~0%). Below 1 MB the
+  check never runs, so it has zero cost and zero behavioral effect at defaults.
+  The effect: raising the cap now safely parses large real code while the data
+  blobs that cause the crawl are skipped by content, not by size.
+
+- Register-map #define headers are a different generated shape and are treated
+  differently. They parse fast, so they are not a performance problem - but they
+  are also almost pure `#define` lines, and we deliberately do NOT capture
+  `#define`/macro definitions as symbols. On a register-map-heavy codebase that
+  would mint millions of symbol entries and bloat the symbol index for little
+  value; those names remain findable as text via search_code. This is a conscious
+  trade, revisited and re-affirmed.
+
+- Load balancing is general hygiene, not the fix. Workers pull one file at a time
+  rather than in growing chunks, so a directory-order cluster of expensive files
+  (say a vendored, minified bundle directory) can't strand a single core while the
+  rest idle. This helps genuinely clustered cost; it is explicitly not what tames
+  the data-blob crawl (that is the caps above).
+
+- A watchdog makes any residual stall visible and diagnosable. It runs on a
+  dedicated thread - not a pool timer, which would itself be starved during a
+  build that saturates the thread pool (that starvation is why an earlier
+  timer-based watchdog stayed silent). It fires when byte progress freezes or when
+  any worker has held a single file longer than the stall window, and it logs the
+  exact file(s) in flight and how long each has been held - naming the culprit
+  rather than guessing, or reporting "no files in flight" if a stall is instead in
+  a post-parse step. A concise notice is also printed to stderr so a freeze is not
+  a silently stuck progress bar.
+
+Very large single files: the hard ceiling, and why it exists. This is a real
+limitation, so it is stated plainly. The design reads each file whole and decodes
+it into a single .NET string. That imposes two platform ceilings that no amount of
+RAM removes: reading a file into one array fails above 2 GB, and a single string
+tops out near ~1 GB of text (its UTF-16 buffer hits the 2 GB single-object limit
+at ~1 billion characters). So a file larger than ~1 GB is not text-indexed - it is
+skipped and logged, cleanly, instead of failing the build with an out-of-memory
+error partway through decoding. Indexing arbitrarily large single files would
+require streaming/chunked trigram extraction that never materializes the whole
+file in memory. That is deliberately not built: files that big are, in practice,
+always generated data whose unique search value is negligible (trigrams dedupe
+them to nothing), so the engineering cost is not justified until a real need
+appears.
+
+Diagnostics for tuning these knobs from data, not guesswork:
+
+- `codecompass survey <path>` reports what the caps currently skip (files with no
+  go-to-definition, files absent from search), names the largest, and suggests a
+  concrete config change - without changing anything.
+
+- `codecompass symstats <path>` profiles, per language, the real file-size
+  distribution (from stat only, so it is free even across millions of files) and
+  whether the largest files actually yield symbols and how fast they parse. It is
+  safe on a huge repo: it parses only the largest files per language, sequentially,
+  each guarded by a timeout, so it can neither hang nor crawl.
+
+- `codecompass parsebench` runs a synthetic parse-cost-vs-size sweep across content
+  shapes, to characterize the curve on the local machine.
+
+There is deliberately no auto-tuning of the caps. File size is not a reliable
+signal of parse safety, and raising a cap is a judgement about a specific repo
+that only its owner can make; the tools inform, the human decides.
+
+Limitations, stated plainly. Documenting where the edges are is as important as
+the features:
+
+- Files over the file cap (default 5 MB) are absent from search entirely.
+- Files over the symbol cap (default 1 MB), or classified as numeric data above
+  1 MB when the cap is raised, have no go-to-definition (still text-searchable).
+- Files over ~1 GB are not indexed at all (the single-string decode ceiling);
+  over 2 GB they are unreadable by the whole-file reader. Streaming would be
+  required to lift this and is not built.
+- `#define`/macro definitions are not captured as symbols by design; they are
+  findable as text.
+- The native tree-sitter parse cannot be cancelled through the binding, so slow
+  parses are prevented by not starting them (size cap + content skip), never by
+  interrupting them mid-parse.
+- Precise C/C++ semantics need a compile database; without one, quality degrades
+  to syntactic.
+- Cross-process safety of deleting memory-mapped segment/base files while a reader
+  holds them relies on Windows file-locking semantics.
+- No embeddings / semantic-meaning search, and no multi-user server - both are
+  out of scope for v1 by design, not by omission.
+
+
 Open questions and risks
 ------------------------
 
@@ -289,16 +473,13 @@ Open questions and risks
 - The hard-block enforcement hook must be careful not to strand the agent when
   CodeCompass legitimately has no answer; the fallback path has to be reliable.
 
-- Tree-sitter parse cost is roughly O(n^2) on pathological content (dense,
-  machine-generated files such as multi-MB register-map headers of millions of
-  #define lines). A single such file could stall the whole index. Mitigation:
-  symbol extraction is skipped above CODECOMPASS_MAX_SYMBOL_MB (default 1 MB) -
-  the file is still trigram-indexed and text-searchable, and such files yield
-  almost no useful symbols. Measured across the test corpora, every source file
-  over 1 MB was machine-generated, so the cap never affects hand-written code.
-  The trigram layer itself scales linearly and is not affected. The binding
-  exposes no parse timeout, so a size cap is the available bound; a real per-file
-  parse timeout would be the more precise fix if the binding ever supports it.
+- Tree-sitter parse cost on pathological content was the biggest scaling risk and
+  is now understood and handled - see "Scaling, huge files, and generated code"
+  above. In short: parse is linear but with a ~70x content-dependent constant; the
+  practical offenders are large machine-generated numeric data-blob files; the
+  default symbol cap removes the hazard, and a fixed content check keeps it removed
+  if the cap is raised. The earlier "roughly O(n^2)" framing in this document was
+  wrong and has been corrected by measurement.
 
 - Decided: build greenfield rather than adopt/fork an existing tool. We borrow
   designs (zoekt trigrams, Cursor Merkle diffing, tree-sitter) but own the code.
