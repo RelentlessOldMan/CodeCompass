@@ -420,23 +420,33 @@ machine, and the only real ceiling becomes the file cap itself (default 2 GB;
 raise it and streaming will still cope). The streamed trigram set is identical to
 the whole-file result, so a file indexes the same whichever path it takes.
 
-Two honest costs of the streaming path. First, symbols: tree-sitter parses a single
+Symbols are the one thing streamed files give up: tree-sitter parses a single
 in-memory string (the same ~1 GB limit, and streaming a parser is a different
 beast), so streamed files get trigram text search but no symbol extraction - which
 is consistent with the symbol cap and fine in practice, since multi-hundred-MB
-files are generated data with ~no useful symbols. Second, search verification: the
-trigram index is a candidate filter, so confirming a match and reporting its
-line:col means reading the candidate file. For a streamed file that is done by
-streaming it line by line (bounded memory) rather than loading it whole - but it
-still reads the file. Locally that is cheap; over a network share, re-reading a
-multi-GB candidate is expensive. Avoiding that would need positional information in
-the index so a match can be located without a full re-read. Full positional
-postings are infeasible for multi-GB files (the positions can exceed the file
-size), but a block-level positional index - recording, per trigram, which
-fixed-size blocks of a large file it occurs in, so verification seeks and reads
-only the few candidate blocks - is the right answer if network-share latency on
-large-file queries becomes a measured problem. It is a segment-format change and is
-noted here as the identified next step rather than built speculatively.
+files are generated data with ~no useful symbols.
+
+Searching large files without re-reading them: the block/positional index. The
+trigram index is only a candidate filter, so confirming a match and reporting its
+line:col means reading the candidate file - and re-reading a multi-GB file per query
+would be ruinous over a network share (and it is exactly the case that matters:
+a 2 GB auto-generated register-map header IS the identifiers you search for, so it
+is a candidate on essentially every such query). To avoid that, indexing a large
+file also builds a positional sidecar in the local cache: the file is cut into
+line-aligned ~1 MB blocks, and each block stores its first line number, byte range,
+and a trigram Bloom filter. A search consults the (small, local) sidecar, keeps only
+the blocks whose Blooms admit ALL the query's trigrams, and reads just those blocks
+from the source - a few MB, not the whole file. The Bloom has no false negatives, so
+a real match is never skipped; false positives only cost an extra block read that
+the scan then discards. Requiring all query trigrams in one block is what makes the
+common-prefix case (every macro starting HEY_MOM_MY_CHIP_...) cheap: the distinctive
+suffix trigrams are the selective ones, and a prefix-only query that legitimately
+matches everywhere is bounded by stopping at the result limit. Full per-occurrence
+positional postings were rejected: for a multi-GB file the positions can exceed the
+file size. The sidecar is UTF-8 only (line detection needs byte 0x0A to mean
+newline); a non-UTF-8 large file falls back to a whole-file line scan. A missing or
+invalid sidecar always falls back too, so it is an optimization, never a correctness
+dependency.
 
 Diagnostics for tuning these knobs from data, not guesswork:
 
@@ -464,10 +474,10 @@ the features:
 - Files over the symbol cap (default 1 MB), or classified as numeric data above
   1 MB when the cap is raised, or streamed (>=128 MB), have no go-to-definition
   (still text-searchable).
-- Files >=128 MB are streamed (bounded memory) so they index up to the file cap,
-  but a search that matches inside one re-reads it (line-streamed) to locate the
-  hit - cheap locally, costly over a network share until the block-level positional
-  index above is built.
+- Files >=128 MB are streamed (bounded memory) so they index up to the file cap.
+  A search into one uses the per-file block/positional sidecar to read only the
+  candidate ~1 MB blocks (network-friendly); UTF-8 only, else it falls back to a
+  whole-file line scan.
 - `#define`/macro definitions are not captured as symbols by design; they are
   findable as text.
 - The native tree-sitter parse cannot be cancelled through the binding, so slow

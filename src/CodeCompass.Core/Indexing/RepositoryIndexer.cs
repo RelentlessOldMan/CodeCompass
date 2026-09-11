@@ -116,6 +116,7 @@ public static class RepositoryIndexer
         var snapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
         var textSegFiles = new ConcurrentBag<(int Num, string Name)>();
         var symSegFiles = new ConcurrentBag<(int Num, string Name)>();
+        var posSidecars = new ConcurrentBag<string>(); // positional sidecars written for large files
         int textSegCounter = SegmentedIndex.NextSegmentNumber(dir);
         int symSegCounter = SegmentedSymbolIndex.NextSegmentNumber(dir);
         long totalBytes = 0;
@@ -156,10 +157,15 @@ public static class RepositoryIndexer
                     inFlight[tid] = (file.RelativePath, file.Size, clock.ElapsedMilliseconds);
                     try
                     {
-                        if (LargeFileIndexer.TryStreamIndex(file.FullPath, out var big, out var len, out var bigHash, out var bin))
+                        if (LargeFileIndexer.TryStreamIndex(file.FullPath, out var big, out var len, out var bigHash, out var bin, out var bigBlocks))
                         {
                             worker.Text.AddDocument(file.RelativePath, big);
                             worker.TrigramPostings += big.Length;
+                            if (bigBlocks is not null)
+                            {
+                                PositionalSidecar.Write(dir, file.RelativePath, bigBlocks); // block index for cheap large-file search
+                                posSidecars.Add(PositionalSidecar.SidecarName(file.RelativePath));
+                            }
                             worker.Snapshot[file.RelativePath] = new FileState(len, mtime, bigHash);
                             worker.Bytes += len;
                             Interlocked.Increment(ref progressFiles);
@@ -241,6 +247,7 @@ public static class RepositoryIndexer
         var symOrdered = symSegFiles.OrderBy(x => x.Num).Select(x => x.Name).ToList();
         var text = SegmentedIndex.FromSegmentFiles(root, dir, textOrdered, textSegCounter, textBudget);
         var symbols = SegmentedSymbolIndex.FromSegmentFiles(dir, symOrdered, symSegCounter, symBudget);
+        PositionalSidecar.CleanupOrphans(dir, new HashSet<string>(posSidecars, StringComparer.OrdinalIgnoreCase)); // drop sidecars for files no longer large/present
         SaveSnapshot(root, snapshot);
 
         var stats = new IndexStats(text.DocumentCount, totalBytes, totalPostings,
@@ -351,6 +358,7 @@ public static class RepositoryIndexer
 
         using (old)
         {
+            var dir = IndexStore.GetCacheDir(root);
             var walker = new FileWalker(new IgnoreRules());
             var newSnapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
             var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -373,7 +381,7 @@ public static class RepositoryIndexer
                     // Large files: stream (bounded memory), trigrams only, no symbols - same as Build.
                     if (file.Size >= LargeFileIndexer.StreamThresholdBytes)
                     {
-                        if (!LargeFileIndexer.TryStreamIndex(file.FullPath, out var big, out var len, out var bigHash, out _)) continue;
+                        if (!LargeFileIndexer.TryStreamIndex(file.FullPath, out var big, out var len, out var bigHash, out _, out var bigBlocks)) continue;
                         if (old.TryGetValue(rel, out var osBig) && osBig.ContentHash == bigHash)
                         {
                             newSnapshot[rel] = new FileState(len, mtime, bigHash);
@@ -382,10 +390,15 @@ public static class RepositoryIndexer
                         text.RemovePath(rel);
                         text.AddDocument(rel, big);
                         symbols.RemovePath(rel); // over the symbol cap anyway; clear any stale symbols
+                        if (bigBlocks is not null) PositionalSidecar.Write(dir, rel, bigBlocks); else PositionalSidecar.Delete(dir, rel);
                         newSnapshot[rel] = new FileState(len, mtime, bigHash);
                         if (old.ContainsKey(rel)) modified++; else added++;
                         continue;
                     }
+
+                    // Was large last time but is small now -> drop its stale positional sidecar.
+                    if (old.TryGetValue(rel, out var prev) && prev.Size >= LargeFileIndexer.StreamThresholdBytes)
+                        PositionalSidecar.Delete(dir, rel);
 
                     byte[] bytes;
                     try { bytes = File.ReadAllBytes(file.FullPath); }
@@ -415,6 +428,8 @@ public static class RepositoryIndexer
                 if (seen.Contains(rel)) continue;
                 text.RemovePath(rel);
                 symbols.RemovePath(rel);
+                if (old.TryGetValue(rel, out var gone) && gone.Size >= LargeFileIndexer.StreamThresholdBytes)
+                    PositionalSidecar.Delete(dir, rel); // drop a removed large file's sidecar
                 removed++;
             }
 
@@ -483,6 +498,7 @@ public static class RepositoryIndexer
     {
         root = Path.GetFullPath(root);
         CodeCompassConfig.Load(root);
+        var dir = IndexStore.GetCacheDir(root);
         var ignore = new IgnoreRules();
         using var extractor = new TreeSitterSymbolExtractor();
         int added = 0, modified = 0, removed = 0;
@@ -501,18 +517,18 @@ public static class RepositoryIndexer
                 foreach (var f in new FileWalker(ignore).Walk(full))
                 {
                     var childRel = Path.GetRelativePath(root, f.FullPath).Replace('\\', '/');
-                    ApplyFile(text, symbols, snapshot, childRel, f.FullPath, ignore, extractor,
+                    ApplyFile(text, symbols, snapshot, dir, childRel, f.FullPath, ignore, extractor,
                               ref added, ref modified, ref removed);
                 }
             }
             else if (File.Exists(full))
             {
-                ApplyFile(text, symbols, snapshot, rel, full, ignore, extractor,
+                ApplyFile(text, symbols, snapshot, dir, rel, full, ignore, extractor,
                           ref added, ref modified, ref removed);
             }
             else
             {
-                RemovePathAndChildren(text, symbols, snapshot, rel, ref removed);
+                RemovePathAndChildren(text, symbols, snapshot, dir, rel, ref removed);
             }
         }
 
@@ -525,15 +541,16 @@ public static class RepositoryIndexer
         SaveAll(root, text, symbols, snapshot);
 
     private static void ApplyFile(
-        SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot,
+        SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string dir,
         string rel, string full, IgnoreRules ignore, TreeSitterSymbolExtractor extractor,
         ref int added, ref int modified, ref int removed)
     {
         bool wasPresent = snapshot.ContainsKey(rel);
+        bool wasLarge = snapshot.TryGetValue(rel, out var prevState) && prevState.Size >= LargeFileIndexer.StreamThresholdBytes;
 
         if (IsIgnoredRelPath(rel, ignore))
         {
-            if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); removed++; }
+            if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); if (wasLarge) PositionalSidecar.Delete(dir, rel); removed++; }
             return;
         }
 
@@ -542,7 +559,7 @@ public static class RepositoryIndexer
         catch { return; }
         if (size > ignore.MaxFileSizeBytes) // over the file cap -> not indexed (drop if we had it)
         {
-            if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); removed++; }
+            if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); if (wasLarge) PositionalSidecar.Delete(dir, rel); removed++; }
             return;
         }
         var mtime = File.GetLastWriteTimeUtc(full).Ticks;
@@ -550,9 +567,9 @@ public static class RepositoryIndexer
         // Large files: stream (bounded memory), trigrams only, no symbols - same as Build.
         if (size >= LargeFileIndexer.StreamThresholdBytes)
         {
-            if (!LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out _))
+            if (!LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out _, out var bigBlocks))
             {
-                if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); removed++; } // binary/unreadable
+                if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); PositionalSidecar.Delete(dir, rel); removed++; } // binary/unreadable
                 return;
             }
             if (snapshot.TryGetValue(rel, out var oldBig) && oldBig.ContentHash == bigHash)
@@ -563,10 +580,13 @@ public static class RepositoryIndexer
             text.RemovePath(rel);
             text.AddDocument(rel, big);
             symbols.RemovePath(rel);
+            if (bigBlocks is not null) PositionalSidecar.Write(dir, rel, bigBlocks); else PositionalSidecar.Delete(dir, rel);
             snapshot[rel] = new FileState(len, mtime, bigHash);
             if (wasPresent) modified++; else added++;
             return;
         }
+
+        if (wasLarge) PositionalSidecar.Delete(dir, rel); // shrank below the streaming threshold
 
         byte[] bytes;
         try { bytes = File.ReadAllBytes(full); }
@@ -596,13 +616,14 @@ public static class RepositoryIndexer
     }
 
     private static void RemovePathAndChildren(
-        SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot,
+        SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string dir,
         string rel, ref int removed)
     {
-        if (snapshot.Remove(rel))
+        if (snapshot.TryGetValue(rel, out var st) && snapshot.Remove(rel))
         {
             text.RemovePath(rel);
             symbols.RemovePath(rel);
+            if (st.Size >= LargeFileIndexer.StreamThresholdBytes) PositionalSidecar.Delete(dir, rel);
             removed++;
         }
 
@@ -610,9 +631,11 @@ public static class RepositoryIndexer
         var children = snapshot.KeysWithPrefix(prefix).ToList();
         foreach (var k in children)
         {
+            bool big = snapshot.TryGetValue(k, out var cs) && cs.Size >= LargeFileIndexer.StreamThresholdBytes;
             snapshot.Remove(k);
             text.RemovePath(k);
             symbols.RemovePath(k);
+            if (big) PositionalSidecar.Delete(dir, k);
             removed++;
         }
     }

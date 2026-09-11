@@ -189,7 +189,10 @@ public sealed class SegmentedIndex : IDisposable
                 try { size = new FileInfo(full).Length; } catch { }
                 if (size >= LargeFileIndexer.StreamThresholdBytes)
                 {
-                    FileScanner.ScanByLine(rel, full, query, results, maxResults);
+                    // Prefer the positional sidecar (reads only candidate blocks); fall back to a
+                    // whole-file line scan if it's missing/invalid (e.g. a non-UTF-8 large file).
+                    if (!PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults))
+                        FileScanner.ScanByLine(rel, full, query, results, maxResults);
                 }
                 else
                 {

@@ -145,7 +145,7 @@ file size isn't a reliable signal of parse safety, so that call is left to the r
 <ul>
 <li>Files over <code>MAX_FILE_MB</code> (default 2000&nbsp;MB / 2&nbsp;GB) are absent from search entirely.</li>
 <li>Files over <code>MAX_SYMBOL_MB</code> (default 1&nbsp;MB), classified as numeric/hex data above 1&nbsp;MB when the cap is raised, or streamed (&ge;128&nbsp;MB), have no go-to-definition (still text-searchable).</li>
-<li>Files <b>&ge;128&nbsp;MB are indexed by streaming</b> (bounded memory &mdash; a 2&nbsp;GB file indexes even on 16&nbsp;GB), removing the old ~1&nbsp;GB single-string ceiling. A search that matches inside one re-reads it line-by-line to pinpoint <code>line:col</code> &mdash; cheap locally, but a large candidate over a <b>network share</b> means a large read (a block-level positional index would avoid it; noted in DESIGN).</li>
+<li>Files <b>&ge;128&nbsp;MB are indexed by streaming</b> (bounded memory &mdash; a 2&nbsp;GB file indexes even on 16&nbsp;GB), removing the old ~1&nbsp;GB single-string ceiling. A search into one uses a per-file <b>block/positional index</b> (a trigram Bloom filter per ~1&nbsp;MB block) to read only the candidate blocks &mdash; a few MB, not the whole file &mdash; so a register lookup in a huge generated header stays cheap even over a <b>network share</b>. UTF-8 files; others fall back to a whole-file line scan.</li>
 <li><code>#define</code>/macro definitions are <b>not</b> captured as symbols (they'd explode the symbol index on register-map code); the names remain findable via <code>search_code</code>.</li>
 <li>Precise C/C++ semantics need a compile database; without one, quality degrades to syntactic. No embeddings / semantic-meaning search. Single machine, single user.</li>
 </ul>

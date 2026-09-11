@@ -12,7 +12,9 @@ public static class FileScanner
 {
     /// <summary>Scan an already-loaded file body. Finds every occurrence (Ordinal), tracking line
     /// and column, up to maxResults.</summary>
-    public static void ScanText(string rel, string text, string query, List<SearchMatch> results, int maxResults)
+    /// <param name="lineOffset">Added to reported line numbers. Used when scanning a block that starts
+    /// partway into a file (the block's first line is file line <c>lineOffset + 1</c>).</param>
+    public static void ScanText(string rel, string text, string query, List<SearchMatch> results, int maxResults, int lineOffset = 0)
     {
         int line = 1, lineStart = 0, scanned = 0, idx;
         while ((idx = text.IndexOf(query, scanned, StringComparison.Ordinal)) >= 0)
@@ -24,7 +26,7 @@ public static class FileScanner
             if (lineEnd < 0) lineEnd = text.Length;
             var lineText = text.Substring(lineStart, lineEnd - lineStart).TrimEnd('\r');
 
-            results.Add(new SearchMatch(rel, line, idx - lineStart + 1, lineText));
+            results.Add(new SearchMatch(rel, line + lineOffset, idx - lineStart + 1, lineText));
             if (results.Count >= maxResults) return;
             scanned = idx + Math.Max(1, query.Length);
         }

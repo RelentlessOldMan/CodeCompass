@@ -79,26 +79,62 @@ public class StreamingIndexTests
         Assert.True(bin);
     }
 
-    // End-to-end: a file above the streaming threshold (~128 MB) is indexed by Build via the streaming
-    // path and is then text-searchable via the streaming query scan. Larger than the ~1 GB decode
-    // ceiling would be nicer to prove but slow; >128 MB is enough to exercise both streamed paths.
+    // TryStreamIndex builds a sound block/positional index: every block's Bloom admits every trigram
+    // in that block's own byte range (no false negatives -> a search can never miss a real match),
+    // and the block table is contiguous with monotonic line numbers.
     [Fact]
-    public void EndToEnd_LargeFileAboveThreshold_IndexedAndSearchable()
+    public void StreamIndex_Blocks_AreSoundAndContiguous()
+    {
+        var sb = new StringBuilder(3_000_000);
+        int i = 0;
+        while (sb.Length < 2_600_000) // > 2 blocks at ~1 MB each
+            sb.Append("HEY_MOM_MY_CHIP_REG_").Append(i++).Append(" = 0x").Append((i * 3).ToString("X")).Append('\n');
+
+        using var repo = new TempRepo();
+        var full = repo.WriteBytes("regs.h", Encoding.UTF8.GetBytes(sb.ToString()));
+
+        Assert.True(LargeFileIndexer.TryStreamIndex(full, out _, out var len, out _, out _, out var blocks));
+        Assert.NotNull(blocks);
+        Assert.True(blocks!.Blocks.Count >= 2);
+
+        var bytes = System.IO.File.ReadAllBytes(full);
+        long expectedByte = 0;
+        int expectedLine = 1;
+        foreach (var b in blocks.Blocks)
+        {
+            Assert.Equal(expectedByte, b.StartByte);       // contiguous, no gaps/overlaps
+            Assert.Equal(expectedLine, b.StartLine);       // monotonic line numbers
+            var blockText = Encoding.UTF8.GetString(bytes, (int)b.StartByte, (int)(b.EndByte - b.StartByte));
+            var bloom = new BloomFilter(b.Bloom, LargeFileIndexer.BloomK);
+            foreach (var tri in TrigramIndex.ComputeTrigrams(blockText))
+                Assert.True(bloom.MayContain(tri)); // soundness: no false negatives
+            expectedByte = b.EndByte;
+            expectedLine += blockText.Count(c => c == '\n');
+        }
+        Assert.Equal(len, expectedByte); // blocks cover the whole file
+    }
+
+    // End-to-end through the positional sidecar: a large file (>128 MB) is indexed by Build (which
+    // writes the sidecar), and a search for a marker that appears exactly once - well past the first
+    // block - finds it at the correct line via block lookup, without reading the whole file.
+    [Fact]
+    public void EndToEnd_LargeFile_SearchFindsMarkerAtCorrectLineViaSidecar()
     {
         using var repo = new TempRepo();
-        var path = repo.FullPath("huge.txt");
-        const string marker = "UNIQUEMARKER_XYZZY_42";
+        var path = repo.FullPath("huge.h");
+        const string marker = "ZZ_UNIQUE_MARKER_98765";
+        int markerLine = -1;
         using (var w = new System.IO.StreamWriter(path, append: false, Encoding.UTF8))
         {
             long written = 0;
-            int i = 0;
-            while (written < 130L * 1024 * 1024)
+            int line = 0;
+            while (written < 140L * 1024 * 1024)
             {
-                var line = $"line {i} some ordinary code-like content foo bar baz\n";
-                w.Write(line);
-                written += line.Length;
-                if (i == 400_000) { w.Write(marker + "\n"); written += marker.Length + 1; }
-                i++;
+                line++;
+                string lineText = line == 900_000 ? marker : $"HEY_MOM_MY_CHIP_REG_{line} = 0x{line:X}";
+                if (line == 900_000) markerLine = line;
+                w.Write(lineText); w.Write('\n');
+                written += lineText.Length + 1;
             }
         }
 
@@ -107,8 +143,34 @@ public class StreamingIndexTests
         using (symbols)
         {
             var matches = text.Search(marker);
-            Assert.Contains(matches, m => m.LineText.Contains(marker));
+            var hit = Assert.Single(matches);
+            Assert.Equal("huge.h", hit.Path);
+            Assert.Equal(markerLine, hit.Line);       // correct line via the block's start-line offset
+            Assert.Equal(marker, hit.LineText);
+            Assert.Equal(1, hit.Column);
         }
+    }
+}
+
+public class BloomFilterTests
+{
+    [Fact]
+    public void NoFalseNegatives()
+    {
+        var b = BloomFilter.Create(4096, 4);
+        var keys = Enumerable.Range(0, 2000).Select(i => (long)i * 2654435761L).ToArray();
+        foreach (var k in keys) b.Add(k);
+        foreach (var k in keys) Assert.True(b.MayContain(k)); // every added key must test positive
+    }
+
+    [Fact]
+    public void RoundTripsThroughBits()
+    {
+        var b = BloomFilter.Create(1024, 3);
+        b.Add(12345); b.Add(67890);
+        var reopened = new BloomFilter(b.Bits, 3); // same backing bytes (as stored in a sidecar)
+        Assert.True(reopened.MayContain(12345));
+        Assert.True(reopened.MayContain(67890));
     }
 }
 

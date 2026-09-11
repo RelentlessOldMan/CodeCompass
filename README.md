@@ -141,10 +141,11 @@ is always visible (`codecompass survey` / `codecompass logs`).
   is raised, have no go-to-definition (still text-searchable). This also covers **all streamed files**
   (≥128 MB): tree-sitter needs the whole file as one string, so symbols aren't extracted for them —
   they're text-searchable only.
-- Files ≥128 MB are indexed by **streaming** (bounded memory, so a 2 GB file indexes even on 16 GB),
-  but a search that matches inside one currently re-reads it (line-streamed) to pinpoint `line:col` —
-  cheap locally, but a large candidate over a **network share** means a large read. (A block-level
-  positional index would avoid that; see DESIGN.)
+- Files ≥128 MB are indexed by **streaming** (bounded memory, so a 2 GB file indexes even on 16 GB).
+  A search into one uses a per-file **block/positional index** (Bloom filter per ~1 MB block) to read
+  only the candidate blocks — a few MB, not the whole file — so register-name lookups in a huge
+  generated header stay cheap even over a **network share**. (UTF-8 files; others fall back to a
+  whole-file line scan.)
 - `#define`/macro definitions are **not** captured as symbols (they'd explode the symbol index on
   register-map code); the names are still findable via `search_code`.
 - Precise C/C++ semantics need a compile database (`compile_commands.json`); without one it degrades
