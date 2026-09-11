@@ -403,13 +403,17 @@ static int CmdSearch(string[] args)
 
     if (!RepositoryIndexer.TryLoad(root, out var index, out _)) return NoIndex(root);
 
+    const int cap = 200;
     var sw = Stopwatch.StartNew();
-    var matches = index.Search(query);
+    var matches = index.Search(query, cap + 1); // one extra to detect truncation
     sw.Stop();
 
-    foreach (var m in matches)
+    bool truncated = matches.Count > cap;
+    foreach (var m in matches.Take(cap))
         Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
-    Console.Error.WriteLine($"-- {matches.Count} match(es) in {sw.Elapsed.TotalMilliseconds:F0} ms");
+    Console.Error.WriteLine(truncated
+        ? $"-- showing first {cap}; MORE EXIST (narrow the query) in {sw.Elapsed.TotalMilliseconds:F0} ms"
+        : $"-- {matches.Count} match(es) in {sw.Elapsed.TotalMilliseconds:F0} ms");
     return 0;
 }
 

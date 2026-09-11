@@ -25,14 +25,24 @@ public static class CodeCompassTools
         [Description("Maximum number of results.")] int maxResults = 50)
         => ServerContext.Query((text, _) =>
     {
-        var matches = text.Search(query, maxResults);
+        // Fetch one extra to detect truncation: if we get maxResults+1 back, there are more than we
+        // show, so tell the agent to narrow rather than trust this as the complete set.
+        var matches = text.Search(query, maxResults + 1);
         if (matches.Count == 0) return $"No matches for \"{query}\".";
 
+        bool truncated = matches.Count > maxResults;
         var sb = new StringBuilder();
-        foreach (var m in matches) sb.AppendLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
-        sb.Append($"({matches.Count} match(es))");
+        foreach (var m in matches.Take(maxResults)) sb.AppendLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
+        sb.Append(Footer(Math.Min(matches.Count, maxResults), truncated, "match", "matches"));
         return sb.ToString();
     });
+
+    // Result footer that distinguishes an exact count from a truncated one, so the agent knows
+    // whether it has seen everything or must refine the query. `shown` is how many we actually list.
+    private static string Footer(int shown, bool truncated, string singular, string plural) =>
+        truncated
+            ? $"(showing the first {shown} {plural}; MORE EXIST - narrow the query, e.g. add surrounding text or a longer/more specific identifier)"
+            : $"({shown} {(shown == 1 ? singular : plural)})";
 
     [McpServerTool(Name = "find_definition")]
     [Description("Find where a symbol (class, method, function, type, etc.) is defined, by exact name. " +
@@ -79,6 +89,8 @@ public static class CodeCompassTools
 
         if (semantic == 0 && lexical == 0) return $"No references found for \"{name}\".";
         sb.Append($"({cs.Count} C# + {cpp.Count} C/C++ semantic reference(s); {lexical} lexical in other files)");
+        if (semantic + lexical >= maxResults)
+            sb.Append($" - capped at {maxResults}; MORE MAY EXIST, raise the limit or narrow the query");
         return sb.ToString();
     });
 
@@ -90,12 +102,13 @@ public static class CodeCompassTools
         [Description("Maximum number of results.")] int maxResults = 50)
         => ServerContext.Query((_, symbols) =>
     {
-        var matches = symbols.Find(query, maxResults);
+        var matches = symbols.Find(query, maxResults + 1);
         if (matches.Count == 0) return $"No symbols matching \"{query}\".";
 
+        bool truncated = matches.Count > maxResults;
         var sb = new StringBuilder();
-        foreach (var s in matches) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
-        sb.Append($"({matches.Count} symbol(s))");
+        foreach (var s in matches.Take(maxResults)) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
+        sb.Append(Footer(Math.Min(matches.Count, maxResults), truncated, "symbol", "symbols"));
         return sb.ToString();
     });
 

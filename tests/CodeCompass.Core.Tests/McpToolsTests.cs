@@ -61,6 +61,31 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void SearchCode_SignalsTruncationVsExactCount()
+    {
+        using var repo = new TempRepo();
+        // 10 lines all containing FOObar; searching with a cap of 3 must flag that more exist,
+        // while a cap that covers everything must NOT claim truncation.
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < 10; i++) sb.Append("int FOObar").Append(i).Append(" = ").Append(i).Append(";\n");
+        repo.Write("regs.cs", sb.ToString());
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+
+            var capped = CodeCompassTools.SearchCode("FOObar", maxResults: 3);
+            Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(capped, "regs.cs:").Count); // only 3 shown
+            Assert.Contains("MORE EXIST", capped);                                                   // truncation signalled
+
+            var full = CodeCompassTools.SearchCode("FOObar", maxResults: 50);
+            Assert.DoesNotContain("MORE EXIST", full); // all 10 fit -> exact count, no truncation
+            Assert.Contains("(10 matches)", full);
+        }
+        finally { ServerContext.Init(repo.Root); } // reset shared static state
+    }
+
+    [Fact]
     public void FindDefinition_ReturnsSymbolLocation()
     {
         using var repo = NewIndexedRepo();
