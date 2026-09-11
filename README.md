@@ -125,7 +125,7 @@ editing source:
 | Env var | Effect |
 |---|---|
 | `CODECOMPASS_MAX_SYMBOL_MB` | Skip tree-sitter symbol extraction above this size (default 1). Bounds per-file parse time; raise it if you have large *valid* code whose symbols you want (run `symstats` first). Raising it is safe: above 1 MB, files that are overwhelmingly numeric/hex data (generated arrays — slow to parse, zero symbols) are auto-skipped by content, so only large *real* code gets parsed. |
-| `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing entirely (default 5). Lower it to skip large generated files from search too. |
+| `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing entirely (default 2000, i.e. 2 GB). Files ≥128 MB are indexed by **streaming** (bounded memory), so a high cap won't blow up RAM; its real cost is read time on a full build (large files get re-read), so lower it per-repo if you don't want big generated files indexed. |
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if a build stalls or a single file is held longer than this (default 60, min 5). The warning names the exact file(s) each worker is stuck on, so a pathologically slow file is identified rather than guessed. |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
@@ -136,13 +136,15 @@ is always visible (`codecompass survey` / `codecompass logs`).
 
 **Limitations (by design — know where the edges are):**
 
-- Files over `MAX_FILE_MB` (default 5) are absent from search entirely.
+- Files over `MAX_FILE_MB` (default 2000 / 2 GB) are absent from search entirely.
 - Files over `MAX_SYMBOL_MB` (default 1), or classified as numeric/hex data above 1 MB when the cap
-  is raised, have no go-to-definition (still text-searchable).
-- Files over **~1 GB are not indexed at all** — each file is decoded into a single string, and .NET
-  caps a string near ~1 GB of text (and a byte array at 2 GB), independent of machine RAM. Such files
-  are skipped and logged, not crashed on. (Lifting this would need streaming/chunked indexing; not
-  built, because files that large are ~always generated data with negligible unique search value.)
+  is raised, have no go-to-definition (still text-searchable). This also covers **all streamed files**
+  (≥128 MB): tree-sitter needs the whole file as one string, so symbols aren't extracted for them —
+  they're text-searchable only.
+- Files ≥128 MB are indexed by **streaming** (bounded memory, so a 2 GB file indexes even on 16 GB),
+  but a search that matches inside one currently re-reads it (line-streamed) to pinpoint `line:col` —
+  cheap locally, but a large candidate over a **network share** means a large read. (A block-level
+  positional index would avoid that; see DESIGN.)
 - `#define`/macro definitions are **not** captured as symbols (they'd explode the symbol index on
   register-map code); the names are still findable via `search_code`.
 - Precise C/C++ semantics need a compile database (`compile_commands.json`); without one it degrades

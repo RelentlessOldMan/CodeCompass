@@ -141,27 +141,45 @@ public static class RepositoryIndexer
             () => new BuildWorker(),
             (file, _, worker) =>
             {
-                // Hard ceiling from the whole-file-in-RAM design, independent of machine RAM: a file
-                // is decoded into a single .NET string, which tops out near 1 GB of text (the UTF-16
-                // buffer hits the 2 GB single-object limit). Above that the decode OOMs and would fail
-                // the whole build, so skip it cleanly and loudly. (>2 GB files also fail File.ReadAll-
-                // Bytes and are caught below; this catches the dangerous ~1-2 GB middle band.)
-                if (file.Size > MaxTextFileBytes)
+                int tid = Environment.CurrentManagedThreadId;
+                var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
+
+                // Large files are streamed, not read whole: the whole-file path decodes into a single
+                // .NET string, which caps near ~1 GB of text regardless of RAM. Streaming hashes and
+                // trigram-indexes in chunks (bounded memory), so files up to the file cap index without
+                // that ceiling. Symbols are not extracted for streamed files (tree-sitter needs the whole
+                // string, and such files are over the symbol cap anyway); they stay text-searchable.
+                // A streamed file reserves a small fixed footprint, since it never holds the whole file.
+                if (file.Size >= LargeFileIndexer.StreamThresholdBytes)
                 {
-                    Log.For(root).Info($"skipped {file.RelativePath}: {file.Size / 1048576.0:F0} MB exceeds the " +
-                        $"~{MaxTextFileBytes / 1048576} MB single-file text limit (can't hold as one string) - " +
-                        $"not indexed. Lower CODECOMPASS_MAX_FILE_MB to hide it, or exclude its directory.");
-                    return worker;
+                    reads.Acquire(StreamingReserveBytes);
+                    inFlight[tid] = (file.RelativePath, file.Size, clock.ElapsedMilliseconds);
+                    try
+                    {
+                        if (LargeFileIndexer.TryStreamIndex(file.FullPath, out var big, out var len, out var bigHash, out var bin))
+                        {
+                            worker.Text.AddDocument(file.RelativePath, big);
+                            worker.TrigramPostings += big.Length;
+                            worker.Snapshot[file.RelativePath] = new FileState(len, mtime, bigHash);
+                            worker.Bytes += len;
+                            Interlocked.Increment(ref progressFiles);
+                            Interlocked.Add(ref progressBytes, len);
+                            if (worker.Text.ApproxBytes >= textBudget) FlushText(worker, dir, ref textSegCounter, textSegFiles);
+                        }
+                        else if (!bin)
+                            Log.For(root).Debug($"skipped unreadable large file {file.RelativePath}");
+                        return worker;
+                    }
+                    finally { inFlight.TryRemove(tid, out var _sg); reads.Release(StreamingReserveBytes); }
                 }
 
-                // Reserve the real processing footprint, not just the raw size: while trigrams are
-                // computed the raw bytes (1x) and the decoded UTF-16 string (2x) are both live, so
-                // peak is ~3x the file size. Reserving 3x makes the budget's RAM-scaling honest -
-                // "budget of N bytes" then genuinely fits a file up to ~N/3, and a bigger one reserves
-                // the whole budget and runs solo (ByteBudget clamps the reservation, so no deadlock).
+                // Whole-file path (normal files). Reserve the real processing footprint, not just the
+                // raw size: while trigrams are computed the raw bytes (1x) and the decoded UTF-16 string
+                // (2x) are both live, so peak is ~3x the file size. Reserving 3x makes the budget's
+                // RAM-scaling honest - a budget of N genuinely fits a file up to ~N/3, and a bigger one
+                // reserves the whole budget and runs solo (ByteBudget clamps the reservation, no deadlock).
                 long footprint = ProcessingFootprint(file.Size);
                 reads.Acquire(footprint);
-                int tid = Environment.CurrentManagedThreadId;
                 inFlight[tid] = (file.RelativePath, file.Size, clock.ElapsedMilliseconds); // for the watchdog
                 try
                 {
@@ -171,7 +189,6 @@ public static class RepositoryIndexer
                     if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return worker;
 
                     var content = TextDecoder.FromBytes(bytes);
-                    var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
                     var hash = ContentHasher.Hash(bytes);
 
                     var tg = TrigramIndex.ComputeTrigrams(content);
@@ -271,11 +288,11 @@ public static class RepositoryIndexer
 
     private static int StallWarnSeconds() => CodeCompassConfig.StallWarnSec();
 
-    // Largest file we can decode into a single .NET string. A string's UTF-16 buffer hits the 2 GB
-    // single-object limit near ~1 billion chars, so a source file past ~1 GB can't be held whole
-    // regardless of RAM. Kept a touch under 1 GiB for headroom. (Indexing files larger than this would
-    // need streaming/chunked trigram extraction that never materializes the whole file - not built.)
-    private const long MaxTextFileBytes = 1000L * 1024 * 1024;
+    // Read-budget reservation for a streamed (large) file. Streaming never holds the whole file - only
+    // ~1 MB byte chunks, a char buffer, and the distinct-trigram set - so a fixed, modest reservation
+    // (independent of file size) is right; it lets several large files stream concurrently within the
+    // budget instead of each reserving 3x its multi-GB size.
+    private const long StreamingReserveBytes = 256L * 1024 * 1024;
 
     // Approximate peak RAM to hold one file in flight while it's indexed: raw bytes (1x) + the decoded
     // UTF-16 string (2x) live simultaneously during trigram computation (~3x). Used to reserve against
@@ -353,10 +370,20 @@ public static class RepositoryIndexer
                         continue;
                     }
 
-                    if (file.Size > MaxTextFileBytes)
+                    // Large files: stream (bounded memory), trigrams only, no symbols - same as Build.
+                    if (file.Size >= LargeFileIndexer.StreamThresholdBytes)
                     {
-                        Log.For(root).Info($"skipped {rel}: {file.Size / 1048576.0:F0} MB exceeds the " +
-                            $"~{MaxTextFileBytes / 1048576} MB single-file text limit (can't hold as one string) - not indexed.");
+                        if (!LargeFileIndexer.TryStreamIndex(file.FullPath, out var big, out var len, out var bigHash, out _)) continue;
+                        if (old.TryGetValue(rel, out var osBig) && osBig.ContentHash == bigHash)
+                        {
+                            newSnapshot[rel] = new FileState(len, mtime, bigHash);
+                            continue;
+                        }
+                        text.RemovePath(rel);
+                        text.AddDocument(rel, big);
+                        symbols.RemovePath(rel); // over the symbol cap anyway; clear any stale symbols
+                        newSnapshot[rel] = new FileState(len, mtime, bigHash);
+                        if (old.ContainsKey(rel)) modified++; else added++;
                         continue;
                     }
 
@@ -510,21 +537,47 @@ public static class RepositoryIndexer
             return;
         }
 
+        long size;
+        try { size = new FileInfo(full).Length; }
+        catch { return; }
+        if (size > ignore.MaxFileSizeBytes) // over the file cap -> not indexed (drop if we had it)
+        {
+            if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); removed++; }
+            return;
+        }
+        var mtime = File.GetLastWriteTimeUtc(full).Ticks;
+
+        // Large files: stream (bounded memory), trigrams only, no symbols - same as Build.
+        if (size >= LargeFileIndexer.StreamThresholdBytes)
+        {
+            if (!LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out _))
+            {
+                if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); removed++; } // binary/unreadable
+                return;
+            }
+            if (snapshot.TryGetValue(rel, out var oldBig) && oldBig.ContentHash == bigHash)
+            {
+                snapshot[rel] = new FileState(len, mtime, bigHash);
+                return;
+            }
+            text.RemovePath(rel);
+            text.AddDocument(rel, big);
+            symbols.RemovePath(rel);
+            snapshot[rel] = new FileState(len, mtime, bigHash);
+            if (wasPresent) modified++; else added++;
+            return;
+        }
+
         byte[] bytes;
         try { bytes = File.ReadAllBytes(full); }
         catch { return; }
-
-        if (bytes.Length > ignore.MaxFileSizeBytes ||
-            bytes.Length > MaxTextFileBytes || // too big to decode as one string (see the constant)
-            IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
+        if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
         {
             if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); removed++; }
             return;
         }
 
-        var mtime = File.GetLastWriteTimeUtc(full).Ticks;
         var hash = ContentHasher.Hash(bytes);
-
         if (snapshot.TryGetValue(rel, out var old) && old.ContentHash == hash)
         {
             snapshot[rel] = new FileState(bytes.Length, mtime, hash);

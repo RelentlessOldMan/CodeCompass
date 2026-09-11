@@ -182,10 +182,22 @@ public sealed class SegmentedIndex : IDisposable
                 // hold a "../" or rooted path - never read (and return to the agent) outside the repo.
                 if (!PathSafety.IsInsideRepo(rel)) continue;
                 var full = Path.Combine(_root, rel.Replace('/', Path.DirectorySeparatorChar));
-                string text;
-                try { text = File.ReadAllText(full); }
-                catch { continue; }
-                ScanFile(rel, text, query, results, maxResults);
+                // Large candidate files are scanned line by line (bounded memory) - they can't be held
+                // as one string, and re-reading a multi-GB file whole would be ruinous over a network
+                // share. Normal files use the faster whole-text scan.
+                long size = 0;
+                try { size = new FileInfo(full).Length; } catch { }
+                if (size >= LargeFileIndexer.StreamThresholdBytes)
+                {
+                    FileScanner.ScanByLine(rel, full, query, results, maxResults);
+                }
+                else
+                {
+                    string text;
+                    try { text = File.ReadAllText(full); }
+                    catch { continue; }
+                    FileScanner.ScanText(rel, text, query, results, maxResults);
+                }
                 if (results.Count >= maxResults) return results;
             }
         }
@@ -286,22 +298,6 @@ public sealed class SegmentedIndex : IDisposable
     }
 
     // Mirrors TrigramIndex.ScanFile exactly so results/positions are identical.
-    private static void ScanFile(string rel, string text, string query, List<SearchMatch> results, int maxResults)
-    {
-        int line = 1, lineStart = 0, scanned = 0, idx;
-        while ((idx = text.IndexOf(query, scanned, StringComparison.Ordinal)) >= 0)
-        {
-            for (int k = scanned; k < idx; k++)
-                if (text[k] == '\n') { line++; lineStart = k + 1; }
-            int lineEnd = text.IndexOf('\n', idx);
-            if (lineEnd < 0) lineEnd = text.Length;
-            var lineText = text.Substring(lineStart, lineEnd - lineStart).TrimEnd('\r');
-            results.Add(new SearchMatch(rel, line, idx - lineStart + 1, lineText));
-            if (results.Count >= maxResults) return;
-            scanned = idx + query.Length;
-        }
-    }
-
     private void SaveManifest() => AtomicFile.WriteText(Path.Combine(_dir, ManifestName), w =>
     {
         w.WriteLine(_root);

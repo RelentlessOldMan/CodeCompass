@@ -143,7 +143,7 @@ public sealed class TrigramIndex
         catch { return false; }
     }
 
-    private static long TriKey(char a, char b, char c) => ((long)a << 32) | ((long)b << 16) | c;
+    internal static long TriKey(char a, char b, char c) => ((long)a << 32) | ((long)b << 16) | c;
 
     private static IEnumerable<long> DistinctTrigrams(string text)
     {
@@ -195,7 +195,7 @@ public sealed class TrigramIndex
             try { text = File.ReadAllText(full); }
             catch { continue; }
 
-            ScanFile(rel, text, query, results, maxResults);
+            FileScanner.ScanText(rel, text, query, results, maxResults);
             if (results.Count >= maxResults) break;
         }
         return results;

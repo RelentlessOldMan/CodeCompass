@@ -325,12 +325,14 @@ indexes, it just runs solo.
 Two coverage caps, and why they exist. Both are visible, tunable, and logged
 (never silent), and `codecompass survey` reports exactly what they skip.
 
-- File cap (CODECOMPASS_MAX_FILE_MB, default 5). Above this, a file is not indexed
-  at all. Why: it bounds read cost, and enormous generated files (multi-hundred-MB
-  data or bundle files) add almost nothing to a trigram index anyway - trigrams
-  deduplicate such repetitive content down to a rounding error, so the index
-  barely grows even as bytes read climb. The cost of including them is read time,
-  not index size.
+- File cap (CODECOMPASS_MAX_FILE_MB, default 2 GB). Above this, a file is not
+  indexed at all. The default is high because large files now stream (bounded
+  memory) rather than being read whole, so a big cap no longer risks RAM; its cost
+  is read time on a full build. Lower it per-repo when you don't want big generated
+  files indexed - enormous generated data/bundle files add almost nothing to a
+  trigram index anyway (trigrams deduplicate such repetitive content down to a
+  rounding error, so the index barely grows even as bytes read climb). The cost of
+  including them is read time, not index size.
 
 - Symbol cap (CODECOMPASS_MAX_SYMBOL_MB, default 1). Above this, a file is still
   fully text-searchable but gets no symbol extraction (no go-to-definition). Why:
@@ -404,19 +406,37 @@ How we handle it, in layers:
   a post-parse step. A concise notice is also printed to stderr so a freeze is not
   a silently stuck progress bar.
 
-Very large single files: the hard ceiling, and why it exists. This is a real
-limitation, so it is stated plainly. The design reads each file whole and decodes
-it into a single .NET string. That imposes two platform ceilings that no amount of
-RAM removes: reading a file into one array fails above 2 GB, and a single string
-tops out near ~1 GB of text (its UTF-16 buffer hits the 2 GB single-object limit
-at ~1 billion characters). So a file larger than ~1 GB is not text-indexed - it is
-skipped and logged, cleanly, instead of failing the build with an out-of-memory
-error partway through decoding. Indexing arbitrarily large single files would
-require streaming/chunked trigram extraction that never materializes the whole
-file in memory. That is deliberately not built: files that big are, in practice,
-always generated data whose unique search value is negligible (trigrams dedupe
-them to nothing), so the engineering cost is not justified until a real need
-appears.
+Very large single files: streamed, not read whole. The naive approach reads each
+file into one byte array and decodes it into one .NET string - which imposes two
+platform ceilings no amount of RAM removes: a single array fails above 2 GB, and a
+single string tops out near ~1 GB of text (its UTF-16 buffer hits the 2 GB
+single-object limit at ~1 billion characters). Rather than skip files past that
+ceiling, files at or above a threshold (~128 MB) take a streaming path: the file
+is read in ~1 MB chunks, hashed incrementally, decoded incrementally (BOM-aware, to
+match the normal decoder), and its distinct trigram set is accumulated with a
+two-char carry across chunk boundaries. Peak memory is bounded by the chunk plus
+the trigram set, not the file size - so a 2 GB file indexes even on a 16 GB
+machine, and the only real ceiling becomes the file cap itself (default 2 GB;
+raise it and streaming will still cope). The streamed trigram set is identical to
+the whole-file result, so a file indexes the same whichever path it takes.
+
+Two honest costs of the streaming path. First, symbols: tree-sitter parses a single
+in-memory string (the same ~1 GB limit, and streaming a parser is a different
+beast), so streamed files get trigram text search but no symbol extraction - which
+is consistent with the symbol cap and fine in practice, since multi-hundred-MB
+files are generated data with ~no useful symbols. Second, search verification: the
+trigram index is a candidate filter, so confirming a match and reporting its
+line:col means reading the candidate file. For a streamed file that is done by
+streaming it line by line (bounded memory) rather than loading it whole - but it
+still reads the file. Locally that is cheap; over a network share, re-reading a
+multi-GB candidate is expensive. Avoiding that would need positional information in
+the index so a match can be located without a full re-read. Full positional
+postings are infeasible for multi-GB files (the positions can exceed the file
+size), but a block-level positional index - recording, per trigram, which
+fixed-size blocks of a large file it occurs in, so verification seeks and reads
+only the few candidate blocks - is the right answer if network-share latency on
+large-file queries becomes a measured problem. It is a segment-format change and is
+noted here as the identified next step rather than built speculatively.
 
 Diagnostics for tuning these knobs from data, not guesswork:
 
@@ -440,12 +460,14 @@ that only its owner can make; the tools inform, the human decides.
 Limitations, stated plainly. Documenting where the edges are is as important as
 the features:
 
-- Files over the file cap (default 5 MB) are absent from search entirely.
+- Files over the file cap (default 2 GB) are absent from search entirely.
 - Files over the symbol cap (default 1 MB), or classified as numeric data above
-  1 MB when the cap is raised, have no go-to-definition (still text-searchable).
-- Files over ~1 GB are not indexed at all (the single-string decode ceiling);
-  over 2 GB they are unreadable by the whole-file reader. Streaming would be
-  required to lift this and is not built.
+  1 MB when the cap is raised, or streamed (>=128 MB), have no go-to-definition
+  (still text-searchable).
+- Files >=128 MB are streamed (bounded memory) so they index up to the file cap,
+  but a search that matches inside one re-reads it (line-streamed) to locate the
+  hit - cheap locally, costly over a network share until the block-level positional
+  index above is built.
 - `#define`/macro definitions are not captured as symbols by design; they are
   findable as text.
 - The native tree-sitter parse cannot be cancelled through the binding, so slow

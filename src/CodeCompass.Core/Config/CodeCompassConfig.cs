@@ -81,12 +81,14 @@ public static class CodeCompassConfig
     // Each knob has a pure overload taking an explicit RepoConfig (deterministic; used by tests and
     // tools) and an ambient no-arg overload that resolves against the active repo config.
 
-    /// <summary>Per-file indexing size cap in bytes (default 5 MB).</summary>
+    /// <summary>Per-file indexing size cap in bytes (default 2 GB). Files at/above ~128 MB are indexed
+    /// by streaming (bounded memory), so a high cap does not blow up RAM; the cost of a high cap is
+    /// read time on a full build (large files are re-read), which is why it can be lowered per-repo.</summary>
     public static long MaxFileBytes() => MaxFileBytes(_current);
     public static long MaxFileBytes(RepoConfig cfg)
     {
         long? mb = EnvLong("CODECOMPASS_MAX_FILE_MB") ?? cfg.MaxFileMb;
-        return mb is > 0 ? mb.Value * 1024 * 1024 : 5L * 1024 * 1024;
+        return mb is > 0 ? mb.Value * 1024 * 1024 : 2000L * 1024 * 1024;
     }
 
     /// <summary>Symbol-extraction size cap in characters (~bytes for ASCII; default 1 MB).</summary>

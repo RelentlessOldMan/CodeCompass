@@ -77,15 +77,21 @@ public class ConfigTests
     [Fact]
     public void Survey_BucketsFilesByCap()
     {
-        using var repo = new TempRepo();
-        repo.WriteBytes("small.cs", new byte[100]);                 // indexed, symbols
-        repo.WriteBytes("gen.cs", new byte[(int)(1.2 * 1024 * 1024)]); // > 1 MB symbol cap -> symbol-skipped
-        repo.WriteBytes("huge.cs", new byte[(int)(5.5 * 1024 * 1024)]); // > 5 MB file cap -> over-file-cap
+        var old = Environment.GetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB", "5"); // pin the cap (default is now 2 GB)
+            using var repo = new TempRepo();
+            repo.WriteBytes("small.cs", new byte[100]);                 // indexed, symbols
+            repo.WriteBytes("gen.cs", new byte[(int)(1.2 * 1024 * 1024)]); // > 1 MB symbol cap -> symbol-skipped
+            repo.WriteBytes("huge.cs", new byte[(int)(5.5 * 1024 * 1024)]); // > 5 MB file cap -> over-file-cap
 
-        var r = Surveyor.Survey(repo.Root);
-        Assert.Equal(2, r.IndexedFiles); // small + gen (huge is over the file cap)
-        Assert.Contains(r.SymbolSkipped, x => x.Path == "gen.cs");
-        Assert.DoesNotContain(r.SymbolSkipped, x => x.Path == "huge.cs");
-        Assert.Contains(r.OverFileCap, x => x.Path == "huge.cs");
+            var r = Surveyor.Survey(repo.Root);
+            Assert.Equal(2, r.IndexedFiles); // small + gen (huge is over the file cap)
+            Assert.Contains(r.SymbolSkipped, x => x.Path == "gen.cs");
+            Assert.DoesNotContain(r.SymbolSkipped, x => x.Path == "huge.cs");
+            Assert.Contains(r.OverFileCap, x => x.Path == "huge.cs");
+        }
+        finally { Environment.SetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB", old); }
     }
 }

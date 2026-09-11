@@ -125,7 +125,7 @@ largest real symbol-bearing file and below the size where parsing gets slow.</p>
 <thead><tr><th>Environment variable</th><th style="text-align:left">Effect</th></tr></thead>
 <tbody>
 <tr><td><code>CODECOMPASS_MAX_SYMBOL_MB</code></td><td style="text-align:left">Skip tree-sitter symbol extraction above this size (default 1). Raise it for large <i>valid</i> code whose symbols you want &mdash; safe from the data-blob crawl, since above 1&nbsp;MB overwhelmingly numeric/hex files are auto-skipped for symbols by content.</td></tr>
-<tr><td><code>CODECOMPASS_MAX_FILE_MB</code></td><td style="text-align:left">Per-file size cap for indexing entirely (default 5).</td></tr>
+<tr><td><code>CODECOMPASS_MAX_FILE_MB</code></td><td style="text-align:left">Per-file size cap for indexing entirely (default 2000 / 2&nbsp;GB). Files &ge;128&nbsp;MB are streamed (bounded memory), so a high cap won't blow up RAM; lower it per-repo to skip big generated files. Its cost is read time on a full build.</td></tr>
 <tr><td><code>CODECOMPASS_IGNORE</code></td><td style="text-align:left">Comma/semicolon-separated directory names to exclude (e.g. <code>generated,vendor</code>).</td></tr>
 <tr><td><code>CODECOMPASS_MAX_AUTO_MB</code></td><td style="text-align:left">Workspaces larger than this (default 100) are left for a one-time CLI build instead of auto-indexing in a tool call.</td></tr>
 <tr><td><code>CODECOMPASS_THREADS</code> / <code>CODECOMPASS_SEGMENT_MB</code></td><td style="text-align:left">Indexing parallelism / per-worker build-memory budget.</td></tr>
@@ -143,9 +143,9 @@ file size isn't a reliable signal of parse safety, so that call is left to the r
 <h2>Limitations</h2>
 <p>Worth knowing where the edges are &mdash; all are by design and all skips are logged, never silent:</p>
 <ul>
-<li>Files over <code>MAX_FILE_MB</code> (default 5&nbsp;MB) are absent from search entirely.</li>
-<li>Files over <code>MAX_SYMBOL_MB</code> (default 1&nbsp;MB), or classified as numeric/hex data above 1&nbsp;MB when the cap is raised, have no go-to-definition (still text-searchable).</li>
-<li>Files over <b>~1&nbsp;GB are not indexed at all</b>: each is decoded into a single .NET string, which caps near ~1&nbsp;GB of text (and a byte array at 2&nbsp;GB) regardless of machine RAM. Such files are skipped and logged, not crashed on. Lifting this would need streaming/chunked indexing (not built &mdash; files that large are ~always generated data with negligible unique search value).</li>
+<li>Files over <code>MAX_FILE_MB</code> (default 2000&nbsp;MB / 2&nbsp;GB) are absent from search entirely.</li>
+<li>Files over <code>MAX_SYMBOL_MB</code> (default 1&nbsp;MB), classified as numeric/hex data above 1&nbsp;MB when the cap is raised, or streamed (&ge;128&nbsp;MB), have no go-to-definition (still text-searchable).</li>
+<li>Files <b>&ge;128&nbsp;MB are indexed by streaming</b> (bounded memory &mdash; a 2&nbsp;GB file indexes even on 16&nbsp;GB), removing the old ~1&nbsp;GB single-string ceiling. A search that matches inside one re-reads it line-by-line to pinpoint <code>line:col</code> &mdash; cheap locally, but a large candidate over a <b>network share</b> means a large read (a block-level positional index would avoid it; noted in DESIGN).</li>
 <li><code>#define</code>/macro definitions are <b>not</b> captured as symbols (they'd explode the symbol index on register-map code); the names remain findable via <code>search_code</code>.</li>
 <li>Precise C/C++ semantics need a compile database; without one, quality degrades to syntactic. No embeddings / semantic-meaning search. Single machine, single user.</li>
 </ul>
