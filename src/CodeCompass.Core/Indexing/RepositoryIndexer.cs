@@ -85,15 +85,26 @@ public static class RepositoryIndexer
                 dumps++;
 
                 var log = Log.For(root);
-                log.Warn(stuck.Length > 0
+                string headline = stuck.Length > 0
                     ? $"indexing slow: {stuck.Length} worker(s) held one file >{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB) - a slow-to-parse file is grinding a worker while others may idle."
-                    : $"indexing made no progress for ~{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB).");
+                    : $"indexing made no progress for ~{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB).";
+                log.Warn(headline);
                 if (held.Length == 0)
                     log.Warn("  (no files in flight - the stall is in a post-parse/finalize step, not a single file)");
                 foreach (var kv in held.OrderByDescending(k => now - k.Value.StartMs))
                     log.Warn($"  worker {kv.Key}: {kv.Value.Path} ({kv.Value.Size / 1048576.0:F1} MB) held {(now - kv.Value.StartMs) / 1000.0:F0}s");
                 log.Warn("If a file has been held many seconds it is the culprit: exclude it (CODECOMPASS_IGNORE) or " +
                          "lower CODECOMPASS_MAX_SYMBOL_MB / CODECOMPASS_MAX_FILE_MB.");
+
+                // Also surface on-screen (stderr) once, so a stall isn't a silent frozen progress bar.
+                // stderr is safe for the MCP server too (stdout is its protocol channel, stderr is logs).
+                if (dumps == 1)
+                {
+                    var top = held.OrderByDescending(k => now - k.Value.StartMs).FirstOrDefault();
+                    Console.Error.WriteLine($"\n[codecompass] {headline}");
+                    if (top.Value.Path is not null)
+                        Console.Error.WriteLine($"[codecompass]   stuck on: {top.Value.Path} ({top.Value.Size / 1048576.0:F1} MB). See `codecompass logs` for the full list.");
+                }
             }
         }) { IsBackground = true, Name = "cc-index-watchdog" };
         watchdog.Start();
@@ -116,12 +127,14 @@ public static class RepositoryIndexer
         // Each worker fills private trigram + symbol segment buffers lock-free and flushes them
         // to disk at their byte budgets, so build RAM is bounded regardless of repo size.
         //
-        // NoBuffering (one item at a time) instead of the default growing-chunk partitioner: file
-        // parse cost varies enormously (a dense/nested generated header can be 100x a normal file),
-        // and such files cluster together in directory order. With chunking, one worker grabs a chunk
-        // that is all-expensive and grinds it single-threaded while the other cores sit idle - the
-        // "single-threaded tail" seen on real generated-header repos. One-at-a-time hand-out keeps
-        // every core fed to the very end; the per-item sync cost is negligible next to read+parse.
+        // NoBuffering (one item at a time) instead of the default growing-chunk partitioner: general
+        // load-balancing hygiene for variable-cost files. When expensive files CLUSTER in directory
+        // order (e.g. a vendored minified-JS or generated dir), chunking hands one worker an all-
+        // expensive chunk to grind while others idle; one-at-a-time hand-out keeps every core fed. The
+        // per-item sync cost is negligible next to read+parse. NOTE: this is NOT a fix for a build that
+        // crawls because many individually-slow files are being parsed in parallel (e.g. big numeric
+        // data-blob sources at ~1s/MB) - that is bounded by the symbol-size cap, not by scheduling
+        // (confirmed on a real 90GB repo: NoBuffering made no difference to that case).
         Parallel.ForEach(
             Partitioner.Create(walker.Walk(root), EnumerablePartitionerOptions.NoBuffering),
             new ParallelOptions { MaxDegreeOfParallelism = cores },
