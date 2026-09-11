@@ -88,7 +88,9 @@ function New-DenseDefineFile([string]$path, [int]$seed, [long]$sizeBytes) {
     try {
         [long]$written = 0; $i = 0
         while ($written -lt $sizeBytes) {
-            $line = "#define REG_F{0}_{1:X8}_{2:D6} 0x{3:X8}" -f $seed, (($i * 2654435761) % 4294967296), $i, (($i * 40503 + 12345) % 4294967296)
+            $a = ([long]$i * 2654435761L) % 4294967296L
+            $b = ([long]$i * 40503L + 12345L) % 4294967296L
+            $line = "#define REG_F{0}_{1:X8}_{2:D6} 0x{3:X8}" -f $seed, $a, $i, $b
             $sw.WriteLine($line); $written += $line.Length + 2; $i++
         }
     } finally { $sw.Dispose() }

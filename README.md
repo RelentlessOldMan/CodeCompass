@@ -151,17 +151,24 @@ is always visible (`codecompass survey` / `codecompass logs`).
 - Precise C/C++ semantics need a compile database (`compile_commands.json`); without one it degrades
   to syntactic. No embeddings / semantic-meaning search. Single machine, single user.
 
-### Reproducing the large / generated-file cases locally
+### Testing
 
-Big corpora are never committed (`.corpus/` is gitignored); regenerate them with the bundled scripts:
+Two tiers, both driven by one script — **`check.ps1`**:
 
-- **`make-bigfile-corpus.ps1`** — writes one ~2 GB register-map header (`#define HEY_MOM_MY_CHIP_…`)
-  with unique markers scattered through it, to exercise streaming indexing + the block/positional
-  search. `-Run` indexes it and searches (a marker near EOF is found in ms via the positional index;
-  `HEY` shows the truncation signal). `-SizeGB 0.2` for a quick check.
-- **`make-pathological-corpus.ps1`** — the slow-to-parse shapes (nested templates, etc.) that stress
-  tree-sitter; `-Run` demonstrates the symbol cap handling them.
-- **`make-megacorpus.ps1`** — aggregates fetched repos into a >10 GB tree for scale runs.
+- **`./check.ps1`** — the fast xUnit suite via `dotnet test` (~165 tests, ~10 s). Run it constantly.
+- **`./check.ps1 -Big`** — unit tests **plus** the heavy large-file scenarios, with pass/fail
+  assertions: it generates a register-map header (default 0.3 GB; `-SizeGB 2` for the full run),
+  confirms it streams-indexes without hanging, that a marker near EOF is found at the right line via
+  the block/positional index, and that a broad query reports truncation; then confirms the
+  nested-template "pathological" files index without hanging at the default cap. Exits non-zero on any
+  failure — this is the **before-you-push** check.
+- **`./check.ps1 -Big -Fetch`** — also fetches the pinned real repos and runs the correctness bench
+  (needs network; large).
+
+Big corpora are never committed (`.corpus/` is gitignored); `check.ps1 -Big` generates them on the
+fly. The underlying generators can also be run directly: **`make-bigfile-corpus.ps1`** (one ~2 GB
+register-map header + markers; `-Run` to index & search it), **`make-pathological-corpus.ps1`** (the
+slow-to-parse shapes), and **`make-megacorpus.ps1`** (a >10 GB aggregate for scale runs).
 
 ### Per-repo config file
 
