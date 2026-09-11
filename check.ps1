@@ -29,12 +29,23 @@
 param(
     [switch]$Big,
     [switch]$Fetch,
-    [double]$SizeGB = 0.3
+    [double]$SizeGB = 0.3,
+    [switch]$InstallHook
 )
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $failures = New-Object System.Collections.Generic.List[string]
+
+# Point git at the tracked hooks dir so .githooks/pre-push runs ./check.ps1 -Big before every push.
+if ($InstallHook) {
+    Push-Location $root
+    try { git config core.hooksPath .githooks }
+    finally { Pop-Location }
+    Write-Host "Installed: git will run '.githooks/pre-push' (=> ./check.ps1 -Big) before each push." -ForegroundColor Green
+    Write-Host "Bypass a single push with:  git push --no-verify"
+    exit 0
+}
 
 function Section($t) { Write-Host "`n=== $t ===" -ForegroundColor Cyan }
 function Ok($t)   { Write-Host "  PASS  $t" -ForegroundColor Green }

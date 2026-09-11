@@ -165,6 +165,10 @@ Two tiers, both driven by one script — **`check.ps1`**:
 - **`./check.ps1 -Big -Fetch`** — also fetches the pinned real repos and runs the correctness bench
   (needs network; large).
 
+Run it automatically before every push: **`./check.ps1 -InstallHook`** (points git at the tracked
+`.githooks/pre-push`, which runs `./check.ps1 -Big` and aborts the push on failure). Bypass a single
+push with `git push --no-verify`.
+
 Big corpora are never committed (`.corpus/` is gitignored); `check.ps1 -Big` generates them on the
 fly. The underlying generators can also be run directly: **`make-bigfile-corpus.ps1`** (one ~2 GB
 register-map header + markers; `-Run` to index & search it), **`make-pathological-corpus.ps1`** (the

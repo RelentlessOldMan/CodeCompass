@@ -1,0 +1,26 @@
+#!/bin/sh
+# CodeCompass pre-push gate: run the full check (fast unit tests + the heavy large-file scenarios)
+# before a push is allowed. Enable with:  ./check.ps1 -InstallHook   (or: git config core.hooksPath .githooks)
+# Bypass one push with:  git push --no-verify
+#
+# Git runs this from the repo root. It shells out to PowerShell (pwsh if present, else Windows
+# PowerShell) to run check.ps1; a non-zero exit aborts the push.
+
+echo "[pre-push] running ./check.ps1 -Big (bypass with 'git push --no-verify') ..."
+
+if command -v pwsh >/dev/null 2>&1; then
+    pwsh -NoProfile -ExecutionPolicy Bypass -File ./check.ps1 -Big
+elif command -v powershell >/dev/null 2>&1; then
+    powershell -NoProfile -ExecutionPolicy Bypass -File ./check.ps1 -Big
+else
+    echo "[pre-push] PowerShell not found; cannot run checks. Bypass with 'git push --no-verify'." >&2
+    exit 1
+fi
+
+status=$?
+if [ "$status" -ne 0 ]; then
+    echo "[pre-push] checks FAILED (exit $status) - push aborted. Override with 'git push --no-verify'." >&2
+    exit 1
+fi
+echo "[pre-push] checks passed."
+exit 0
