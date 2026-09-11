@@ -128,6 +128,19 @@ public static class RepositoryIndexer
             () => new BuildWorker(),
             (file, _, worker) =>
             {
+                // Hard ceiling from the whole-file-in-RAM design, independent of machine RAM: a file
+                // is decoded into a single .NET string, which tops out near 1 GB of text (the UTF-16
+                // buffer hits the 2 GB single-object limit). Above that the decode OOMs and would fail
+                // the whole build, so skip it cleanly and loudly. (>2 GB files also fail File.ReadAll-
+                // Bytes and are caught below; this catches the dangerous ~1-2 GB middle band.)
+                if (file.Size > MaxTextFileBytes)
+                {
+                    Log.For(root).Info($"skipped {file.RelativePath}: {file.Size / 1048576.0:F0} MB exceeds the " +
+                        $"~{MaxTextFileBytes / 1048576} MB single-file text limit (can't hold as one string) - " +
+                        $"not indexed. Lower CODECOMPASS_MAX_FILE_MB to hide it, or exclude its directory.");
+                    return worker;
+                }
+
                 // Reserve the real processing footprint, not just the raw size: while trigrams are
                 // computed the raw bytes (1x) and the decoded UTF-16 string (2x) are both live, so
                 // peak is ~3x the file size. Reserving 3x makes the budget's RAM-scaling honest -
@@ -245,6 +258,12 @@ public static class RepositoryIndexer
 
     private static int StallWarnSeconds() => CodeCompassConfig.StallWarnSec();
 
+    // Largest file we can decode into a single .NET string. A string's UTF-16 buffer hits the 2 GB
+    // single-object limit near ~1 billion chars, so a source file past ~1 GB can't be held whole
+    // regardless of RAM. Kept a touch under 1 GiB for headroom. (Indexing files larger than this would
+    // need streaming/chunked trigram extraction that never materializes the whole file - not built.)
+    private const long MaxTextFileBytes = 1000L * 1024 * 1024;
+
     // Approximate peak RAM to hold one file in flight while it's indexed: raw bytes (1x) + the decoded
     // UTF-16 string (2x) live simultaneously during trigram computation (~3x). Used to reserve against
     // the read budget so its RAM-scaling is honest for large files. Guards against long overflow.
@@ -318,6 +337,13 @@ public static class RepositoryIndexer
                     if (old.TryGetValue(rel, out var os) && os.Size == file.Size && os.MTimeTicks == mtime)
                     {
                         newSnapshot[rel] = os;
+                        continue;
+                    }
+
+                    if (file.Size > MaxTextFileBytes)
+                    {
+                        Log.For(root).Info($"skipped {rel}: {file.Size / 1048576.0:F0} MB exceeds the " +
+                            $"~{MaxTextFileBytes / 1048576} MB single-file text limit (can't hold as one string) - not indexed.");
                         continue;
                     }
 
@@ -476,6 +502,7 @@ public static class RepositoryIndexer
         catch { return; }
 
         if (bytes.Length > ignore.MaxFileSizeBytes ||
+            bytes.Length > MaxTextFileBytes || // too big to decode as one string (see the constant)
             IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
         {
             if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); removed++; }
