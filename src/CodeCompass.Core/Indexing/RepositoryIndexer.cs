@@ -347,7 +347,10 @@ public static class RepositoryIndexer
         public long TrigramPostings; // sum of per-doc distinct-trigram counts (deterministic total)
     }
 
-    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, UpdateStats Stats) Update(string root)
+    /// <param name="onScan">Optional heartbeat: invoked with the running count of files stat-walked,
+    /// so a caller can show progress during the (silent, potentially slow over a network share)
+    /// change-detection pass.</param>
+    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, UpdateStats Stats) Update(string root, Action<int>? onScan = null)
     {
         root = Path.GetFullPath(root);
         CodeCompassConfig.Load(root);
@@ -362,12 +365,13 @@ public static class RepositoryIndexer
             var walker = new FileWalker(new IgnoreRules());
             var newSnapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            int added = 0, modified = 0, removed = 0;
+            int added = 0, modified = 0, removed = 0, walked = 0;
 
             using (var extractor = new TreeSitterSymbolExtractor())
             {
                 foreach (var file in walker.Walk(root))
                 {
+                    if (onScan is not null && (++walked & 0x1FF) == 0) onScan(walked); // heartbeat every 512 files
                     var rel = file.RelativePath;
                     seen.Add(rel);
                     var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;

@@ -266,22 +266,47 @@ static int CmdIndex(string[] args)
         return 1;
     }
 
-    // Quick scan for totals so the progress bar can show percent + ETA.
-    Console.Error.Write("scanning tree...");
+    // Percent/ETA needs a total, which means an up-front walk of the whole tree. On a network share
+    // that second walk doubles the (slow) metadata round-trips and shows a dead "scanning tree..."
+    // line for minutes - so skip the pre-count for network roots and show indeterminate progress
+    // instead. Locally the pre-count is ~free, and we heartbeat it so it never looks frozen.
+    bool network = IsNetworkPath(root);
     int totalFiles = 0;
     long totalBytes = 0;
-    foreach (var f in new FileWalker(new IgnoreRules()).Walk(root)) { totalFiles++; totalBytes += f.Size; }
-    Console.Error.Write("\r" + new string(' ', 20) + "\r");
+    bool haveTotals = false;
+    if (network)
+    {
+        Console.Error.WriteLine("indexing a network path: skipping the pre-scan (no %/ETA) to halve round-trips - this is a one-time full read.");
+    }
+    else
+    {
+        Console.Error.Write("scanning tree...");
+        var scanSw = Stopwatch.StartNew();
+        foreach (var f in new FileWalker(new IgnoreRules()).Walk(root))
+        {
+            totalFiles++; totalBytes += f.Size;
+            if (scanSw.ElapsedMilliseconds >= 500) { Console.Error.Write($"\rscanning tree... {totalFiles:N0} files   "); scanSw.Restart(); }
+        }
+        Console.Error.Write("\r" + new string(' ', 40) + "\r");
+        haveTotals = true;
+    }
 
     var progressSw = Stopwatch.StartNew();
     void Progress(int files, long bytes)
     {
         double el = progressSw.Elapsed.TotalSeconds;
         double mbps = el > 0 ? bytes / 1048576.0 / el : 0;
-        double pct = totalBytes > 0 ? 100.0 * bytes / totalBytes : 0;
-        double eta = mbps > 0 ? (totalBytes - bytes) / 1048576.0 / mbps : 0;
-        Console.Error.Write($"\rindexing {pct,5:F1}%  {files:N0}/{totalFiles:N0} files  " +
-                            $"{bytes / 1073741824.0:F2}/{totalBytes / 1073741824.0:F2} GB  {mbps:F0} MB/s  ETA {FormatEta(eta)}   ");
+        if (haveTotals)
+        {
+            double pct = totalBytes > 0 ? 100.0 * bytes / totalBytes : 0;
+            double eta = mbps > 0 ? (totalBytes - bytes) / 1048576.0 / mbps : 0;
+            Console.Error.Write($"\rindexing {pct,5:F1}%  {files:N0}/{totalFiles:N0} files  " +
+                                $"{bytes / 1073741824.0:F2}/{totalBytes / 1073741824.0:F2} GB  {mbps:F0} MB/s  ETA {FormatEta(eta)}   ");
+        }
+        else
+        {
+            Console.Error.Write($"\rindexing  {files:N0} files  {bytes / 1073741824.0:F2} GB  {mbps:F0} MB/s   ");
+        }
     }
 
     Log.For(root).Info($"cli index started ({totalFiles:N0} files, {totalBytes / 1048576.0:F0} MB)");
@@ -320,8 +345,15 @@ static int CmdUpdate(string[] args)
     var root = Path.GetFullPath(args[1]);
     if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
 
-    var (idx, _, s) = RepositoryIndexer.Update(root);
+    // The change-detection pass stat-walks the whole tree silently; over a network share that's
+    // minutes of blank console. Heartbeat it so it doesn't read as a hang.
+    Console.Error.Write("scanning for changes...");
+    var scanSw = Stopwatch.StartNew();
+    void OnScan(int n) { if (scanSw.ElapsedMilliseconds >= 500) { Console.Error.Write($"\rscanning for changes... {n:N0} files   "); scanSw.Restart(); } }
+
+    var (idx, _, s) = RepositoryIndexer.Update(root, OnScan);
     idx.Dispose();
+    Console.Error.Write("\r" + new string(' ', 40) + "\r");
     if (s.FullRebuild)
     {
         Console.WriteLine($"Full rebuild ({s.Added} files) in {s.Seconds:F2}s");
@@ -340,6 +372,10 @@ static int CmdWatch(string[] args)
     if (args.Length < 2) return Usage();
     var root = Path.GetFullPath(args[1]);
     if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
+
+    if (IsNetworkPath(root))
+        Console.Error.WriteLine("note: watching a network path - FileSystemWatcher change events are unreliable over SMB, " +
+                                "so edits may be missed. Run 'codecompass update' after a big external change (e.g. a source-control sync).");
 
     SegmentedIndex text;
     SegmentedSymbolIndex symbols;
@@ -521,6 +557,21 @@ static int CmdHookContext()
 
     Console.WriteLine(HookPayloads.SessionContext());
     return 0;
+}
+
+// A UNC path (\\host\share\...) or a mapped network drive. Used to soften progress affordances that
+// assume fast local metadata (skip the pre-scan, warn that the file watcher may miss SMB changes).
+static bool IsNetworkPath(string fullPath)
+{
+    if (fullPath.StartsWith(@"\\", StringComparison.Ordinal)) return true;
+    try
+    {
+        var r = Path.GetPathRoot(fullPath);
+        if (!string.IsNullOrEmpty(r) && r.Length >= 2 && r[1] == ':')
+            return new DriveInfo(r).DriveType == DriveType.Network;
+    }
+    catch { /* unknown -> treat as local */ }
+    return false;
 }
 
 static string FormatEta(double seconds)
