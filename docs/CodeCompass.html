@@ -149,12 +149,16 @@ snapshot) in the background, while the old index keeps serving, then swaps. Auto
 <code>maxAutoMb</code>; deferred to a manual <code>codecompass update</code> for network shares and huge repos
 (a full-tree stat-walk is slow over SMB and the watcher is unreliable there). Force it with
 <code>autoReconcile</code> / <code>CODECOMPASS_AUTO_RECONCILE</code> (<code>true</code>/<code>false</code>).</p>
-<p>CodeCompass can also show its state in Claude Code's status area &mdash; <code>CodeCompass &#10003; 48,000 files</code>,
-<code>&hellip; indexing 42%</code>, <code>&#8635; refreshing&hellip;</code>. The server publishes state to a tiny per-repo
+<p>CodeCompass can also show its state in Claude Code's status area. The server publishes state to a tiny per-repo
 file; the <code>codecompass statusline</code> command reads it. Add to Claude Code's <code>settings.json</code>:
-<code>{ "statusLine": { "type": "command", "command": "codecompass statusline" } }</code>. There is a single
-status-line slot &mdash; keep an existing one with <code>--wrap "&lt;cmd&gt;"</code> (it forwards Claude's stdin and
-appends the CodeCompass segment). Off with <code>statusLine: false</code> / <code>CODECOMPASS_STATUS_LINE=0</code>.</p>
+<code>{ "statusLine": { "type": "command", "command": "codecompass statusline" } }</code>. Since setting any
+status-line command <i>replaces</i> Claude's built-in default, the bare command renders a self-contained line so you
+don't lose the usual info &mdash; <code>Opus 4.8 &middot; ~/CodeCompass &middot; CodeCompass &#10003; 48,000 files</code>
+(states: <code>&hellip; indexing 42%</code>, <code>&#8635; refreshing&hellip;</code>, <code>&#9888; not indexed</code>;
+the CodeCompass part drops in un-indexed repos). There is a single status-line slot &mdash; if you already have your own
+line, use <code>--wrap "&lt;cmd&gt;"</code>: it forwards Claude's stdin, prints your command's output, and appends
+<i>only</i> the CodeCompass segment (not model/cwd &mdash; your command already shows those). Off with
+<code>statusLine: false</code> / <code>CODECOMPASS_STATUS_LINE=0</code>.</p>
 
 <h2>Limitations</h2>
 <p>Worth knowing where the edges are &mdash; all are by design and all skips are logged, never silent:</p>

@@ -245,12 +245,16 @@ static int CmdParseBench(string[] args)
 // by the MCP server) and print a compact segment like "CodeCompass ✓ 48,000 files". A separate
 // short-lived process can't see the server's memory, so the status is bridged through that file.
 //
-// --wrap "<cmd>": compose with an existing status line. We forward the SAME stdin JSON to <cmd>, print
-// its output, then append " | <our segment>". Claude Code has a single status-line slot, so this lets
-// a user keep their existing status line and still see CodeCompass.
+// Bare mode is a self-contained default status line: "<model> · <cwd> · CodeCompass ✓ N files". Setting
+// any statusLine command replaces Claude Code's built-in default entirely, so we render the model + cwd
+// ourselves - otherwise adding CodeCompass would DROP that info. The CodeCompass part is omitted when
+// this repo has no status file, so it's harmless in repos we've never indexed.
 //
-// Contract: fast, silent on any error, and prints NOTHING (for our segment) when there's no status
-// file - so it's harmless in repos CodeCompass has never indexed.
+// --wrap "<cmd>": the user already has their own status line. We forward the SAME stdin JSON to <cmd>,
+// print its output, then append " | CodeCompass …" (their command already shows model/cwd, so we do NOT
+// add our own). Claude Code has a single status-line slot; this composes into it.
+//
+// Contract: fast, and silent on any error.
 static int CmdStatusline(string[] args)
 {
     // Claude Code reads this line as UTF-8; on Windows the console defaults to a legacy codepage that
@@ -260,35 +264,74 @@ static int CmdStatusline(string[] args)
     string stdin = "";
     try { stdin = Console.In.ReadToEnd(); } catch { /* no stdin piped */ }
 
+    // Parse Claude's stdin JSON once: the model name + cwd for display, and the repo root for the
+    // status lookup (prefer the workspace project dir, then current dir, then cwd).
+    string? model = null, cwd = null, root = null;
+    try
+    {
+        if (!string.IsNullOrWhiteSpace(stdin))
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(stdin);
+            var r = doc.RootElement;
+            if (r.TryGetProperty("model", out var m) && m.TryGetProperty("display_name", out var dn)
+                && dn.ValueKind == System.Text.Json.JsonValueKind.String)
+                model = dn.GetString();
+            string? projectDir = null, currentDir = null;
+            if (r.TryGetProperty("workspace", out var ws))
+            {
+                if (ws.TryGetProperty("project_dir", out var pd) && pd.ValueKind == System.Text.Json.JsonValueKind.String) projectDir = pd.GetString();
+                if (ws.TryGetProperty("current_dir", out var cd) && cd.ValueKind == System.Text.Json.JsonValueKind.String) currentDir = cd.GetString();
+            }
+            if (r.TryGetProperty("cwd", out var c) && c.ValueKind == System.Text.Json.JsonValueKind.String) cwd = c.GetString();
+            cwd ??= currentDir;                        // what the user is looking at
+            root = projectDir ?? currentDir ?? cwd;    // where the index/status lives
+        }
+    }
+    catch { /* not the expected shape */ }
+
     // --wrap: run the user's existing status-line command first, forwarding the same stdin.
     string? wrapped = null;
     int wi = Array.FindIndex(args, a => a is "--wrap" or "-wrap");
-    if (wi >= 0 && wi + 1 < args.Length)
+    bool wrap = wi >= 0 && wi + 1 < args.Length;
+    if (wrap)
     {
         try { wrapped = RunWrapped(args[wi + 1], stdin)?.TrimEnd('\r', '\n'); }
         catch { wrapped = null; }
     }
 
-    string segment = "";
+    // The CodeCompass segment (empty when this repo has no status file).
+    string cc = "";
     try
     {
-        var root = RepoRootFromStatuslineJson(stdin);
         if (root is not null)
         {
-            var status = CodeCompass.Core.Storage.IndexStatusFile.Read(root);
-            if (status is not null) segment = $"CodeCompass {StatusIcon(status.State)} {status.Text}";
+            var status = CodeCompass.Core.Storage.IndexStatusFile.Read(Path.GetFullPath(root));
+            if (status is not null) cc = $"CodeCompass {StatusIcon(status.State)} {status.Text}";
         }
     }
     catch { /* status line must never fail loudly */ }
 
-    // Compose: wrapped output, then our segment (only when we have one).
-    string line = (wrapped, segment) switch
+    string line;
+    if (wrap)
     {
-        ({ Length: > 0 }, { Length: > 0 }) => $"{wrapped} | {segment}",
-        ({ Length: > 0 }, _) => wrapped!,
-        (_, { Length: > 0 }) => segment,
-        _ => "",
-    };
+        // Compose into the user's line; append only our segment (their line already has model/cwd).
+        line = (wrapped, cc) switch
+        {
+            ({ Length: > 0 }, { Length: > 0 }) => $"{wrapped} | {cc}",
+            ({ Length: > 0 }, _) => wrapped!,
+            (_, { Length: > 0 }) => cc,
+            _ => "",
+        };
+    }
+    else
+    {
+        // Self-contained default: model · cwd · CodeCompass (each part omitted if unavailable).
+        var parts = new List<string>(3);
+        if (!string.IsNullOrWhiteSpace(model)) parts.Add(model!);
+        if (!string.IsNullOrWhiteSpace(cwd)) parts.Add(ShortenPath(cwd!));
+        if (cc.Length > 0) parts.Add(cc);
+        line = string.Join(" · ", parts);
+    }
     if (line.Length > 0) Console.WriteLine(line);
     return 0;
 }
@@ -302,29 +345,18 @@ static string StatusIcon(string state) => state switch
     _ => "•",               // •
 };
 
-// Determine the repo root Claude is in from the status-line stdin JSON. Prefer the workspace project
-// dir (repo root), fall back to the current dir, then this process's cwd.
-static string? RepoRootFromStatuslineJson(string json)
+// Compact a path for display: collapse the user's home dir to ~ (keeps the status line short).
+static string ShortenPath(string path)
 {
     try
     {
-        if (!string.IsNullOrWhiteSpace(json))
-        {
-            using var doc = System.Text.Json.JsonDocument.Parse(json);
-            var r = doc.RootElement;
-            if (r.TryGetProperty("workspace", out var ws))
-            {
-                if (ws.TryGetProperty("project_dir", out var pd) && pd.ValueKind == System.Text.Json.JsonValueKind.String)
-                    return Path.GetFullPath(pd.GetString()!);
-                if (ws.TryGetProperty("current_dir", out var cd) && cd.ValueKind == System.Text.Json.JsonValueKind.String)
-                    return Path.GetFullPath(cd.GetString()!);
-            }
-            if (r.TryGetProperty("cwd", out var cwd) && cwd.ValueKind == System.Text.Json.JsonValueKind.String)
-                return Path.GetFullPath(cwd.GetString()!);
-        }
+        var full = Path.GetFullPath(path);
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrEmpty(home) && full.StartsWith(home, StringComparison.OrdinalIgnoreCase))
+            return "~" + full.Substring(home.Length);
+        return full;
     }
-    catch { /* not the expected shape */ }
-    return null;
+    catch { return path; }
 }
 
 // Run a user-supplied status-line command through the OS shell, forwarding Claude's stdin JSON, and

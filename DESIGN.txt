@@ -214,14 +214,22 @@ The wrinkle is that Claude Code's status line is a separate short-lived process
 that can't see the server's memory. So the state is bridged through a tiny
 per-repo `status.json` in the local cache: the server writes it on every state
 transition (best-effort, offloaded so it never stalls indexing), and the
-`codecompass statusline` command reads it and prints one compact segment. The
-command reads Claude's stdin JSON (`workspace.project_dir` / `cwd`) to know which
-repo it's in, resolves that repo's status file WITHOUT creating anything (it runs
-on every render, in every folder), and prints nothing when there's no status - so
-it's inert in repos we've never indexed. Claude Code has a single status-line
-slot; `--wrap "<cmd>"` composes with an existing one by forwarding the same stdin
-and appending our segment. Publishing is on by default and disabled with
-`statusLine: false` / CODECOMPASS_STATUS_LINE=0.
+`codecompass statusline` command reads it. The command reads Claude's stdin JSON
+(`workspace.project_dir` / `cwd` for the repo, `model.display_name` for the model)
+and resolves that repo's status file WITHOUT creating anything (it runs on every
+render, in every folder).
+
+Setting any status-line command REPLACES Claude Code's built-in default outright,
+so the bare command is a self-contained default: it renders `<model> · <cwd> ·
+CodeCompass <state>` - you don't lose the model/cwd you'd otherwise have. The
+CodeCompass part is dropped in repos we've never indexed, so the line gracefully
+degrades to `model · cwd` rather than going blank.
+
+Claude Code has a single status-line slot. A user who already has their own status
+line uses `--wrap "<cmd>"`: we forward the same stdin to their command, print its
+output, and append ONLY our segment - deliberately NOT re-adding model/cwd, since
+their command already shows them (no duplication). Publishing is on by default and
+disabled with `statusLine: false` / CODECOMPASS_STATUS_LINE=0.
 
 
 How it saves tokens

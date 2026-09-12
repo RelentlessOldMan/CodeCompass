@@ -211,25 +211,35 @@ within `maxAutoMb`**; for **network shares and huge repos** it's left to a manua
 
 ## Status line (optional)
 
-CodeCompass can show its index state in Claude Code's status area — `CodeCompass ✓ 48,000 files`,
-`… indexing 42%`, `↻ refreshing (external changes)…`, or `⚠ not indexed`. The MCP server publishes
-state to a tiny per-repo file on every transition; the `codecompass statusline` command reads it. Wire
-it up in Claude Code's `settings.json` (user or project scope):
+CodeCompass can show its index state in Claude Code's status area. The MCP server publishes state to a
+tiny per-repo file on every transition; the `codecompass statusline` command reads it. Wire it up in
+Claude Code's `settings.json` (user or project scope):
 
 ```json
 { "statusLine": { "type": "command", "command": "codecompass statusline" } }
 ```
 
-Claude Code has a **single** status-line slot. To keep an existing status line and still see
-CodeCompass, use `--wrap` — it runs your command (forwarding Claude's stdin) and appends the
-CodeCompass segment:
+Because setting any `statusLine` command **replaces** Claude Code's built-in default entirely, the bare
+command renders a **self-contained default** so you don't lose the usual info — `<model> · <cwd>` — and
+appends the index state:
+
+```
+Opus 4.8 · ~/CodeCompass · CodeCompass ✓ 48,000 files
+```
+
+Other states: `… indexing 42%`, `↻ refreshing (external changes)…`, `⚠ not indexed`. The CodeCompass
+part is omitted in repos it hasn't indexed (so the line degrades to just `model · cwd`).
+
+Claude Code has a **single** status-line slot. If you already have your own status line, use `--wrap` —
+it runs your command (forwarding Claude's stdin) and appends **only** the CodeCompass segment (it does
+*not* add model/cwd, since your command already shows those):
 
 ```json
 { "statusLine": { "type": "command", "command": "codecompass statusline --wrap \"my-existing-statusline\"" } }
 ```
 
-The command is fast, never errors out loudly, and prints nothing for repos CodeCompass hasn't indexed.
-Turn publishing off with `statusLine: false` (config) / `CODECOMPASS_STATUS_LINE=0` (env).
+The command is fast, never errors out loudly, and publishing is off via `statusLine: false` (config) /
+`CODECOMPASS_STATUS_LINE=0` (env).
 
 ## Performance
 
