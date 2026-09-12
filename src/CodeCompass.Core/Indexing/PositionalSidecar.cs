@@ -50,7 +50,16 @@ public static class PositionalSidecar
     /// every query trigram. Returns true if the sidecar was present and usable (results filled up to
     /// maxResults); false means the caller should fall back to a whole-file scan.</summary>
     public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults)
+        => TryScan(dir, root, rel, query, results, maxResults, out _);
+
+    /// <summary>As <see cref="TryScan(string,string,string,string,List{SearchMatch},int)"/>, also
+    /// reporting how many bytes were read from the (possibly networked) source file - the sum of the
+    /// candidate blocks' sizes. This is the metric the block index exists to minimize: a selective query
+    /// reads a few ~1 MB blocks, not the whole multi-GB file. Tests assert it stays tiny relative to the
+    /// file (verifying the network-cost win without needing a real share).</summary>
+    public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults, out long bytesRead)
     {
+        bytesRead = 0;
         var scPath = Path.Combine(dir, SidecarName(rel));
         if (!File.Exists(scPath)) return false;
 
@@ -97,6 +106,7 @@ public static class PositionalSidecar
                 var bytes = new byte[(int)blockLen];
                 src.Seek(startByte[i], SeekOrigin.Begin);
                 if (!ReadFull(src, bytes)) break;
+                bytesRead += blockLen; // bytes pulled from the (possibly networked) source
                 int skip = startByte[i] == 0 ? bomLen : 0;
                 var text = Encoding.UTF8.GetString(bytes, skip, bytes.Length - skip);
                 FileScanner.ScanText(rel, text, query, results, maxResults, lineOffset: startLine[i] - 1);

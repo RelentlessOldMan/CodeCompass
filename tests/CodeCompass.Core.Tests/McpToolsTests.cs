@@ -224,6 +224,42 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void StartupReconcile_SkippedForNetworkPath()
+    {
+        // Fake-out: force network treatment on a local temp repo (no real share). A network root must
+        // NOT auto-reconcile on startup (slow SMB stat-walk / unreliable watcher -> left to manual update).
+        Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { }\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+
+            repo.Write("b.cs", "class BrandNewNetworkType { }\n"); // external change, no watcher
+            ServerContext.Init(repo.Root);                          // new "session": would reconcile if local
+
+            // Gated off for network -> the file must not appear on its own within a generous window.
+            bool found = false;
+            for (int i = 0; i < 15 && !found; i++)
+            {
+                if (CodeCompassTools.SearchCode("BrandNewNetworkType").Contains("b.cs")) found = true;
+                else Thread.Sleep(100);
+            }
+            Assert.False(found, "a network path must NOT auto-reconcile on startup");
+
+            // Positive control: the change is real - a manual reindex still picks it up.
+            CodeCompassTools.Reindex();
+            Assert.Contains("b.cs", CodeCompassTools.SearchCode("BrandNewNetworkType"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", null);
+            ServerContext.Init(repo.Root); // reset shared static state
+        }
+    }
+
+    [Fact]
     public void ConcurrentSearchAndReindex_DoesNotCrash()
     {
         using var repo = NewIndexedRepo();
