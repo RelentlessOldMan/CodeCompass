@@ -27,6 +27,23 @@ public class ConfigTests
     }
 
     [Fact]
+    public void Template_ParsesToAllDefaults()
+    {
+        // The `codecompass init` starter has every setting commented out, so an unedited copy must
+        // parse cleanly (comments/trailing commas tolerated) to an all-null config == all defaults.
+        using var repo = new TempRepo();
+        repo.Write(".codecompass.json", CodeCompassConfig.Template);
+
+        var cfg = CodeCompassConfig.ReadFrom(repo.Root);
+        Assert.NotNull(cfg);
+        Assert.Null(cfg!.MaxSymbolMb);
+        Assert.Null(cfg.MaxFileMb);
+        Assert.Null(cfg.Ignore);
+        Assert.Null(cfg.Threads);
+        Assert.Null(cfg.ReadBudgetMb);
+    }
+
+    [Fact]
     public void ReadFrom_InvalidJson_ReturnsNull_NoThrow()
     {
         using var repo = new TempRepo();

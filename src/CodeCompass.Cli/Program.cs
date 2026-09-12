@@ -30,6 +30,7 @@ return args.Length == 0
         "refs" => CmdRefs(args),
         "watch" => CmdWatch(args),
         "survey" => CmdSurvey(args),
+        "init" => CmdInit(args),
         "symstats" => CmdSymStats(args),
         "parsebench" => CmdParseBench(args),
         "logs" => CmdLogs(),
@@ -59,6 +60,7 @@ static int Usage()
     Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
     Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#/C++, lexical elsewhere)");
     Console.Error.WriteLine("  codecompass survey  <path>               report what the size caps skip + suggest config");
+    Console.Error.WriteLine("  codecompass init    <path>               write a documented .codecompass.json (per-repo settings)");
     Console.Error.WriteLine("  codecompass symstats <path> [--full]     profile symbol-file sizes + parse cost per language");
     Console.Error.WriteLine("  codecompass parsebench                   tree-sitter parse-time vs size sweep (synthetic)");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
@@ -111,6 +113,23 @@ static int CmdSurvey(string[] args)
         int suggest = (int)Math.Ceiling(Mb(r.OverFileCap[0].Bytes));
         Console.WriteLine($"  To include them in text search, set \"maxFileMb\": {suggest} in .codecompass.json.");
     }
+    return 0;
+}
+
+// Write a documented .codecompass.json at the repo root so the user has a starting point they can edit,
+// instead of guessing the field names. Every setting is commented out (defaults apply until edited).
+static int CmdInit(string[] args)
+{
+    if (args.Length < 2) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
+
+    var path = Path.Combine(root, CodeCompass.Core.Config.CodeCompassConfig.FileName);
+    if (File.Exists(path)) { Console.Error.WriteLine($"{path} already exists - not overwriting."); return 1; }
+
+    File.WriteAllText(path, CodeCompass.Core.Config.CodeCompassConfig.Template);
+    Console.WriteLine($"wrote {path}");
+    Console.Error.WriteLine("Every setting is commented out (defaults apply). Uncomment only what you want to change.");
     return 0;
 }
 

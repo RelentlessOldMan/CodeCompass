@@ -30,6 +30,31 @@ public static class CodeCompassConfig
 {
     public const string FileName = ".codecompass.json";
 
+    /// <summary>A documented starter <c>.codecompass.json</c>. Every setting is commented out, so an
+    /// unedited copy is equivalent to no file at all (all defaults) - the user uncomments only what
+    /// they want to change. Comments/trailing commas are tolerated by the loader. Written by
+    /// <c>codecompass init</c>.</summary>
+    public const string Template = """
+{
+  // CodeCompass per-repo config. Optional - without this file everything uses defaults.
+  // Precedence: environment variable > this file > default. Sizes are in MB.
+  // Uncomment and edit only what you want to change.
+
+  // "maxSymbolMb": 1,        // skip go-to-definition/symbol extraction above this size (default 1).
+                              //   Raise for large real code whose symbols you want; numeric data
+                              //   blobs above 1 MB are auto-skipped regardless. Still text-searchable.
+  // "maxFileMb": 2000,       // don't index a file larger than this at all (default 2000 = 2 GB).
+  // "ignore": ["generated", "thirdparty"],  // extra directory names to exclude from indexing.
+  // "maxAutoMb": 100,        // repos bigger than this wait for a one-time `codecompass index` instead
+                              //   of auto-indexing inside a tool call (default 100).
+  // "threads": 0,            // indexing parallelism; 0 / omitted = all CPU cores.
+  // "segmentMb": 0,          // per-worker build-memory budget; 0 / omitted = scaled to RAM.
+  // "compactSegments": 64,   // merge on-disk segments after this many accumulate (default 64).
+  // "stallWarnSec": 60,      // warn in the log if a build stalls this long (default 60, min 5).
+  // "readBudgetMb": 0        // file bytes in flight during a build; 0 = ~1/16 of RAM (256 MB-4 GB).
+}
+""";
+
     private static volatile RepoConfig _current = new();
 
     /// <summary>The config for the repo currently being indexed (empty if none/invalid).</summary>
@@ -53,7 +78,7 @@ public static class CodeCompassConfig
             var path = Path.Combine(root, FileName);
             if (!File.Exists(path)) return null;
             var cfg = JsonSerializer.Deserialize<RepoConfig>(File.ReadAllText(path),
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true, ReadCommentHandling = JsonCommentHandling.Skip });
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true, ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
             if (cfg is not null) Log.Global.Info($"loaded {FileName} from {root}");
             return cfg;
         }

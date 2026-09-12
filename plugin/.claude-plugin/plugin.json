@@ -1,7 +1,7 @@
 {
   "name": "codecompass",
   "displayName": "CodeCompass",
-  "version": "0.1.0",
+  "version": "1.0.69",
   "description": "Fast local code search and navigation for large codebases. Indexed literal search, go-to-definition, and semantic find-references (C#/C++), exposed as MCP tools, with a hook that steers the agent off grep and onto CodeCompass.",
   "author": { "name": "CodeCompass" },
   "license": "MIT",

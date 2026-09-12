@@ -83,6 +83,7 @@ codecompass def     <path> <name>     go-to-definition
 codecompass refs    <path> <name>     references (semantic C#/C++, lexical elsewhere)
 codecompass symbols <path> <substr>   symbol-name search
 codecompass survey  <path>            report what the size caps skip + suggest config
+codecompass init    <path>            write a documented .codecompass.json to edit
 codecompass symstats <path>           profile symbol-file sizes + parse cost per language
 codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)
 codecompass logs                      show the log folder and files
@@ -180,6 +181,10 @@ Every knob above also lives in an optional **`.codecompass.json`** at the repo r
 travel with the repo instead of being set on every run. Precedence is **env var → config file →
 default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names),
 `threads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`.
+
+Don't hand-write it — run **`codecompass init <path>`** to drop a documented starter (every setting
+commented out, so it's all defaults until you edit; `//` comments and trailing commas are allowed).
+A minimal one is just:
 
 ```json
 { "maxSymbolMb": 4, "ignore": ["generated", "thirdparty"] }

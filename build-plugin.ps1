@@ -33,7 +33,19 @@ $docs = Join-Path $root "docs/CodeCompass.html"
 if (Test-Path $docs) { Copy-Item $docs (Join-Path $root "plugin/CodeCompass.html") -Force }
 
 $size = [math]::Round(((Get-ChildItem $binDir -Recurse | Measure-Object Length -Sum).Sum / 1MB), 1)
-$version = (& $cli version) 2>$null
+$version = (& $cli version) 2>$null   # e.g. "CodeCompass 1.0.64+a1b2c3d4"
+
+# Keep the plugin manifest version in step with the binaries: the numeric part (no +sha), so a plugin
+# registry and `codecompass version` agree on the release line.
+$manifestVer = ($version -replace '^CodeCompass\s+', '') -replace '\+.*$', ''
+$pjPath = Join-Path $root "plugin/.claude-plugin/plugin.json"
+if ($manifestVer -match '^\d+\.\d+\.\d+' -and (Test-Path $pjPath)) {
+    $pj = Get-Content $pjPath -Raw
+    $pj = [regex]::Replace($pj, '("version"\s*:\s*")[^"]*(")', "`${1}$manifestVer`${2}")
+    Set-Content $pjPath $pj -Encoding utf8 -NoNewline
+    Write-Host "Stamped plugin.json version = $manifestVer"
+}
+
 Write-Host ""
 Write-Host "Plugin ready: $(Join-Path $root 'plugin')  ($version, bin is $size MB)"
 Write-Host "Install for one session:   claude --plugin-dir `"$(Join-Path $root 'plugin')`""
