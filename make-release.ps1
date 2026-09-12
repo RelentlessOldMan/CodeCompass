@@ -71,13 +71,20 @@ Install (no .NET SDK required):
 The ARM64 Windows build runs via x64 emulation. See the bundled CodeCompass.html for docs.
 "@
 
-gh release view $tag *> $null
-if ($LASTEXITCODE -eq 0) {
+# gh writes "release not found" to stderr for a missing tag; under ErrorActionPreference=Stop that
+# native stderr would fault, so probe with Continue and decide on the exit code.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+gh release view $tag 2>$null 1>$null
+$exists = ($LASTEXITCODE -eq 0)
+if ($exists) {
     Write-Host "Release $tag exists - uploading asset (clobber)..."
     gh release upload $tag $zip --clobber
 } else {
     Write-Host "Creating release $tag ..."
     gh release create $tag $zip --title "CodeCompass $version" --notes $notes
 }
-if ($LASTEXITCODE -ne 0) { throw "gh release publish failed" }
+$publishCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($publishCode -ne 0) { throw "gh release publish failed" }
 Write-Host "Published $tag with $([System.IO.Path]::GetFileName($zip))."
