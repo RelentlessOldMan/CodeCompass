@@ -13,6 +13,7 @@ switch (args[0].ToLowerInvariant())
     case "run": return CmdRun(args);
     case "bench": return await CmdBench(args);
     case "verify": return await CmdVerify(args);
+    case "eval": return CmdEval(args);
     case "all": return CmdAll(args);
     default: return Usage();
 }
@@ -27,10 +28,21 @@ static int Usage()
     Console.Error.WriteLine("  bench bench  <id>              fetch (if needed) then benchmark a manifest corpus");
     Console.Error.WriteLine("  bench verify <path|id> [budgetMB] [queries]");
     Console.Error.WriteLine("                                 correctness: trigram search vs brute-force on real files");
+    Console.Error.WriteLine("  bench eval   <path> [sampleSize]  estimate tokens saved: find_definition vs grep+read");
     Console.Error.WriteLine("  bench all    [all|tier|id]     perf + correctness over fetched corpora -> HTML report");
     Console.Error.WriteLine();
     Console.Error.WriteLine("env: CODECOMPASS_MANIFEST (manifest path), CODECOMPASS_CORPUS_DIR (cache dir)");
     return 1;
+}
+
+static int CmdEval(string[] args)
+{
+    if (args.Length < 2) { Console.Error.WriteLine("usage: bench eval <path> [sampleSize]"); return 1; }
+    var path = args[1];
+    if (!Directory.Exists(path)) { Console.Error.WriteLine($"not a directory: {path}"); return 1; }
+    int sample = args.Length > 2 && int.TryParse(args[2], out var n) && n > 0 ? n : 50;
+    TokenEval.Run(Path.GetFullPath(path), sample);
+    return 0;
 }
 
 static string ManifestPath() =>

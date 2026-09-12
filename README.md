@@ -294,6 +294,22 @@ using **792 MB heap / 2.2 GB peak working set**, with queries still ~1 ms (p95 7
 bounded because the indexes are memory-mapped, not loaded into RAM. Build memory is tunable via
 `CODECOMPASS_SEGMENT_MB` / `CODECOMPASS_THREADS`.
 
+### Token savings (the whole point)
+
+`bench eval <path>` estimates the token cost of the core task — "show me the definition of X" —
+two ways over the same sampled symbols: **CodeCompass** (`find_definition` → location + the definition's
+line range, small ones inlined) vs. a **grep + read-the-whole-file** baseline (what an agent does
+without it). Tokens are estimated as ~chars/4; the ratio is the stable number. On this repo:
+
+```
+CodeCompass :        8,672 tokens
+grep + read :      168,390 tokens
+=> grep+read costs 19.4x the tokens for the same answer (95% saved).
+```
+
+It's a model, not a live-LLM trace — but it quantifies the shape of the saving (return the ~20 relevant
+lines, not the whole file) and prints its assumptions so the number stays honest.
+
 A one-page, self-contained version of these docs lives in [`docs/CodeCompass.html`](docs/CodeCompass.html).
 
 ## Logs

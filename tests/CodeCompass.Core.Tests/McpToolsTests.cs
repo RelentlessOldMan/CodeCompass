@@ -97,7 +97,7 @@ public class McpToolsTests
 
             // Case-sensitive (default): only the exact-case line.
             var cs = CodeCompassTools.SearchCode("handler", caseSensitive: true);
-            Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(cs, "mix.cs:").Count);
+            Assert.Single(System.Text.RegularExpressions.Regex.Matches(cs, "mix.cs:"));
             Assert.Contains("var handler = 2", cs);
 
             // Case-insensitive: all three casings.
