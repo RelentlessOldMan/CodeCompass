@@ -160,6 +160,70 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void StartupReconcile_PicksUpOutOfSessionChange()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { }\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex(); // build the index; a.cs recorded in the snapshot
+
+            // An external change with NO watcher running (as if edited/synced while Claude was closed).
+            repo.Write("b.cs", "class BrandNewExternalType { }\n");
+
+            // New "session": re-init drops the in-memory index; the first tool call loads it and kicks
+            // the background startup reconcile (local + tiny => gated on).
+            ServerContext.Init(repo.Root);
+
+            bool found = false;
+            for (int i = 0; i < 50 && !found; i++)
+            {
+                if (CodeCompassTools.SearchCode("BrandNewExternalType").Contains("b.cs")) found = true;
+                else Thread.Sleep(100);
+            }
+            Assert.True(found, "startup reconcile should pick up the externally-added file");
+        }
+        finally { ServerContext.Init(repo.Root); } // reset shared static state
+    }
+
+    [Fact]
+    public void PublishesStatusFile_ReadableByStatuslineCommand()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class A { } }");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex(); // Swap -> PublishStatus (offloaded write)
+
+            // The write is best-effort/async; poll briefly for the "ready" status the server publishes.
+            CodeCompass.Core.Storage.IndexStatus? status = null;
+            for (int i = 0; i < 50 && status?.State != "ready"; i++)
+            {
+                status = CodeCompass.Core.Storage.IndexStatusFile.Read(repo.Root);
+                if (status?.State != "ready") Thread.Sleep(50);
+            }
+            Assert.NotNull(status);
+            Assert.Equal("ready", status!.State);
+            Assert.Equal(1, status.Files);            // the one file we indexed
+            Assert.Contains("file", status.Text);     // "1 files"
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
+    public void StatusFileRead_ForUnindexedRepo_IsNullAndCreatesNoCacheDir()
+    {
+        using var repo = new TempRepo();
+        var cacheDir = CodeCompass.Core.Storage.IndexStore.CacheDirPath(repo.Root);
+        // A repo we've never indexed has no status; reading it must not create the cache dir
+        // (the status line runs on every render, for every folder Claude visits).
+        Assert.Null(CodeCompass.Core.Storage.IndexStatusFile.Read(repo.Root));
+        Assert.False(System.IO.Directory.Exists(cacheDir), "read-only status probe must not create the cache dir");
+    }
+
+    [Fact]
     public void ConcurrentSearchAndReindex_DoesNotCrash()
     {
         using var repo = NewIndexedRepo();

@@ -17,6 +17,8 @@ public sealed class RepoConfig
     [JsonPropertyName("compactSegments")] public int? CompactSegments { get; set; }
     [JsonPropertyName("stallWarnSec")] public int? StallWarnSec { get; set; }
     [JsonPropertyName("readBudgetMb")] public long? ReadBudgetMb { get; set; }
+    [JsonPropertyName("autoReconcile")] public bool? AutoReconcile { get; set; }
+    [JsonPropertyName("statusLine")] public bool? StatusLine { get; set; }
     [JsonPropertyName("ignore")] public string[]? Ignore { get; set; }
 }
 
@@ -47,6 +49,12 @@ public static class CodeCompassConfig
   // "ignore": ["generated", "thirdparty"],  // extra directory names to exclude from indexing.
   // "maxAutoMb": 100,        // repos bigger than this wait for a one-time `codecompass index` instead
                               //   of auto-indexing inside a tool call (default 100).
+  // "autoReconcile": true,   // on startup, pick up changes made outside the session (e.g. a source-
+                              //   control sync). Default: on for local repos within maxAutoMb; off for
+                              //   network shares / huge repos (run `codecompass update` there). true =
+                              //   always, false = never.
+  // "statusLine": true,      // publish index state for the `codecompass statusline` command (shown in
+                              //   Claude Code's status area). Default true; harmless if unused.
   // "threads": 0,            // indexing parallelism; 0 / omitted = all CPU cores.
   // "segmentMb": 0,          // per-worker build-memory budget; 0 / omitted = scaled to RAM.
   // "compactSegments": 64,   // merge on-disk segments after this many accumulate (default 64).
@@ -102,6 +110,28 @@ public static class CodeCompassConfig
         var v = Environment.GetEnvironmentVariable(name);
         return int.TryParse(v, out var n) ? n : null;
     }
+
+    // Accepts true/false and 1/0; null if unset/unrecognized.
+    private static bool? EnvBool(string name)
+    {
+        var v = Environment.GetEnvironmentVariable(name);
+        if (bool.TryParse(v, out var b)) return b;
+        if (v == "1") return true;
+        if (v == "0") return false;
+        return null;
+    }
+
+    /// <summary>Whether the MCP server auto-reconciles the index on startup. Tri-state: null = the
+    /// gated default (local + within the auto limit); true = always; false = never. Env
+    /// CODECOMPASS_AUTO_RECONCILE / config `autoReconcile`.</summary>
+    public static bool? AutoReconcile() => AutoReconcile(_current);
+    public static bool? AutoReconcile(RepoConfig cfg) => EnvBool("CODECOMPASS_AUTO_RECONCILE") ?? cfg.AutoReconcile;
+
+    /// <summary>Whether the server publishes its status to a per-repo status file (for the
+    /// `codecompass statusline` command). Default true - cheap, and harmless if unused. Env
+    /// CODECOMPASS_STATUS_LINE / config `statusLine`.</summary>
+    public static bool StatusLinePublish() => StatusLinePublish(_current);
+    public static bool StatusLinePublish(RepoConfig cfg) => EnvBool("CODECOMPASS_STATUS_LINE") ?? cfg.StatusLine ?? true;
 
     // Each knob has a pure overload taking an explicit RepoConfig (deterministic; used by tests and
     // tools) and an ambient no-arg overload that resolves against the active repo config.

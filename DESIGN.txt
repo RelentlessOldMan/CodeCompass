@@ -187,6 +187,42 @@ This is as important as the search itself, and it is where "smart" is earned.
 - A very large change (say a branch switch that rewrites most of the tree) can
   fall back to a full rebuild when that is faster than a huge incremental diff.
 
+- The watcher only covers changes made *while a session is running*. Changes made
+  outside a session - a Perforce/git sync with Claude closed, a branch switch in
+  another terminal - have no live event to catch them. So on startup, after loading
+  an existing index, the server RECONCILES it against the current tree in the
+  background (a stat-walk vs. the last snapshot), while the loaded index keeps
+  serving reads, then swaps atomically. This is gated: automatic for local repos
+  within the auto-index limit; deferred to a manual `codecompass update` for network
+  shares and huge repos, where a full-tree stat-walk is slow over SMB and the
+  watcher is unreliable anyway. The `autoReconcile` config / CODECOMPASS_AUTO_RECONCILE
+  env forces it on or off. This is the mechanism that catches "I synced while Claude
+  was closed" without making the user remember to reindex.
+
+
+Letting the user see what it's doing (status line)
+--------------------------------------------------
+
+Long operations - an initial background build, a startup reconcile - must be
+visible, not silent. The reliable channel to the agent is tool-result text (a
+search during a build returns a "still indexing NN%" message rather than
+blocking). For the *human*, CodeCompass can also publish to Claude Code's status
+line: `CodeCompass ✓ 48,000 files`, `… indexing 42%`, `↻ refreshing (external
+changes)…`.
+
+The wrinkle is that Claude Code's status line is a separate short-lived process
+that can't see the server's memory. So the state is bridged through a tiny
+per-repo `status.json` in the local cache: the server writes it on every state
+transition (best-effort, offloaded so it never stalls indexing), and the
+`codecompass statusline` command reads it and prints one compact segment. The
+command reads Claude's stdin JSON (`workspace.project_dir` / `cwd`) to know which
+repo it's in, resolves that repo's status file WITHOUT creating anything (it runs
+on every render, in every folder), and prints nothing when there's no status - so
+it's inert in repos we've never indexed. Claude Code has a single status-line
+slot; `--wrap "<cmd>"` composes with an existing one by forwarding the same stdin
+and appending our segment. Publishing is on by default and disabled with
+`statusLine: false` / CODECOMPASS_STATUS_LINE=0.
+
 
 How it saves tokens
 --------------------

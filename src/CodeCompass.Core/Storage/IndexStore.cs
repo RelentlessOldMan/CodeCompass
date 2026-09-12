@@ -26,10 +26,15 @@ public static class IndexStore
 
     public static string GetCacheDir(string repoRoot)
     {
-        var dir = Path.Combine(BaseDir(), RepoKey(repoRoot));
+        var dir = CacheDirPath(repoRoot);
         Directory.CreateDirectory(dir);
         return dir;
     }
+
+    /// <summary>The repo's cache directory path WITHOUT creating it. For read-only callers (e.g. the
+    /// status-line command, which runs on every render) so they don't litter the cache root with an
+    /// empty dir for every folder Claude visits.</summary>
+    public static string CacheDirPath(string repoRoot) => Path.Combine(BaseDir(), RepoKey(repoRoot));
 
     public static string IndexPath(string repoRoot) => Path.Combine(GetCacheDir(repoRoot), "trigram.idx");
 

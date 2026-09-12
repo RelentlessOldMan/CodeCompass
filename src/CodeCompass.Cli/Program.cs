@@ -33,6 +33,7 @@ return args.Length == 0
         "init" => CmdInit(args),
         "symstats" => CmdSymStats(args),
         "parsebench" => CmdParseBench(args),
+        "statusline" => CmdStatusline(args),
         "logs" => CmdLogs(),
         "version" or "--version" or "-v" => CmdVersion(),
         "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
@@ -63,6 +64,7 @@ static int Usage()
     Console.Error.WriteLine("  codecompass init    <path>               write a documented .codecompass.json (per-repo settings)");
     Console.Error.WriteLine("  codecompass symstats <path> [--full]     profile symbol-file sizes + parse cost per language");
     Console.Error.WriteLine("  codecompass parsebench                   tree-sitter parse-time vs size sweep (synthetic)");
+    Console.Error.WriteLine("  codecompass statusline [--wrap \"<cmd>\"]  Claude Code status line: shows index state (reads stdin JSON)");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
     Console.Error.WriteLine("  codecompass version                      print the build version");
     return 1;
@@ -238,6 +240,119 @@ static int CmdParseBench(string[] args)
     return 0;
 }
 
+// Claude Code status-line command. Claude runs this on every render, piping a small JSON object on
+// stdin (session_id, cwd, workspace.project_dir, model, ...). We read the repo's status file (written
+// by the MCP server) and print a compact segment like "CodeCompass ✓ 48,000 files". A separate
+// short-lived process can't see the server's memory, so the status is bridged through that file.
+//
+// --wrap "<cmd>": compose with an existing status line. We forward the SAME stdin JSON to <cmd>, print
+// its output, then append " | <our segment>". Claude Code has a single status-line slot, so this lets
+// a user keep their existing status line and still see CodeCompass.
+//
+// Contract: fast, silent on any error, and prints NOTHING (for our segment) when there's no status
+// file - so it's harmless in repos CodeCompass has never indexed.
+static int CmdStatusline(string[] args)
+{
+    // Claude Code reads this line as UTF-8; on Windows the console defaults to a legacy codepage that
+    // would mangle the status glyphs (✓ ↻ …). Force UTF-8 (best-effort - can throw if redirected oddly).
+    try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
+
+    string stdin = "";
+    try { stdin = Console.In.ReadToEnd(); } catch { /* no stdin piped */ }
+
+    // --wrap: run the user's existing status-line command first, forwarding the same stdin.
+    string? wrapped = null;
+    int wi = Array.FindIndex(args, a => a is "--wrap" or "-wrap");
+    if (wi >= 0 && wi + 1 < args.Length)
+    {
+        try { wrapped = RunWrapped(args[wi + 1], stdin)?.TrimEnd('\r', '\n'); }
+        catch { wrapped = null; }
+    }
+
+    string segment = "";
+    try
+    {
+        var root = RepoRootFromStatuslineJson(stdin);
+        if (root is not null)
+        {
+            var status = CodeCompass.Core.Storage.IndexStatusFile.Read(root);
+            if (status is not null) segment = $"CodeCompass {StatusIcon(status.State)} {status.Text}";
+        }
+    }
+    catch { /* status line must never fail loudly */ }
+
+    // Compose: wrapped output, then our segment (only when we have one).
+    string line = (wrapped, segment) switch
+    {
+        ({ Length: > 0 }, { Length: > 0 }) => $"{wrapped} | {segment}",
+        ({ Length: > 0 }, _) => wrapped!,
+        (_, { Length: > 0 }) => segment,
+        _ => "",
+    };
+    if (line.Length > 0) Console.WriteLine(line);
+    return 0;
+}
+
+static string StatusIcon(string state) => state switch
+{
+    "ready" => "✓",         // ✓
+    "building" => "…",      // …
+    "reconciling" => "↻",   // ↻
+    "needsCliBuild" => "⚠", // ⚠
+    _ => "•",               // •
+};
+
+// Determine the repo root Claude is in from the status-line stdin JSON. Prefer the workspace project
+// dir (repo root), fall back to the current dir, then this process's cwd.
+static string? RepoRootFromStatuslineJson(string json)
+{
+    try
+    {
+        if (!string.IsNullOrWhiteSpace(json))
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var r = doc.RootElement;
+            if (r.TryGetProperty("workspace", out var ws))
+            {
+                if (ws.TryGetProperty("project_dir", out var pd) && pd.ValueKind == System.Text.Json.JsonValueKind.String)
+                    return Path.GetFullPath(pd.GetString()!);
+                if (ws.TryGetProperty("current_dir", out var cd) && cd.ValueKind == System.Text.Json.JsonValueKind.String)
+                    return Path.GetFullPath(cd.GetString()!);
+            }
+            if (r.TryGetProperty("cwd", out var cwd) && cwd.ValueKind == System.Text.Json.JsonValueKind.String)
+                return Path.GetFullPath(cwd.GetString()!);
+        }
+    }
+    catch { /* not the expected shape */ }
+    return null;
+}
+
+// Run a user-supplied status-line command through the OS shell, forwarding Claude's stdin JSON, and
+// return its stdout. Best-effort with a short timeout so a slow/hung wrapped command can't stall the
+// whole status line.
+static string? RunWrapped(string command, string stdin)
+{
+    var psi = new ProcessStartInfo
+    {
+        FileName = OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh",
+        RedirectStandardInput = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+    };
+    if (OperatingSystem.IsWindows()) { psi.ArgumentList.Add("/c"); psi.ArgumentList.Add(command); }
+    else { psi.ArgumentList.Add("-c"); psi.ArgumentList.Add(command); }
+
+    using var p = Process.Start(psi);
+    if (p is null) return null;
+    try { p.StandardInput.Write(stdin); } catch { }
+    finally { try { p.StandardInput.Close(); } catch { } }
+    string outText = p.StandardOutput.ReadToEnd();
+    if (!p.WaitForExit(2000)) { try { p.Kill(entireProcessTree: true); } catch { } return null; }
+    return outText;
+}
+
 // Print the central log location and current log files - the one place to look when debugging.
 static int CmdLogs()
 {
@@ -336,7 +451,18 @@ static int CmdIndex(string[] args)
     Console.WriteLine($"Throughput: {throughput:F1} MB/s across {s.Cores} core(s)  ({perCore:F1} MB/s/core)");
     Console.WriteLine($"Trigram postings: {s.TrigramPostings:N0}   Symbols: {s.Symbols:N0}");
     Console.WriteLine($"Text index: {s.IndexBytes / (1024.0 * 1024.0):F1} MB ({ratio:F2}x corpus)");
+    PublishReady(root, (int)s.Files); // so the status line shows "ready" even before the MCP server loads
     return 0;
+}
+
+// Publish a "ready" status file so `codecompass statusline` reflects a freshly CLI-built index even
+// before the MCP server's first tool call loads it. Respects the same config gate as the server.
+static void PublishReady(string root, int files)
+{
+    CodeCompass.Core.Config.CodeCompassConfig.Load(root); // honor a repo's statusLine:false
+    if (!CodeCompass.Core.Config.CodeCompassConfig.StatusLinePublish()) return;
+    CodeCompass.Core.Storage.IndexStatusFile.Write(root,
+        new CodeCompass.Core.Storage.IndexStatus("ready", $"{files:N0} files", files));
 }
 
 static int CmdUpdate(string[] args)
@@ -364,6 +490,7 @@ static int CmdUpdate(string[] args)
         Console.WriteLine($"Updated in {s.Seconds:F2}s: +{s.Added} added, ~{s.Modified} modified, -{s.Removed} removed");
         Log.For(root).Info($"cli update: +{s.Added} ~{s.Modified} -{s.Removed} in {s.Seconds:F1}s");
     }
+    if (RepositoryIndexer.TryLoad(root, out var reloaded, out _)) { PublishReady(root, reloaded.DocumentCount); reloaded.Dispose(); }
     return 0;
 }
 
@@ -559,20 +686,7 @@ static int CmdHookContext()
     return 0;
 }
 
-// A UNC path (\\host\share\...) or a mapped network drive. Used to soften progress affordances that
-// assume fast local metadata (skip the pre-scan, warn that the file watcher may miss SMB changes).
-static bool IsNetworkPath(string fullPath)
-{
-    if (fullPath.StartsWith(@"\\", StringComparison.Ordinal)) return true;
-    try
-    {
-        var r = Path.GetPathRoot(fullPath);
-        if (!string.IsNullOrEmpty(r) && r.Length >= 2 && r[1] == ':')
-            return new DriveInfo(r).DriveType == DriveType.Network;
-    }
-    catch { /* unknown -> treat as local */ }
-    return false;
-}
+static bool IsNetworkPath(string fullPath) => CodeCompass.Core.Storage.NetworkPath.IsNetwork(fullPath);
 
 static string FormatEta(double seconds)
 {

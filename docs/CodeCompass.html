@@ -104,7 +104,8 @@ codecompass survey  &lt;path&gt;            report what the size caps skip + sug
 codecompass logs                      show the log folder and files
 codecompass version                   print the build version (e.g. 1.0.52+a76d3245)
 codecompass symstats &lt;path&gt;           profile symbol-file sizes + parse cost per language
-codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)</pre>
+codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)
+codecompass statusline [--wrap "..."] Claude Code status-line segment (index state)</pre>
 
 <h2>Tuning for huge or generated trees</h2>
 <p>Indexing is robust on ordinary source at scale. The one hazard is <i>large machine-generated files</i>. Tree-sitter parse
@@ -136,9 +137,24 @@ largest real symbol-bearing file and below the size where parsing gets slow.</p>
 <p>Every knob also lives in an optional <b><code>.codecompass.json</code></b> at the repo root, so settings travel with the
 repo (precedence: <b>env &rarr; config file &rarr; default</b>). Fields: <code>maxSymbolMb</code>, <code>maxFileMb</code>,
 <code>maxAutoMb</code>, <code>ignore</code> (directory names), <code>threads</code>, <code>segmentMb</code>,
-<code>compactSegments</code>, <code>stallWarnSec</code>, <code>readBudgetMb</code>. Run <code>codecompass survey &lt;path&gt;</code> first: it reports what
+<code>compactSegments</code>, <code>stallWarnSec</code>, <code>readBudgetMb</code>, <code>autoReconcile</code>, <code>statusLine</code>. Run <code>codecompass survey &lt;path&gt;</code> first: it reports what
 the caps skip, names the largest files, and suggests a change. It never auto-raises a cap;
 file size isn't a reliable signal of parse safety, so that call is left to the repo owner.</p>
+
+<h2>Staying fresh &amp; status line</h2>
+<p>While Claude is running, a file watcher keeps the index current. Changes made <i>outside</i> a session
+&mdash; a Perforce/git sync, a branch switch with Claude closed &mdash; have no watcher to catch them, so on
+startup the server <b>reconciles</b> the loaded index against the current tree (a stat-walk vs. the last
+snapshot) in the background, while the old index keeps serving, then swaps. Automatic for local repos within
+<code>maxAutoMb</code>; deferred to a manual <code>codecompass update</code> for network shares and huge repos
+(a full-tree stat-walk is slow over SMB and the watcher is unreliable there). Force it with
+<code>autoReconcile</code> / <code>CODECOMPASS_AUTO_RECONCILE</code> (<code>true</code>/<code>false</code>).</p>
+<p>CodeCompass can also show its state in Claude Code's status area &mdash; <code>CodeCompass &#10003; 48,000 files</code>,
+<code>&hellip; indexing 42%</code>, <code>&#8635; refreshing&hellip;</code>. The server publishes state to a tiny per-repo
+file; the <code>codecompass statusline</code> command reads it. Add to Claude Code's <code>settings.json</code>:
+<code>{ "statusLine": { "type": "command", "command": "codecompass statusline" } }</code>. There is a single
+status-line slot &mdash; keep an existing one with <code>--wrap "&lt;cmd&gt;"</code> (it forwards Claude's stdin and
+appends the CodeCompass segment). Off with <code>statusLine: false</code> / <code>CODECOMPASS_STATUS_LINE=0</code>.</p>
 
 <h2>Limitations</h2>
 <p>Worth knowing where the edges are &mdash; all are by design and all skips are logged, never silent:</p>

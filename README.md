@@ -86,6 +86,7 @@ codecompass survey  <path>            report what the size caps skip + suggest c
 codecompass init    <path>            write a documented .codecompass.json to edit
 codecompass symstats <path>           profile symbol-file sizes + parse cost per language
 codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)
+codecompass statusline [--wrap "<cmd>"]  Claude Code status-line segment (index state)
 codecompass logs                      show the log folder and files
 codecompass version                   print the build version (e.g. 1.0.52+a76d3245)
 ```
@@ -180,7 +181,7 @@ slow-to-parse shapes), and **`make-megacorpus.ps1`** (a >10 GB aggregate for sca
 Every knob above also lives in an optional **`.codecompass.json`** at the repo root, so settings
 travel with the repo instead of being set on every run. Precedence is **env var → config file →
 default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names),
-`threads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`.
+`threads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`, `autoReconcile`, `statusLine`.
 
 Don't hand-write it — run **`codecompass init <path>`** to drop a documented starter (every setting
 commented out, so it's all defaults until you edit; `//` comments and trailing commas are allowed).
@@ -197,6 +198,38 @@ reliable signal of parse safety (a valid 5 MB file parses fast, a degenerate one
 raising a cap is a judgement only the repo owner can make. Raising the symbol cap is safe from the
 data-blob crawl — above 1 MB, overwhelmingly numeric/hex files are auto-skipped for symbols by
 content (see *Tuning* above).
+
+## Staying fresh (out-of-session changes)
+
+While Claude is running, a file watcher keeps the index current incrementally. Changes made **outside**
+a session — a Perforce/git sync, a branch switch — have no watcher to catch them. On startup the MCP
+server **reconciles** the loaded index against the current tree (a stat-walk vs. the last snapshot) in
+the background, while the old index keeps serving, then swaps. This is automatic for **local repos
+within `maxAutoMb`**; for **network shares and huge repos** it's left to a manual `codecompass update`
+(a full-tree stat-walk is slow over SMB, and the watcher is unreliable there anyway). Override with
+`autoReconcile` (config) / `CODECOMPASS_AUTO_RECONCILE` (env): `true` = always, `false` = never.
+
+## Status line (optional)
+
+CodeCompass can show its index state in Claude Code's status area — `CodeCompass ✓ 48,000 files`,
+`… indexing 42%`, `↻ refreshing (external changes)…`, or `⚠ not indexed`. The MCP server publishes
+state to a tiny per-repo file on every transition; the `codecompass statusline` command reads it. Wire
+it up in Claude Code's `settings.json` (user or project scope):
+
+```json
+{ "statusLine": { "type": "command", "command": "codecompass statusline" } }
+```
+
+Claude Code has a **single** status-line slot. To keep an existing status line and still see
+CodeCompass, use `--wrap` — it runs your command (forwarding Claude's stdin) and appends the
+CodeCompass segment:
+
+```json
+{ "statusLine": { "type": "command", "command": "codecompass statusline --wrap \"my-existing-statusline\"" } }
+```
+
+The command is fast, never errors out loudly, and prints nothing for repos CodeCompass hasn't indexed.
+Turn publishing off with `statusLine: false` (config) / `CODECOMPASS_STATUS_LINE=0` (env).
 
 ## Performance
 

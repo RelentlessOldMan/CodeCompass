@@ -4,6 +4,7 @@ using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
+using CodeCompass.Core.Storage;
 using CodeCompass.Core.Symbols.Segments;
 using CodeCompass.Core.Walking;
 using CodeCompass.Semantics;
@@ -53,6 +54,11 @@ public static class ServerContext
     // The watcher must capture changes instead of writing them, so it doesn't race the rebuild
     // for the on-disk cache.
     private static bool _rebuilding;
+
+    // A startup reconcile (catching changes made outside the session, e.g. a Perforce sync) is
+    // running in the background while the loaded index keeps serving. Surfaced in the status line.
+    private static volatile bool _reconciling;
+    public static bool IsReconciling => _reconciling;
 
     public static string Root { get; private set; } = "";
 
@@ -154,6 +160,37 @@ public static class ServerContext
 
     private static string StatusMessage() => _state == IndexState.Building ? BuildingMessage() : CliBuildMessage();
 
+    // Publish the current state to the per-repo status file so `codecompass statusline` can show it in
+    // Claude Code's status area. Lock-free (defensive reads) and the write is offloaded to a background
+    // task, so it's safe to call from inside a lock and never stalls indexing/search. Best-effort.
+    private static void PublishStatus()
+    {
+        if (!CodeCompassConfig.StatusLinePublish()) return;
+        var state = _state;
+        bool reconciling = _reconciling;
+        var t = _text;
+        int files = 0;
+        try { files = t?.DocumentCount ?? 0; } catch { /* index may be mid-swap */ }
+        string root = Root;
+
+        string token, text;
+        if (reconciling) { token = "reconciling"; text = "refreshing (external changes)…"; }
+        else
+        {
+            switch (state)
+            {
+                case IndexState.Ready: token = "ready"; text = $"{files:N0} files"; break;
+                case IndexState.Building:
+                    long total = Interlocked.Read(ref _progressTotalBytes), done = Interlocked.Read(ref _progressBytes);
+                    text = total > 0 ? $"indexing {100.0 * done / total:F0}%" : "indexing…"; token = "building"; break;
+                case IndexState.NeedsCliBuild: token = "needsCliBuild"; text = "not indexed - run: codecompass index"; break;
+                default: token = "idle"; text = "idle"; break;
+            }
+        }
+        var status = new IndexStatus(token, text, files);
+        Task.Run(() => IndexStatusFile.Write(root, status));
+    }
+
     public static RoslynCSharpAnalyzer CSharp
     {
         get { lock (AnalyzerGate) { return _csharp ??= new RoslynCSharpAnalyzer(Root); } }
@@ -210,6 +247,7 @@ public static class ServerContext
             _state = IndexState.Ready;
         }
         finally { Rw.ExitWriteLock(); }
+        PublishStatus(); // now Ready (or reconciling, if a startup reconcile is still in flight)
     }
 
     public static void EnableLiveIndex(int debounceMs = 1000)
@@ -240,6 +278,10 @@ public static class ServerContext
                 try { _text = text; _symbols = symbols; _state = IndexState.Ready; }
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info($"loaded existing index ({text.DocumentCount:N0} files)");
+                PublishStatus(); // Ready
+                // Catch changes made while we weren't watching (a source-control sync, branch switch)
+                // by reconciling in the background - the gate/decision runs off-lock in MaybeReconcile.
+                Task.Run(MaybeReconcile);
                 return;
             }
 
@@ -251,6 +293,7 @@ public static class ServerContext
                 try { _state = IndexState.NeedsCliBuild; }
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info($"workspace over auto-index limit ({total / 1048576.0:F0} MB); deferring to CLI build");
+                PublishStatus(); // NeedsCliBuild
                 return;
             }
 
@@ -264,6 +307,7 @@ public static class ServerContext
             }
             finally { Rw.ExitWriteLock(); }
             Log.For(Root).Info($"background build started ({total / 1048576.0:F0} MB)");
+            PublishStatus(); // Building
             Task.Run(BackgroundBuild);
         }
         finally { Rw.ExitUpgradeableReadLock(); }
@@ -287,9 +331,61 @@ public static class ServerContext
             try { _state = IndexState.NeedsCliBuild; _pendingPaths.Clear(); _pendingReconcile = false; }
             finally { Rw.ExitWriteLock(); }
             Log.For(Root).Error("background build failed; falling back to CLI-build state", ex);
+            PublishStatus(); // NeedsCliBuild
         }
         finally { BuildGate.Release(); }
         if (ok) DrainPending();
+    }
+
+    // Runs on a background thread after an existing index loads. Decides (off-lock, so the size-check
+    // walk doesn't block queries) whether to reconcile external changes, then does it.
+    private static void MaybeReconcile()
+    {
+        try { if (ShouldAutoReconcile()) BackgroundReconcile(); }
+        catch (Exception ex) { Log.For(Root).Warn($"startup reconcile skipped: {ex.Message}"); }
+    }
+
+    // Auto-reconcile on startup? Tri-state config wins; default is "local and within the auto limit"
+    // (network shares and huge repos are left to a manual reindex - a full-tree stat-walk is slow over
+    // SMB, and the file watcher is unreliable there anyway).
+    private static bool ShouldAutoReconcile()
+    {
+        var cfg = CodeCompassConfig.AutoReconcile();
+        if (cfg == false) return false;
+        if (cfg == true) return true;
+        if (NetworkPath.IsNetwork(Root)) return false;
+        return !ExceedsAutoLimit(out _); // local only; the walk here is cheap on local disk
+    }
+
+    // Reconcile the loaded index against the current tree (picks up out-of-session changes), in the
+    // background, while the loaded index keeps serving reads. Mirrors BackgroundBuild's guard usage:
+    // _rebuilding makes the watcher capture (not apply) changes so it doesn't race the on-disk write.
+    private static void BackgroundReconcile()
+    {
+        Rw.EnterWriteLock();
+        try { _rebuilding = true; _reconciling = true; }
+        finally { Rw.ExitWriteLock(); }
+        PublishStatus(); // reconciling
+
+        BuildGate.Wait(); // serialize against a manual reindex / watcher rebuild
+        try
+        {
+            var u = RepositoryIndexer.Update(Root);
+            Swap(u.Text, u.Symbols);
+            if (u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild)
+                Log.For(Root).Info($"startup reconcile applied external changes: +{u.Stats.Added} ~{u.Stats.Modified} -{u.Stats.Removed}" +
+                                   (u.Stats.FullRebuild ? " (full rebuild)" : ""));
+        }
+        catch (Exception ex) { Log.For(Root).Error("startup reconcile failed; keeping the loaded index", ex); }
+        finally
+        {
+            BuildGate.Release();
+            Rw.EnterWriteLock();
+            try { _rebuilding = false; _reconciling = false; }
+            finally { Rw.ExitWriteLock(); }
+            PublishStatus(); // back to Ready (Swap published "reconciling" while the flag was still set)
+        }
+        DrainPending();
     }
 
     private static bool ExceedsAutoLimit(out long totalBytes)
