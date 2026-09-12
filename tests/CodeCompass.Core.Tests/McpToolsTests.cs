@@ -102,6 +102,29 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void FindDefinition_ReportsLineRange_AndInlinesSmallDefinition()
+    {
+        using var repo = NewIndexedRepo();
+        // Helper is a one-liner method inside Widget; there's exactly one definition, so find_definition
+        // reports a start-end range and inlines the source (saving the agent a follow-up file read).
+        var result = CodeCompassTools.FindDefinition("Helper");
+        Assert.Matches(@"src/Widget\.cs:\d+(-\d+)?:\d+: Method Helper", result); // range form
+        Assert.Contains("private void Helper()", result);                        // inlined source line
+        Assert.Contains(": ", result);                                           // "<n>: <code>" snippet prefix
+    }
+
+    [Fact]
+    public void FindDefinition_MultiLineClass_HasEndLineBeyondStart()
+    {
+        using var repo = NewIndexedRepo();
+        // Widget is a multi-line class -> its end line must be past its start (a real range, not a point).
+        var result = CodeCompassTools.FindDefinition("Widget");
+        var m = System.Text.RegularExpressions.Regex.Match(result, @"src/Widget\.cs:(\d+)-(\d+):");
+        Assert.True(m.Success, $"expected a start-end range for the class; got:\n{result}");
+        Assert.True(int.Parse(m.Groups[2].Value) > int.Parse(m.Groups[1].Value), "class end line must exceed start");
+    }
+
+    [Fact]
     public void SearchSymbols_SubstringCaseInsensitive()
     {
         using var repo = NewIndexedRepo();

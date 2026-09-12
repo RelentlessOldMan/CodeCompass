@@ -89,14 +89,43 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
         foreach (var capture in query.Execute(tree.RootNode).Captures)
         {
             var node = capture.Node;
+            int startRow = node.StartPosition.Row + 1;
             results.Add(new Symbol(
                 node.Text,
                 MapKind(capture.Name),
                 relativePath,
-                node.StartPosition.Row + 1,
-                node.StartPosition.Column + 1));
+                startRow,
+                node.StartPosition.Column + 1) { EndLine = DefinitionEndRow(node, startRow) });
         }
         return results;
+    }
+
+    // The query captures the NAME token (a single line). The definition's real extent is the enclosing
+    // declaration - across grammars its node type ends in "declaration" / "definition" / "specifier"
+    // (class_declaration, function_definition, struct_specifier, ...). Walk up a few levels to it and
+    // take its end row; fall back to the name's line if none is found (bounded, never throws).
+    private static int DefinitionEndRow(Node nameNode, int startRow)
+    {
+        try
+        {
+            var n = nameNode;
+            for (int hops = 0; hops < 6; hops++)
+            {
+                var parent = n.Parent;
+                if (parent is null) break;
+                var type = parent.Type;
+                if (type.EndsWith("declaration", StringComparison.Ordinal) ||
+                    type.EndsWith("definition", StringComparison.Ordinal) ||
+                    type.EndsWith("specifier", StringComparison.Ordinal))
+                {
+                    int end = parent.EndPosition.Row + 1;
+                    return end >= startRow ? end : startRow;
+                }
+                n = parent;
+            }
+        }
+        catch { /* grammar without Parent/Type info - fall back */ }
+        return startRow;
     }
 
     private (Language, Query)? GetOrLoad(LanguageDefinition def)

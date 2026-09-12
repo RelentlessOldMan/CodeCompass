@@ -79,7 +79,7 @@ codecompass index   <path>            build the index (shows progress + ETA)
 codecompass update  <path>            incremental reindex of changes
 codecompass watch   <path>            auto-reindex on file changes
 codecompass search  <path> <query>    literal text search  -> file:line:col
-codecompass def     <path> <name>     go-to-definition
+codecompass def     <path> <name>     go-to-definition (file:startLine-endLine)
 codecompass refs    <path> <name>     references (semantic C#/C++, lexical elsewhere)
 codecompass symbols <path> <substr>   symbol-name search
 codecompass survey  <path>            report what the size caps skip + suggest config

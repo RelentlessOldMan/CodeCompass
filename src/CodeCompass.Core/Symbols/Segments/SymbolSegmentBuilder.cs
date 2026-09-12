@@ -7,15 +7,15 @@ namespace CodeCompass.Core.Symbols.Segments;
 /// the symbol index doesn't have to live in RAM. Columnar layout enables binary search by
 /// name (find_definition) and a cheap sequential name scan (search_symbols) via mmap.
 ///
-/// Layout (little-endian): header, then name offsets, kinds, pathIds, lines, cols, the
+/// Layout (little-endian): header, then name offsets, kinds, pathIds, lines, endLines, cols, the
 /// UTF-8 name blob (symbol order = name-sorted), path offsets, and the UTF-8 path blob
 /// (path-sorted so ContainsPath is binary-searchable).
 /// </summary>
 public sealed class SymbolSegmentBuilder
 {
     internal const uint Magic = 0x59535343; // "CCSY"
-    internal const int Version = 1;
-    internal const int HeaderSize = 16 + 8 * 8;
+    internal const int Version = 2;         // v2 added the endLines column (definition end line)
+    internal const int HeaderSize = 16 + 9 * 8;
 
     private readonly List<Symbol> _symbols = new();
 
@@ -49,7 +49,8 @@ public sealed class SymbolSegmentBuilder
         long kindsOff = nameOffsetsOff + (long)(n + 1) * 4;
         long pathIdsOff = kindsOff + n;
         long linesOff = pathIdsOff + (long)n * 4;
-        long colsOff = linesOff + (long)n * 4;
+        long endLinesOff = linesOff + (long)n * 4;
+        long colsOff = endLinesOff + (long)n * 4;
         long nameBlobOff = colsOff + (long)n * 4;
         long pathOffsetsOff = nameBlobOff + nameBlobLen;
         long pathBlobOff = pathOffsetsOff + (long)(paths.Length + 1) * 4;
@@ -65,6 +66,7 @@ public sealed class SymbolSegmentBuilder
         w.Write(kindsOff);
         w.Write(pathIdsOff);
         w.Write(linesOff);
+        w.Write(endLinesOff);
         w.Write(colsOff);
         w.Write(nameBlobOff);
         w.Write(pathOffsetsOff);
@@ -77,6 +79,7 @@ public sealed class SymbolSegmentBuilder
         for (int i = 0; i < n; i++) w.Write((byte)syms[i].Kind);
         for (int i = 0; i < n; i++) w.Write(pathId[syms[i].RelativePath]);
         for (int i = 0; i < n; i++) w.Write(syms[i].Line);
+        for (int i = 0; i < n; i++) w.Write(syms[i].EndLine);
         for (int i = 0; i < n; i++) w.Write(syms[i].Column);
         for (int i = 0; i < n; i++) w.Write(nameBytes[i]);
 

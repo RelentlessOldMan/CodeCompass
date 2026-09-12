@@ -47,7 +47,8 @@ public static class CodeCompassTools
 
     [McpServerTool(Name = "find_definition")]
     [Description("Find where a symbol (class, method, function, type, etc.) is defined, by exact name. " +
-                 "Returns 'file:line:col: Kind Name'. Use this for go-to-definition instead of searching files.")]
+                 "Returns 'file:startLine-endLine: Kind Name'; for a single small definition it also " +
+                 "inlines the source so you don't need to open the file. Use this for go-to-definition.")]
     public static string FindDefinition(
         [Description("Exact symbol name (case-sensitive).")] string name)
         => ServerContext.Query((_, symbols) =>
@@ -56,10 +57,51 @@ public static class CodeCompassTools
         if (matches.Count == 0) return $"No definition found for \"{name}\".";
 
         var sb = new StringBuilder();
-        foreach (var s in matches) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
-        sb.Append($"({matches.Count} definition(s))");
+        foreach (var s in matches)
+        {
+            string loc = s.EndLine > s.Line ? $"{s.RelativePath}:{s.Line}-{s.EndLine}" : $"{s.RelativePath}:{s.Line}";
+            sb.AppendLine($"{loc}:{s.Column}: {s.Kind} {s.Name}");
+        }
+
+        // Save the agent a follow-up file read: if there's exactly one match and it's small, inline the
+        // definition source right here. Bounded (<= SnippetMaxLines) so the tool result stays cheap.
+        if (matches.Count == 1)
+        {
+            var s = matches[0];
+            var snippet = TryReadSnippet(s.RelativePath, s.Line, s.EndLine > s.Line ? s.EndLine : s.Line);
+            if (snippet is not null) { sb.AppendLine(); sb.Append(snippet); }
+        }
+        else sb.Append($"({matches.Count} definitions)");
         return sb.ToString();
     });
+
+    private const int SnippetMaxLines = 40;
+
+    // Read lines [startLine..endLine] (1-based, inclusive) of a repo file for inline display, but only
+    // for a small span. Returns null if too big, unreadable, or the file is huge (never materialize a
+    // big/streamed file for a snippet). Best-effort - a missing snippet just means "open the file".
+    private static string? TryReadSnippet(string relPath, int startLine, int endLine)
+    {
+        try
+        {
+            if (endLine < startLine) return null;
+            if (endLine - startLine + 1 > SnippetMaxLines) return null; // too big to inline
+            var full = System.IO.Path.Combine(ServerContext.Root, relPath.Replace('/', System.IO.Path.DirectorySeparatorChar));
+            var info = new System.IO.FileInfo(full);
+            if (!info.Exists || info.Length > 8L * 1024 * 1024) return null; // don't crack open large files
+            var sb = new StringBuilder();
+            int n = 0;
+            foreach (var line in System.IO.File.ReadLines(full))
+            {
+                n++;
+                if (n < startLine) continue;
+                if (n > endLine) break;
+                sb.Append(n).Append(": ").AppendLine(line);
+            }
+            return sb.Length > 0 ? sb.ToString() : null;
+        }
+        catch { return null; }
+    }
 
     [McpServerTool(Name = "find_references")]
     [Description("Find where a symbol is used across the codebase. For C# (Roslyn) and C/C++ (clang) " +

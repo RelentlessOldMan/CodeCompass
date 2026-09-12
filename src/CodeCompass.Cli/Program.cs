@@ -820,7 +820,12 @@ static int CmdDef(string[] args)
 
     var matches = symbols.FindByName(name);
     foreach (var symbol in matches)
-        Console.WriteLine($"{symbol.RelativePath}:{symbol.Line}:{symbol.Column}: {symbol.Kind} {symbol.Name}");
+    {
+        string loc = symbol.EndLine > symbol.Line
+            ? $"{symbol.RelativePath}:{symbol.Line}-{symbol.EndLine}"
+            : $"{symbol.RelativePath}:{symbol.Line}";
+        Console.WriteLine($"{loc}:{symbol.Column}: {symbol.Kind} {symbol.Name}");
+    }
     Console.Error.WriteLine($"-- {matches.Count} definition(s)");
     return 0;
 }

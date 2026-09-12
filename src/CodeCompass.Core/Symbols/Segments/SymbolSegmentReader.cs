@@ -12,7 +12,7 @@ public sealed class SymbolSegmentReader : IDisposable
 {
     private readonly MemoryMappedFile _mmf;
     private readonly MemoryMappedViewAccessor _view;
-    private readonly long _nameOffsetsOff, _kindsOff, _pathIdsOff, _linesOff, _colsOff, _nameBlobOff, _pathOffsetsOff, _pathBlobOff;
+    private readonly long _nameOffsetsOff, _kindsOff, _pathIdsOff, _linesOff, _endLinesOff, _colsOff, _nameBlobOff, _pathOffsetsOff, _pathBlobOff;
 
     public int Count { get; }
     public int PathCount { get; }
@@ -32,16 +32,17 @@ public sealed class SymbolSegmentReader : IDisposable
         _kindsOff = _view.ReadInt64(24);
         _pathIdsOff = _view.ReadInt64(32);
         _linesOff = _view.ReadInt64(40);
-        _colsOff = _view.ReadInt64(48);
-        _nameBlobOff = _view.ReadInt64(56);
-        _pathOffsetsOff = _view.ReadInt64(64);
-        _pathBlobOff = _view.ReadInt64(72);
+        _endLinesOff = _view.ReadInt64(48);
+        _colsOff = _view.ReadInt64(56);
+        _nameBlobOff = _view.ReadInt64(64);
+        _pathOffsetsOff = _view.ReadInt64(72);
+        _pathBlobOff = _view.ReadInt64(80);
 
         // Reject a structurally-corrupt/tampered segment at open so callers rebuild.
         long cap = _view.Capacity;
         if (Count < 0 || PathCount < 0 || _nameOffsetsOff < 0 || _kindsOff < _nameOffsetsOff ||
-            _pathIdsOff < _kindsOff || _linesOff < _pathIdsOff || _colsOff < _linesOff ||
-            _nameBlobOff < _colsOff || _pathOffsetsOff < _nameBlobOff ||
+            _pathIdsOff < _kindsOff || _linesOff < _pathIdsOff || _endLinesOff < _linesOff ||
+            _colsOff < _endLinesOff || _nameBlobOff < _colsOff || _pathOffsetsOff < _nameBlobOff ||
             _pathBlobOff < _pathOffsetsOff || _pathBlobOff > cap)
             throw new InvalidDataException("corrupt CodeCompass symbol segment (bad section offsets)");
     }
@@ -58,8 +59,9 @@ public sealed class SymbolSegmentReader : IDisposable
         var kind = (SymbolKind)_view.ReadByte(_kindsOff + i);
         int pid = _view.ReadInt32(_pathIdsOff + (long)i * 4);
         int line = _view.ReadInt32(_linesOff + (long)i * 4);
+        int endLine = _view.ReadInt32(_endLinesOff + (long)i * 4);
         int col = _view.ReadInt32(_colsOff + (long)i * 4);
-        return new Symbol(GetName(i), kind, ReadPath(pid), line, col);
+        return new Symbol(GetName(i), kind, ReadPath(pid), line, col) { EndLine = endLine };
     }
 
     public string GetSymbolPath(int i) => ReadPath(_view.ReadInt32(_pathIdsOff + (long)i * 4));
