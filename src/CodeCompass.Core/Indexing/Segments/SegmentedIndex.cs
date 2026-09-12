@@ -161,16 +161,26 @@ public sealed class SegmentedIndex : IDisposable
             }
             else
             {
-                List<int>? acc = null;
+                // Fetch every query trigram's posting list, then intersect from the RAREST (shortest)
+                // list first. The running candidate set can never grow past the smallest input, so
+                // ordering by selectivity minimizes comparisons - and, since candidates are what we
+                // then read to verify, it also minimizes file reads. A missing trigram => no matches.
+                // (Result is identical to any intersection order; this only changes the work done.)
+                var lists = new int[tris.Length][];
                 bool absent = false;
-                foreach (var t in tris)
+                for (int k = 0; k < tris.Length; k++)
                 {
-                    var postings = seg.GetPostings(t);
+                    var postings = seg.GetPostings(tris[k]);
                     if (postings is null) { absent = true; break; }
-                    acc = acc is null ? new List<int>(postings) : Intersect(acc, postings);
-                    if (acc.Count == 0) { absent = true; break; }
+                    lists[k] = postings;
                 }
-                if (absent || acc is null) continue;
+                if (absent) continue;
+
+                Array.Sort(lists, static (x, y) => x.Length.CompareTo(y.Length)); // rarest first
+                var acc = new List<int>(lists[0]);
+                for (int k = 1; k < lists.Length && acc.Count > 0; k++)
+                    acc = Intersect(acc, lists[k]);
+                if (acc.Count == 0) continue;
                 candidates = acc;
             }
 

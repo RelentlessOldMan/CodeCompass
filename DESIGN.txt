@@ -135,6 +135,19 @@ The intelligence layers, cheapest first:
   fraction of the corpus in RAM, because the bulk lives in memory-mapped files
   on the SSD rather than in memory. Pure CPU, no model.
 
+  A query is broken into trigrams; a document is a candidate only if it holds
+  ALL of them, so search intersects the per-trigram posting lists and then reads
+  only the surviving candidates to confirm and get line:col. The intersection
+  fetches every trigram's list first, then intersects starting from the RAREST
+  (shortest) one - the running set can't grow past the smallest input, and if
+  any trigram is absent the whole segment is skipped before any intersection
+  work. This is invisible on ordinary queries (dominated by reading candidate
+  files) but a large win on the pathological case that matters at scale: a
+  specific long identifier in a huge generated-code repo, whose leading trigrams
+  are near-universal but whose conjunction is rare - measured ~35% faster than
+  query-order intersection on a 100k-file synthetic of exactly that shape, and
+  the margin grows with document count.
+
 - Syntactic layer (all languages). Tree-sitter parses every supported language
   into a syntax tree, giving us symbol names, definitions, and clean chunk
   boundaries. This is what makes Python, MATLAB, and the long tail useful, and
