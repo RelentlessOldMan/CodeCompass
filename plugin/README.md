@@ -15,7 +15,23 @@ MCP tools (returned as precise `file:line:col` results, not whole files):
 - `reindex` — rebuild the index after large external changes
 
 The index builds on first use, then **auto-updates** as files change (debounced,
-content-hash verified, ignores build output).
+content-hash verified, ignores build output). Changes made *outside* a session (a
+Perforce/git sync with Claude closed) are picked up by a background **reconcile** on
+startup — automatic for local repos, deferred to `codecompass update` on network
+shares / huge repos (`autoReconcile` config to force it).
+
+## Status line (optional)
+
+Show the index state in Claude Code's status area via `settings.json`:
+
+```json
+{ "statusLine": { "type": "command", "command": "codecompass statusline" } }
+```
+
+The bare command renders a self-contained line — `<model> · <cwd> · CodeCompass ✓ N
+files` — since a custom status line replaces Claude's default. Already have your own
+status line? Use `codecompass statusline --wrap "<your-command>"` to keep it and
+append only the CodeCompass segment. See the main README for details.
 
 ## Enforcement
 
