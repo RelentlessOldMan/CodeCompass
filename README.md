@@ -35,7 +35,7 @@ editing it keeps just the changed files in memory. This is what lets an 87 GB re
 | Runs fully local, no GPU, no cloud | ✅ Yes |
 | Dozens-of-GB repos without exhausting RAM | ✅ indexes are memory-mapped on disk |
 | MATLAB / other unlisted languages | Lexical only (text search works; no symbols) |
-| Very large files | >5 MB skipped from the index; >1 MB skipped from symbols but still text-searchable (both tunable) |
+| Very large files | Indexed up to **2 GB** (streamed above ~128 MB, bounded memory); symbols skipped above 1 MB but still text-searchable (both tunable) |
 | C/C++ find-references precision | Best-effort without a `compile_commands.json` |
 | Semantic "meaning" / embedding search | ❌ No (deliberately — needs a model; weaker for real code nav) |
 
@@ -78,6 +78,28 @@ In a session, run `/mcp` to confirm the **codecompass** server is connected. A `
 redirects `Grep`/`Glob` to CodeCompass so the agent uses the index instead of scanning files (set
 `CODECOMPASS_ENFORCE=0` to allow grep again). Large workspaces aren't auto-indexed inside a tool
 call — CodeCompass tells you to build the index once from a terminal, then serves it and keeps it fresh.
+
+## Quick start (first run)
+
+1. **Install** the plugin (above) and open Claude Code in your repo.
+2. Run **`/mcp`** — confirm `codecompass` is connected.
+3. **Just work normally.** Ask Claude to find things, jump to definitions, or trace usages; the hook
+   steers it onto CodeCompass automatically. A small/medium repo is indexed in the background on first
+   use (a tool call may briefly report "indexing… N%" — retry in a moment).
+4. **Big repo?** If a tool says the workspace is large, build the index once from a terminal:
+   `codecompass index "C:\path\to\repo"` (shows progress + ETA), then it serves and self-updates.
+5. **Sanity check from the terminal** (optional):
+   ```
+   codecompass def    "C:\path\to\repo" SomeClassName     # -> file:startLine-endLine (+ inlined if small)
+   codecompass search "C:\path\to\repo" "some text" -i    # -i = case-insensitive
+   codecompass doctor "C:\path\to\repo"                   # health + what's indexed
+   ```
+
+**Day to day:** while a session is open, edits re-index automatically; changes made *outside* a session
+(a branch switch, a source-control sync with Claude closed) are picked up by a background reconcile on
+startup for local repos, or a manual `codecompass update "<repo>"` for network shares / huge repos.
+Hit something odd? `codecompass doctor "<repo>"`; filing a bug? `codecompass report "<repo>"` zips
+diagnostics + logs (never your source).
 
 ## Command line
 

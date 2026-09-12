@@ -64,6 +64,15 @@ step 3.
 
 3. In a session, run `/mcp` to confirm the `codecompass` server is connected.
 
+## First use
+
+Just work normally — ask Claude to find code, jump to definitions, or trace usages, and the hook
+routes it onto CodeCompass. A small/medium repo indexes in the background on first use (a tool may
+briefly say "indexing… N%"). For a **large** repo, build the index once from a terminal —
+`codecompass index "C:\path\to\repo"` — then it serves and self-updates. Diagnose with
+`codecompass doctor "<repo>"`; bundle a bug report (diagnostics + logs, never source) with
+`codecompass report "<repo>"`.
+
 ## Notes
 
 - Windows x64. The published `bin/` is a build artifact (gitignored); run
