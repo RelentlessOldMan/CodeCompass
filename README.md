@@ -161,11 +161,18 @@ Two tiers, both driven by one script — **`check.ps1`**:
 - **`./check.ps1 -Big`** — unit tests **plus** the heavy large-file scenarios, with pass/fail
   assertions: it generates a register-map header (default 0.3 GB; `-SizeGB 2` for the full run),
   confirms it streams-indexes without hanging, that a marker near EOF is found at the right line via
-  the block/positional index, and that a broad query reports truncation; then confirms the
-  nested-template "pathological" files index without hanging at the default cap. Exits non-zero on any
-  failure — this is the **before-you-push** check.
+  the block/positional index, and that a broad query reports truncation; then re-runs the same file
+  with the **network path faked on** (`CODECOMPASS_FORCE_NETWORK=1`) to confirm indexing skips the
+  pre-scan and the positional search still finds the marker; then confirms the nested-template
+  "pathological" files index without hanging at the default cap. Exits non-zero on any failure — this
+  is the **before-you-push** check.
 - **`./check.ps1 -Big -Fetch`** — also fetches the pinned real repos and runs the correctness bench
   (needs network; large).
+- **`./check.ps1 -Network \\host\share\scratch`** — the real-SMB counterpart to the faked-network
+  check above (run by hand; not part of the push gate). Point it at **any writable network location** —
+  it generates its own corpus in a `codecompass-nettest` subdir there, indexes it over the wire,
+  asserts the positional search finds the EOF marker, and removes the corpus afterward. No pre-existing
+  repo or manual setup needed.
 
 Run it automatically before every push: **`./check.ps1 -InstallHook`** (points git at the tracked
 `.githooks/pre-push`, which runs `./check.ps1 -Big` and aborts the push on failure). Bypass a single
