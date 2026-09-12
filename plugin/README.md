@@ -42,6 +42,12 @@ To allow `grep` again, set the environment variable `CODECOMPASS_ENFORCE=0`.
 
 ## Install
 
+**Prebuilt (no .NET needed):** download the latest `codecompass-plugin-<version>-win-x64.zip`
+from the repo's Releases page, unzip it, and run `/plugin add "<unzipped-folder>"`. Then skip to
+step 3.
+
+**From source:**
+
 1. Build the self-contained binaries (needs the .NET 8 SDK; the *result* needs no
    .NET on the target machine):
 

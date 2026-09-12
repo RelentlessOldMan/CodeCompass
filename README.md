@@ -48,13 +48,12 @@ entire standing per-session cost: `search_code`, `find_definition`, `find_refere
 
 ## Install
 
-Requires the .NET 8 SDK to *build*; the produced binaries are self-contained (no .NET needed to run
-them). Windows x64.
+**Option A — prebuilt release (no .NET needed).** Download the latest
+`codecompass-plugin-<version>-win-x64.zip` from the [Releases](../../releases) page, unzip it, and in
+Claude Code run `/plugin add "<unzipped-folder>"`. The binaries are self-contained Windows x64.
 
-> **Windows on ARM (Snapdragon):** there's no separate ARM build and you don't need one — the x64
-> binaries run on Windows 11 on ARM via its built-in x64 emulation (the whole process, native
-> dependencies included, runs emulated). Searches stay effectively instant; only the initial index
-> build runs somewhat slower than on native x64.
+**Option B — build from source.** Requires the .NET 8 SDK to *build*; the produced binaries are
+self-contained.
 
 ```powershell
 pwsh ./build-plugin.ps1      # publishes self-contained binaries into plugin/bin
@@ -66,6 +65,14 @@ Then load it into Claude Code:
 claude --plugin-dir "<path>/plugin"     # one session
 /plugin add "<path>/plugin"             # persistent (run inside Claude Code)
 ```
+
+> **Windows on ARM (Snapdragon):** there's no separate ARM build and you don't need one — the x64
+> binaries run on Windows 11 on ARM via its built-in x64 emulation (the whole process, native
+> dependencies included, runs emulated). Searches stay effectively instant; only the initial index
+> build runs somewhat slower than on native x64.
+
+> **Maintainer:** cut a release with `pwsh ./make-release.ps1 -Publish` (builds the zip and uploads it
+> to a GitHub Release tagged `v<version>` via the `gh` CLI). Without `-Publish` it just builds the zip.
 
 In a session, run `/mcp` to confirm the **codecompass** server is connected. A `PreToolUse` hook
 redirects `Grep`/`Glob` to CodeCompass so the agent uses the index instead of scanning files (set

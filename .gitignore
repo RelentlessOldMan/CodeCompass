@@ -486,6 +486,9 @@ $RECYCLE.BIN/
 # CodeCompass built plugin binaries (produced by build-plugin.ps1)
 plugin/bin/
 
+# Release zips (produced by make-release.ps1; uploaded to GitHub Releases, not committed)
+codecompass-plugin-*.zip
+
 # Benchmark corpus cache and run results (build artifacts)
 .corpus/
 bench/results/
