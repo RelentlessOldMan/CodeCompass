@@ -60,7 +60,7 @@ static int Usage()
     Console.Error.WriteLine("  codecompass index   <path>               (re)build the full index");
     Console.Error.WriteLine("  codecompass update  <path>               incremental reindex of changes");
     Console.Error.WriteLine("  codecompass watch   <path>               auto-reindex on file changes");
-    Console.Error.WriteLine("  codecompass search  <path> <query>       literal text search");
+    Console.Error.WriteLine("  codecompass search  <path> <query> [-i]  literal text search (-i = case-insensitive)");
     Console.Error.WriteLine("  codecompass def     <path> <name>        exact symbol definition(s)");
     Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
     Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#/C++, lexical elsewhere)");
@@ -792,13 +792,14 @@ static int CmdSearch(string[] args)
 {
     if (args.Length < 3) return Usage();
     var root = Path.GetFullPath(args[1]);
-    var query = string.Join(' ', args.Skip(2));
+    bool ignoreCase = args.Any(a => a is "-i" or "--ignore-case");
+    var query = string.Join(' ', args.Skip(2).Where(a => a is not ("-i" or "--ignore-case")));
 
     if (!RepositoryIndexer.TryLoad(root, out var index, out _)) return NoIndex(root);
 
     const int cap = 200;
     var sw = Stopwatch.StartNew();
-    var matches = index.Search(query, cap + 1); // one extra to detect truncation
+    var matches = index.Search(query, cap + 1, caseSensitive: !ignoreCase); // one extra to detect truncation
     sw.Stop();
 
     bool truncated = matches.Count > cap;

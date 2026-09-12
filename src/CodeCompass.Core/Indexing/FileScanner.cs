@@ -14,10 +14,10 @@ public static class FileScanner
     /// and column, up to maxResults.</summary>
     /// <param name="lineOffset">Added to reported line numbers. Used when scanning a block that starts
     /// partway into a file (the block's first line is file line <c>lineOffset + 1</c>).</param>
-    public static void ScanText(string rel, string text, string query, List<SearchMatch> results, int maxResults, int lineOffset = 0)
+    public static void ScanText(string rel, string text, string query, List<SearchMatch> results, int maxResults, int lineOffset = 0, StringComparison comparison = StringComparison.Ordinal)
     {
         int line = 1, lineStart = 0, scanned = 0, idx;
-        while ((idx = text.IndexOf(query, scanned, StringComparison.Ordinal)) >= 0)
+        while ((idx = text.IndexOf(query, scanned, comparison)) >= 0)
         {
             for (int k = scanned; k < idx; k++)
                 if (text[k] == '\n') { line++; lineStart = k + 1; }
@@ -36,7 +36,7 @@ public static class FileScanner
     /// works on files far larger than a single .NET string can hold. Matches <see cref="ScanText"/>
     /// for single-line queries; a query containing a newline won't be found by this path (rare, and
     /// only affects files large enough to require streaming).</summary>
-    public static void ScanByLine(string rel, string fullPath, string query, List<SearchMatch> results, int maxResults)
+    public static void ScanByLine(string rel, string fullPath, string query, List<SearchMatch> results, int maxResults, StringComparison comparison = StringComparison.Ordinal)
     {
         int line = 0;
         IEnumerable<string> lines;
@@ -47,7 +47,7 @@ public static class FileScanner
             line++;
             var lineText = raw.TrimEnd('\r');
             int from = 0, idx;
-            while ((idx = lineText.IndexOf(query, from, StringComparison.Ordinal)) >= 0)
+            while ((idx = lineText.IndexOf(query, from, comparison)) >= 0)
             {
                 results.Add(new SearchMatch(rel, line, idx + 1, lineText));
                 if (results.Count >= maxResults) return;

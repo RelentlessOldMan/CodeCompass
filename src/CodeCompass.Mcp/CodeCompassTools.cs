@@ -18,17 +18,19 @@ namespace CodeCompass.Mcp;
 public static class CodeCompassTools
 {
     [McpServerTool(Name = "search_code")]
-    [Description("Search the indexed codebase for a literal text/substring (case-sensitive). " +
-                 "Returns ranked 'file:line:col: matched line' results. Prefer this over grep or " +
-                 "reading whole files - it is faster and returns only the relevant lines.")]
+    [Description("Search the indexed codebase for a literal text/substring. Case-sensitive by default; " +
+                 "set caseSensitive=false to match any case. Returns ranked 'file:line:col: matched " +
+                 "line' results. Prefer this over grep or reading whole files - it is faster and " +
+                 "returns only the relevant lines.")]
     public static string SearchCode(
-        [Description("Literal substring to find (case-sensitive).")] string query,
-        [Description("Maximum number of results.")] int maxResults = 50)
+        [Description("Literal substring to find.")] string query,
+        [Description("Maximum number of results.")] int maxResults = 50,
+        [Description("Whether the match is case-sensitive (default true). Set false to match any case.")] bool caseSensitive = true)
         => ServerContext.Query((text, _) =>
     {
         // Fetch one extra to detect truncation: if we get maxResults+1 back, there are more than we
         // show, so tell the agent to narrow rather than trust this as the complete set.
-        var matches = text.Search(query, maxResults + 1);
+        var matches = text.Search(query, maxResults + 1, caseSensitive);
         if (matches.Count == 0) return $"No matches for \"{query}\".";
 
         bool truncated = matches.Count > maxResults;

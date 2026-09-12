@@ -78,7 +78,7 @@ call — CodeCompass tells you to build the index once from a terminal, then ser
 codecompass index   <path>            build the index (shows progress + ETA)
 codecompass update  <path>            incremental reindex of changes
 codecompass watch   <path>            auto-reindex on file changes
-codecompass search  <path> <query>    literal text search  -> file:line:col
+codecompass search  <path> <query> [-i]  literal text search (-i = case-insensitive)
 codecompass def     <path> <name>     go-to-definition (file:startLine-endLine)
 codecompass refs    <path> <name>     references (semantic C#/C++, lexical elsewhere)
 codecompass symbols <path> <substr>   symbol-name search

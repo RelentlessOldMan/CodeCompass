@@ -141,13 +141,17 @@ public sealed class SegmentedIndex : IDisposable
         _pathToDoc.Remove(relPath);
     }
 
-    public IReadOnlyList<SearchMatch> Search(string query, int maxResults = 200)
+    public IReadOnlyList<SearchMatch> Search(string query, int maxResults = 200, bool caseSensitive = true)
     {
         var results = new List<SearchMatch>();
         if (string.IsNullOrEmpty(query)) return results;
         if (_pending is { DocCount: > 0 }) FlushPending();
 
-        long[] tris = query.Length >= 3 ? TrigramIndex.ComputeTrigrams(query) : System.Array.Empty<long>();
+        var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        // Each "group" is the set of trigram keys that satisfy one query position: a single exact key
+        // when case-sensitive, or every case variant of the folded trigram when case-insensitive (so
+        // the candidate step matches any-case occurrences; the OrdinalIgnoreCase verify then confirms).
+        var groups = query.Length >= 3 ? BuildTrigramGroups(query, caseSensitive) : null;
 
         for (int segId = 0; segId < _segments.Count; segId++)
         {
@@ -155,24 +159,22 @@ public sealed class SegmentedIndex : IDisposable
             _tombstones.TryGetValue(segId, out var tomb);
 
             IEnumerable<int> candidates;
-            if (tris.Length == 0)
+            if (groups is null)
             {
                 candidates = Enumerable.Range(0, seg.DocCount);
             }
             else
             {
-                // Fetch every query trigram's posting list, then intersect from the RAREST (shortest)
-                // list first. The running candidate set can never grow past the smallest input, so
-                // ordering by selectivity minimizes comparisons - and, since candidates are what we
-                // then read to verify, it also minimizes file reads. A missing trigram => no matches.
-                // (Result is identical to any intersection order; this only changes the work done.)
-                var lists = new int[tris.Length][];
+                // Union each group's posting lists, then intersect from the RAREST (shortest) union
+                // first. The running set can't grow past the smallest input, so selectivity ordering
+                // minimizes comparisons and downstream file reads; any absent group => no matches.
+                var lists = new int[groups.Count][];
                 bool absent = false;
-                for (int k = 0; k < tris.Length; k++)
+                for (int k = 0; k < groups.Count; k++)
                 {
-                    var postings = seg.GetPostings(tris[k]);
-                    if (postings is null) { absent = true; break; }
-                    lists[k] = postings;
+                    var union = UnionPostings(seg, groups[k]);
+                    if (union is null || union.Length == 0) { absent = true; break; }
+                    lists[k] = union;
                 }
                 if (absent) continue;
 
@@ -199,22 +201,85 @@ public sealed class SegmentedIndex : IDisposable
                 try { size = new FileInfo(full).Length; } catch { }
                 if (size >= LargeFileIndexer.StreamThresholdBytes)
                 {
-                    // Prefer the positional sidecar (reads only candidate blocks); fall back to a
-                    // whole-file line scan if it's missing/invalid (e.g. a non-UTF-8 large file).
-                    if (!PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults))
-                        FileScanner.ScanByLine(rel, full, query, results, maxResults);
+                    // The positional sidecar's per-block Bloom filters are case-sensitive, so use it only
+                    // for the (default) case-sensitive path; a case-insensitive search into a huge file
+                    // falls back to a bounded whole-file line scan (correct, just no block-skipping - a
+                    // rare edge case). Prefer the sidecar; fall back if missing/invalid/non-UTF-8.
+                    if (!(caseSensitive && PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults)))
+                        FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison);
                 }
                 else
                 {
                     string text;
                     try { text = File.ReadAllText(full); }
                     catch { continue; }
-                    FileScanner.ScanText(rel, text, query, results, maxResults);
+                    FileScanner.ScanText(rel, text, query, results, maxResults, 0, comparison);
                 }
                 if (results.Count >= maxResults) return results;
             }
         }
         return results;
+    }
+
+    // Distinct query trigrams as match groups (deduped). Case-sensitive: one exact key each.
+    // Case-insensitive: dedup by the folded key, and expand each to all case variants of its 3 chars.
+    private static List<long[]> BuildTrigramGroups(string query, bool caseSensitive)
+    {
+        var groups = new List<long[]>();
+        var seen = new HashSet<long>();
+        for (int i = 0; i + 2 < query.Length; i++)
+        {
+            char a = query[i], b = query[i + 1], c = query[i + 2];
+            if (caseSensitive)
+            {
+                long key = TrigramIndex.TriKey(a, b, c);
+                if (seen.Add(key)) groups.Add(new[] { key });
+            }
+            else
+            {
+                long rep = TrigramIndex.TriKey(char.ToLowerInvariant(a), char.ToLowerInvariant(b), char.ToLowerInvariant(c));
+                if (seen.Add(rep)) groups.Add(CaseVariants(a, b, c));
+            }
+        }
+        return groups;
+    }
+
+    private static long[] CaseVariants(char a, char b, char c)
+    {
+        var keys = new HashSet<long>();
+        foreach (var x in CharVariants(a))
+            foreach (var y in CharVariants(b))
+                foreach (var z in CharVariants(c))
+                    keys.Add(TrigramIndex.TriKey(x, y, z));
+        var arr = new long[keys.Count];
+        keys.CopyTo(arr);
+        return arr;
+    }
+
+    private static char[] CharVariants(char ch)
+    {
+        char lo = char.ToLowerInvariant(ch), up = char.ToUpperInvariant(ch);
+        return lo == up ? new[] { lo } : new[] { lo, up };
+    }
+
+    // Merge (sorted, distinct) the posting lists of every key in a group. One key => return it directly
+    // (the common case-sensitive path pays nothing extra). Null if no key is present in the segment.
+    private static int[]? UnionPostings(SegmentReader seg, long[] keys)
+    {
+        if (keys.Length == 1) return seg.GetPostings(keys[0]);
+        List<int>? merged = null;
+        foreach (var k in keys)
+        {
+            var p = seg.GetPostings(k);
+            if (p is null) continue;
+            (merged ??= new List<int>()).AddRange(p);
+        }
+        if (merged is null) return null;
+        merged.Sort();
+        var outp = new List<int>(merged.Count);
+        int prev = int.MinValue;
+        foreach (var v in merged) { if (v != prev) { outp.Add(v); prev = v; } }
+        return outp.ToArray();
     }
 
     /// <summary>Flush the pending buffer to a segment and persist manifest + tombstones.</summary>

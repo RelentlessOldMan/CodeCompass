@@ -86,6 +86,30 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void SearchCode_CaseInsensitive_FindsAllCases_ButCaseSensitiveDoesNot()
+    {
+        using var repo = new TempRepo();
+        repo.Write("mix.cs", "var Handler = 1;\nvar handler = 2;\nvar HANDLER = 3;\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+
+            // Case-sensitive (default): only the exact-case line.
+            var cs = CodeCompassTools.SearchCode("handler", caseSensitive: true);
+            Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(cs, "mix.cs:").Count);
+            Assert.Contains("var handler = 2", cs);
+
+            // Case-insensitive: all three casings.
+            var ci = CodeCompassTools.SearchCode("handler", caseSensitive: false);
+            Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(ci, "mix.cs:").Count);
+            Assert.Contains("Handler", ci);
+            Assert.Contains("HANDLER", ci);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
     public void FindDefinition_ReturnsSymbolLocation()
     {
         using var repo = NewIndexedRepo();
