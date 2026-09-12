@@ -247,6 +247,7 @@ public static class ServerContext
             _state = IndexState.Ready;
         }
         finally { Rw.ExitWriteLock(); }
+        try { IndexMetaFile.Write(Root, text.DocumentCount); } catch { /* meta is best-effort */ }
         PublishStatus(); // now Ready (or reconciling, if a startup reconcile is still in flight)
     }
 

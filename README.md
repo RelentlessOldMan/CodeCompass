@@ -87,6 +87,9 @@ codecompass init    <path>            write a documented .codecompass.json to ed
 codecompass symstats <path>           profile symbol-file sizes + parse cost per language
 codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)
 codecompass statusline [--wrap "<cmd>"]  Claude Code status-line segment (index state)
+codecompass doctor  <path>            diagnose a repo's index (health + metadata)
+codecompass cache   [list|gc|clear <path>|clear-all]   inspect/manage the per-user index cache
+codecompass report  <path> [--no-logs]  zip diagnostics + logs for a bug report (never source)
 codecompass logs                      show the log folder and files
 codecompass version                   print the build version (e.g. 1.0.52+a76d3245)
 ```
@@ -157,7 +160,10 @@ is always visible (`codecompass survey` / `codecompass logs`).
 
 Two tiers, both driven by one script — **`check.ps1`**:
 
-- **`./check.ps1`** — the fast xUnit suite via `dotnet test` (~165 tests, ~10 s). Run it constantly.
+- **`./check.ps1`** — the fast xUnit suite via `dotnet test` (~180 tests, ~15 s). Run it constantly.
+  This includes **crash/corruption fuzzing**: every on-disk cache artifact is byte-flipped and
+  truncated in turn, asserting the index degrades gracefully (never crashes the process) and a rebuild
+  always recovers; stray orphan/temp files are ignored.
 - **`./check.ps1 -Big`** — unit tests **plus** the heavy large-file scenarios, with pass/fail
   assertions: it generates a register-map header (default 0.3 GB; `-SizeGB 2` for the full run),
   confirms it streams-indexes without hanging, that a marker near EOF is found at the right line via
@@ -247,6 +253,22 @@ it runs your command (forwarding Claude's stdin) and appends **only** the CodeCo
 
 The command is fast, never errors out loudly, and publishing is off via `statusLine: false` (config) /
 `CODECOMPASS_STATUS_LINE=0` (env).
+
+## Diagnostics & bug reports
+
+- **`codecompass doctor <path>`** — a one-shot health check for a repo's index: version, environment,
+  config presence, index metadata (documents, segments, the version/time that built it), the cache-file
+  listing (names + sizes), and explicit pass/warn checks (index builds? loads cleanly? built by the
+  current version? on a network path?). Read-only — the first thing to run when search behaves oddly.
+- **`codecompass cache`** — inspect/manage the per-user cache under `%LOCALAPPDATA%\CodeCompass`:
+  `cache list` (each repo by real path + size + build info), `cache gc` (drop caches whose repo no
+  longer exists), `cache clear <path>` / `cache clear-all`. (Each index writes a `meta.json` recording
+  its repo path, so the hashed cache dirs can be listed and GC'd by real path.)
+- **`codecompass report <path>`** — zip up everything a maintainer needs to diagnose a problem: the
+  `doctor` snapshot, this repo's logs, and its `.codecompass.json` — and **nothing from the source
+  tree**. The bundle contains file **paths/names** (from logs) and **sizes**, never file **contents** or
+  index contents; only *this* repo's logs are included, not other repos'. Use `--no-logs` for a
+  paths-free bundle. It prints exactly what it added and where, so you can review before sending.
 
 ## Performance
 

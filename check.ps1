@@ -126,6 +126,27 @@ if ($Big -and (Test-Path $cli)) {
     $nt = Join-Path $root ".corpus/_pathological/slow_nested_templates"
     $pat = Invoke-Cli @("index", $nt) 120   # default cap skips >1MB symbol extraction -> must be fast
     Check "pathological indexes without hanging" (-not $pat.TimedOut)
+
+    Section "diagnostics: doctor + report (CLI wiring)"
+    $doc = Invoke-Cli @("doctor", $bigDir)
+    Check "doctor runs health checks" ($doc.Out -match "== health ==" -and $doc.Out -match "index loads cleanly")
+    $reportZip = Join-Path $env:TEMP ("cc-report-check-{0}.zip" -f $PID)
+    $rep = Invoke-Cli @("report", $bigDir, "--out", $reportZip)
+    $zipOk = (Test-Path $reportZip)
+    # The bundle must contain diagnostics but must NOT contain the source header (never ship source).
+    $noSource = $true
+    if ($zipOk) {
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zf = [System.IO.Compression.ZipFile]::OpenRead($reportZip)
+            try {
+                $names = $zf.Entries.FullName
+                $noSource = ($names -contains "diagnostics.txt") -and (-not ($names -match "chipreg_bank\.h"))
+            } finally { $zf.Dispose() }
+        } catch { $noSource = $false }
+        Remove-Item $reportZip -Force -ErrorAction SilentlyContinue
+    }
+    Check "report writes a bundle with diagnostics and no source" ($zipOk -and $noSource)
 }
 
 # ---- Tier 3: real-repo correctness bench --------------------------------------------------------

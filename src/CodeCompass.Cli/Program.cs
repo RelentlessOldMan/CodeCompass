@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Hooks;
@@ -34,6 +35,9 @@ return args.Length == 0
         "symstats" => CmdSymStats(args),
         "parsebench" => CmdParseBench(args),
         "statusline" => CmdStatusline(args),
+        "doctor" => CmdDoctor(args),
+        "cache" => CmdCache(args),
+        "report" => CmdReport(args),
         "logs" => CmdLogs(),
         "version" or "--version" or "-v" => CmdVersion(),
         "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
@@ -65,6 +69,9 @@ static int Usage()
     Console.Error.WriteLine("  codecompass symstats <path> [--full]     profile symbol-file sizes + parse cost per language");
     Console.Error.WriteLine("  codecompass parsebench                   tree-sitter parse-time vs size sweep (synthetic)");
     Console.Error.WriteLine("  codecompass statusline [--wrap \"<cmd>\"]  Claude Code status line: shows index state (reads stdin JSON)");
+    Console.Error.WriteLine("  codecompass doctor  <path>               diagnose a repo's index (health + metadata)");
+    Console.Error.WriteLine("  codecompass cache   [list|gc|clear <path>|clear-all]   inspect/manage the per-user index cache");
+    Console.Error.WriteLine("  codecompass report  <path> [--no-logs]   zip diagnostics + logs for a bug report (never source)");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
     Console.Error.WriteLine("  codecompass version                      print the build version");
     return 1;
@@ -385,6 +392,177 @@ static string? RunWrapped(string command, string stdin)
     return outText;
 }
 
+// Diagnose one repo's index: print the diagnostic snapshot (version/env/config/index metadata/cache
+// listing) plus explicit pass/warn health checks. Read-only; the one command to answer "why is search
+// behaving oddly / is my index healthy". Never changes anything.
+static int CmdDoctor(string[] args)
+{
+    if (args.Length < 2) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
+
+    CodeCompass.Core.Diagnostics.RepoDiagnostics.WriteReport(Console.Out, root);
+
+    Console.WriteLine();
+    Console.WriteLine("== health ==");
+    int warns = 0;
+    foreach (var c in CodeCompass.Core.Diagnostics.RepoDiagnostics.HealthChecks(root))
+    {
+        Console.WriteLine($"  [{(c.Ok ? "OK  " : "WARN")}] {c.Name}{(string.IsNullOrEmpty(c.Detail) ? "" : $"  - {c.Detail}")}");
+        if (!c.Ok) warns++;
+    }
+    Console.WriteLine(warns == 0 ? "\nAll checks passed." : $"\n{warns} warning(s) - see above.");
+    Console.Error.WriteLine("\nShare this with a bug report via: codecompass report \"" + root + "\"");
+    return 0;
+}
+
+// Inspect / manage the per-user index cache (%LOCALAPPDATA%\CodeCompass). Caches are keyed by a hash
+// of the repo path; meta.json records the original path so we can list them by real path and GC ones
+// whose repo no longer exists.
+static int CmdCache(string[] args)
+{
+    var sub = args.Length >= 2 ? args[1].ToLowerInvariant() : "list";
+    var baseDir = CodeCompass.Core.Storage.IndexStore.BaseDir();
+    static double Mb(long b) => b / 1048576.0;
+    static long DirSize(string d) { try { return new DirectoryInfo(d).EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length); } catch { return 0; } }
+
+    // The cache subdirs are the repo-key folders; "logs" is not a cache.
+    IEnumerable<string> CacheDirs() => Directory.Exists(baseDir)
+        ? Directory.EnumerateDirectories(baseDir).Where(d => !string.Equals(Path.GetFileName(d), "logs", StringComparison.OrdinalIgnoreCase))
+        : Enumerable.Empty<string>();
+
+    switch (sub)
+    {
+        case "list":
+        {
+            long total = 0; int n = 0;
+            Console.WriteLine($"cache root: {baseDir}\n");
+            foreach (var d in CacheDirs().OrderByDescending(DirSize))
+            {
+                long sz = DirSize(d); total += sz; n++;
+                var meta = CodeCompass.Core.Storage.IndexMetaFile.ReadFromCacheDir(d);
+                string who = meta is null ? "(unknown - pre-meta index)" : meta.Root + (Directory.Exists(meta.Root) ? "" : "  [MISSING]");
+                Console.WriteLine($"  {Mb(sz),8:N1} MB  {who}");
+                if (meta is not null) Console.WriteLine($"            built by {meta.Version} at {meta.BuiltUtc}, {meta.Files:N0} files");
+            }
+            Console.WriteLine($"\n{n} cache(s), {Mb(total):N1} MB total.");
+            Console.Error.WriteLine("gc removes caches whose repo no longer exists:  codecompass cache gc");
+            return 0;
+        }
+        case "gc":
+        {
+            long freed = 0; int removed = 0;
+            foreach (var d in CacheDirs())
+            {
+                var meta = CodeCompass.Core.Storage.IndexMetaFile.ReadFromCacheDir(d);
+                if (meta is null || Directory.Exists(meta.Root)) continue; // keep unknown + live
+                long sz = DirSize(d);
+                try { Directory.Delete(d, true); freed += sz; removed++; Console.WriteLine($"  removed {Mb(sz),8:N1} MB  {meta.Root}"); }
+                catch (Exception ex) { Console.Error.WriteLine($"  could not remove {d}: {ex.Message}"); }
+            }
+            Console.WriteLine($"\nGC: removed {removed} cache(s), freed {Mb(freed):N1} MB. (Caches without meta.json are kept - clear by path.)");
+            return 0;
+        }
+        case "clear":
+        {
+            if (args.Length < 3) { Console.Error.WriteLine("usage: codecompass cache clear <path>"); return 1; }
+            var dir = CodeCompass.Core.Storage.IndexStore.CacheDirPath(Path.GetFullPath(args[2]));
+            if (!Directory.Exists(dir)) { Console.Error.WriteLine($"no cache for {args[2]}"); return 1; }
+            long sz = DirSize(dir);
+            try { Directory.Delete(dir, true); Console.WriteLine($"cleared {Mb(sz):N1} MB cache for {Path.GetFullPath(args[2])}"); return 0; }
+            catch (Exception ex) { Console.Error.WriteLine($"could not clear: {ex.Message}"); return 1; }
+        }
+        case "clear-all":
+        {
+            long freed = 0; int removed = 0;
+            foreach (var d in CacheDirs()) { long sz = DirSize(d); try { Directory.Delete(d, true); freed += sz; removed++; } catch { } }
+            Console.WriteLine($"cleared {removed} cache(s), freed {Mb(freed):N1} MB (logs kept).");
+            return 0;
+        }
+        default:
+            Console.Error.WriteLine("usage: codecompass cache [list | gc | clear <path> | clear-all]");
+            return 1;
+    }
+}
+
+// Zip up everything a maintainer needs to diagnose a problem - the diagnostic snapshot, the logs, and
+// the repo's .codecompass.json - and NOTHING from the source tree. Logs contain file PATHS/NAMES (not
+// contents); --no-logs produces a paths-free bundle. The user can review the zip before sending.
+static int CmdReport(string[] args)
+{
+    if (args.Length < 2) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
+    bool noLogs = args.Any(a => a is "--no-logs" or "-no-logs");
+
+    var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+    var outArgIdx = Array.FindIndex(args, a => a is "--out" or "-out");
+    var zipPath = outArgIdx >= 0 && outArgIdx + 1 < args.Length
+        ? Path.GetFullPath(args[outArgIdx + 1])
+        : Path.Combine(Directory.GetCurrentDirectory(), $"codecompass-report-{stamp}.zip");
+
+    var included = new List<string>();
+    try
+    {
+        if (File.Exists(zipPath)) File.Delete(zipPath);
+        using var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create);
+
+        // diagnostics.txt (built in-memory).
+        var sw = new StringWriter();
+        CodeCompass.Core.Diagnostics.RepoDiagnostics.WriteReport(sw, root);
+        WriteEntry(zip, "diagnostics.txt", sw.ToString()); included.Add("diagnostics.txt");
+
+        // README so the recipient (and sender) know exactly what's inside.
+        WriteEntry(zip, "README.txt",
+            "CodeCompass support bundle\n" +
+            "==========================\n" +
+            $"repo: {root}\n" +
+            $"generated: {DateTime.Now:o}\n\n" +
+            "Contents:\n" +
+            "  diagnostics.txt   - version, environment, config presence, index metadata, cache file\n" +
+            "                      listing (names + sizes only).\n" +
+            "  .codecompass.json - the repo's config, if present (your own settings).\n" +
+            "  logs/             - CodeCompass logs (omitted if --no-logs was used).\n\n" +
+            "Privacy: this bundle contains NO source code and NO index contents. Logs contain file\n" +
+            "PATHS and NAMES (not file contents). Review before sending if paths are sensitive; use\n" +
+            "'codecompass report <path> --no-logs' for a paths-free bundle.\n");
+        included.Add("README.txt");
+
+        // The repo's config (user's own settings), if present.
+        var cfgPath = Path.Combine(root, CodeCompass.Core.Config.CodeCompassConfig.FileName);
+        if (File.Exists(cfgPath)) { zip.CreateEntryFromFile(cfgPath, ".codecompass.json"); included.Add(".codecompass.json"); }
+
+        // Logs: the common log + THIS repo's per-repo log only (not other repos' logs - privacy).
+        if (!noLogs && Directory.Exists(Log.Directory))
+        {
+            var key = CodeCompass.Core.Storage.IndexStore.RepoKey(root);
+            foreach (var f in new DirectoryInfo(Log.Directory).GetFiles("*.log*"))
+            {
+                bool common = f.Name.StartsWith("codecompass.log", StringComparison.OrdinalIgnoreCase);
+                bool thisRepo = f.Name.Contains(key, StringComparison.OrdinalIgnoreCase);
+                if (common || thisRepo) { zip.CreateEntryFromFile(f.FullName, "logs/" + f.Name); included.Add("logs/" + f.Name); }
+            }
+        }
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"report failed: {ex.Message}"); return 1; }
+
+    Console.WriteLine($"wrote {zipPath}");
+    Console.WriteLine("included:");
+    foreach (var i in included) Console.WriteLine($"    {i}");
+    Console.Error.WriteLine("\nContains file paths/names + diagnostics, NEVER source or index contents. " +
+                            (noLogs ? "(--no-logs: no logs included)" : "Use --no-logs for a paths-free bundle.") +
+                            " Review before sending.");
+    return 0;
+
+    static void WriteEntry(ZipArchive zip, string name, string content)
+    {
+        var e = zip.CreateEntry(name);
+        using var s = e.Open();
+        using var w = new StreamWriter(s, System.Text.Encoding.UTF8);
+        w.Write(content);
+    }
+}
+
 // Print the central log location and current log files - the one place to look when debugging.
 static int CmdLogs()
 {
@@ -491,6 +669,7 @@ static int CmdIndex(string[] args)
 // before the MCP server's first tool call loads it. Respects the same config gate as the server.
 static void PublishReady(string root, int files)
 {
+    CodeCompass.Core.Storage.IndexMetaFile.Write(root, files); // record path/version/time (for doctor/cache/report)
     CodeCompass.Core.Config.CodeCompassConfig.Load(root); // honor a repo's statusLine:false
     if (!CodeCompass.Core.Config.CodeCompassConfig.StatusLinePublish()) return;
     CodeCompass.Core.Storage.IndexStatusFile.Write(root,
