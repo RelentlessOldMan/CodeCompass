@@ -1,4 +1,6 @@
+using System;
 using System.Linq;
+using System.Threading.Tasks;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Walking;
 using Xunit;
@@ -7,6 +9,39 @@ namespace CodeCompass.Core.Tests;
 
 public class FileWalkerTests
 {
+    [Fact]
+    public void ParallelWalk_MatchesSerialWalk_SameFilesSizesMtimes()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "x");
+        repo.Write("src/b.cs", "yy");
+        repo.Write("src/deep/c.cs", "zzz");
+        repo.Write("bin/skip.cs", "x");            // ignored dir
+        repo.Write("node_modules/x/d.js", "x");    // ignored dir
+        for (int i = 0; i < 60; i++) repo.Write($"pkg{i % 8}/f{i}.cs", new string('x', i + 1));
+
+        static (string, long, long)[] Run(string root, int threads) =>
+            new FileWalker(new IgnoreRules(), threads).Walk(root)
+                .Select(f => (f.RelativePath, f.Size, f.MTimeTicks))
+                .OrderBy(t => t.Item1, StringComparer.Ordinal).ToArray();
+
+        // The parallel walk must produce exactly the same set (order-independent) as the serial one.
+        Assert.Equal(Run(repo.Root, 1), Run(repo.Root, 8));
+    }
+
+    [Fact]
+    public void ParallelWalk_EarlyBreak_DoesNotHang()
+    {
+        using var repo = new TempRepo();
+        for (int i = 0; i < 300; i++) repo.Write($"d{i % 12}/f{i}.cs", "x");
+
+        var walker = new FileWalker(new IgnoreRules(), walkThreads: 8);
+        // Abandon the walk after the first record - the workers must be cancelled cleanly, not deadlock
+        // on a full output buffer or leak threads.
+        var done = Task.Run(() => { foreach (var _ in walker.Walk(repo.Root)) break; });
+        Assert.True(done.Wait(TimeSpan.FromSeconds(30)), "early-break parallel walk must not hang");
+    }
+
     private static System.Collections.Generic.List<string> WalkRel(string root) =>
         new FileWalker(new IgnoreRules()).Walk(root).Select(f => f.RelativePath).OrderBy(p => p).ToList();
 

@@ -197,6 +197,11 @@ This is as important as the search itself, and it is where "smart" is earned.
   that to ~one round-trip per directory. (You can't scan fewer files: a directory's mtime
   only moves on add/remove/rename, so an in-place content edit - the common case - is
   invisible at the directory level; every file's own timestamp must be read.)
+  The walk also reads directories CONCURRENTLY (default min(cores, 8) workers, a
+  bounded producer/consumer that still streams lazily so a builder paces it). SMB2's
+  credit flow-control lets many enumerations be in flight on one connection, so this
+  overlaps the remaining per-directory round-trips on a latency-bound share; it's a
+  wash locally. Set walkThreads=1 (or CODECOMPASS_WALK_THREADS=1) for a serial walk.
 
 - The change-detection ledger (path -> size/mtime/hash for every file) is itself
   kept on disk, not in RAM: an immutable, memory-mapped, path-sorted base file

@@ -13,6 +13,7 @@ public sealed class RepoConfig
     [JsonPropertyName("maxFileMb")] public long? MaxFileMb { get; set; }
     [JsonPropertyName("maxAutoMb")] public long? MaxAutoMb { get; set; }
     [JsonPropertyName("threads")] public int? Threads { get; set; }
+    [JsonPropertyName("walkThreads")] public int? WalkThreads { get; set; }
     [JsonPropertyName("segmentMb")] public int? SegmentMb { get; set; }
     [JsonPropertyName("compactSegments")] public int? CompactSegments { get; set; }
     [JsonPropertyName("stallWarnSec")] public int? StallWarnSec { get; set; }
@@ -56,6 +57,9 @@ public static class CodeCompassConfig
   // "statusLine": true,      // publish index state for the `codecompass statusline` command (shown in
                               //   Claude Code's status area). Default true; harmless if unused.
   // "threads": 0,            // indexing parallelism; 0 / omitted = all CPU cores.
+  // "walkThreads": 0,        // concurrent directory reads during the walk; 0 / omitted = min(cores, 8),
+                              //   1 = serial. Raise for a high-latency network share (overlaps SMB
+                              //   round-trips); no benefit locally.
   // "segmentMb": 0,          // per-worker build-memory budget; 0 / omitted = scaled to RAM.
   // "compactSegments": 64,   // merge on-disk segments after this many accumulate (default 64).
   // "stallWarnSec": 60,      // warn in the log if a build stalls this long (default 60, min 5).
@@ -170,6 +174,17 @@ public static class CodeCompassConfig
     {
         int? n = EnvInt("CODECOMPASS_THREADS") ?? cfg.Threads;
         return n is > 0 ? n.Value : defaultCores;
+    }
+
+    /// <summary>Concurrent directory reads during the file walk (change-scan / index walk). Default
+    /// min(cores, 8); 1 = serial. Over a latency-bound SMB share, concurrent enumerations overlap the
+    /// per-directory round-trips (SMB2 credits allow many in flight); locally it's a wash. Env
+    /// CODECOMPASS_WALK_THREADS / config walkThreads.</summary>
+    public static int WalkThreads(int defaultCores) => WalkThreads(_current, defaultCores);
+    public static int WalkThreads(RepoConfig cfg, int defaultCores)
+    {
+        int? n = EnvInt("CODECOMPASS_WALK_THREADS") ?? cfg.WalkThreads;
+        return n is > 0 ? n.Value : Math.Min(defaultCores, 8);
     }
 
     /// <summary>Explicit per-worker text-segment budget in MB, or null to size adaptively.</summary>

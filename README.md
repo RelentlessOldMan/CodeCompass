@@ -163,6 +163,7 @@ editing source:
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if a build stalls or a single file is held longer than this (default 60, min 5). The warning names the exact file(s) each worker is stuck on, so a pathologically slow file is identified rather than guessed. |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
+| `CODECOMPASS_WALK_THREADS` | Concurrent directory reads during the walk (default min(cores, 8); 1 = serial). Over a high-latency **network share** this overlaps the per-directory round-trips (SMB2 lets many be in flight), which is the main lever on a slow `update`/`index` walk; no benefit locally. |
 | `CODECOMPASS_READ_BUDGET_MB` | Cap on in-flight file processing memory during a parallel build (default scales to RAM: ≈1/16th of available, clamped 256 MB–4 GB). Reservations count the real footprint (~3× file size: raw bytes + decoded UTF-16 string), so the budget genuinely fits files up to ≈budget/3 and prevents N cores each loading a big file at once when `MAX_FILE_MB` is large. A file bigger than the budget reserves it all and reads solo (blocking others until done) — no deadlock. |
 
 Files skipped for exceeding a cap are counted and logged (not silently dropped), so the coverage gap
@@ -223,7 +224,7 @@ slow-to-parse shapes), and **`make-megacorpus.ps1`** (a >10 GB aggregate for sca
 Every knob above also lives in an optional **`.codecompass.json`** at the repo root, so settings
 travel with the repo instead of being set on every run. Precedence is **env var → config file →
 default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names),
-`threads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`, `autoReconcile`, `statusLine`.
+`threads`, `walkThreads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`, `autoReconcile`, `statusLine`.
 
 Don't hand-write it — run **`codecompass init <path>`** to drop a documented starter (every setting
 commented out, so it's all defaults until you edit; `//` comments and trailing commas are allowed).
