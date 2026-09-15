@@ -495,3 +495,6 @@ bench/results/
 
 # Docs copy shipped into the plugin (source is docs/CodeCompass.html)
 plugin/CodeCompass.html
+
+# Install note generated into the plugin at release time (make-release.ps1)
+plugin/INSTALL.txt

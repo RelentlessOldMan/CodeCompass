@@ -48,9 +48,16 @@ entire standing per-session cost: `search_code`, `find_definition`, `find_refere
 
 ## Install
 
-**Option A — prebuilt release (no .NET needed).** Download the latest
-`codecompass-plugin-<version>-win-x64.zip` from the [Releases](../../releases) page, unzip it, and in
-Claude Code run `/plugin add "<unzipped-folder>"`. The binaries are self-contained Windows x64.
+**Option A — prebuilt release (no .NET needed), recommended.** Download the latest
+`codecompass-plugin-<version>-win-x64.zip` from the [Releases](../../releases) page and unzip it. **The
+unzipped folder itself is the plugin** — it directly contains `.claude-plugin\`, `bin\`, and `hooks\`;
+there is **no** `plugin\` subfolder. In Claude Code, add it by its full quoted path:
+
+```
+/plugin add "C:\path\to\codecompass-plugin-<version>-win-x64"
+```
+
+The binaries are self-contained Windows x64. Run `/mcp` to confirm the **codecompass** server connected.
 
 **Option B — build from source.** Requires the .NET 8 SDK to *build*; the produced binaries are
 self-contained.
@@ -59,11 +66,12 @@ self-contained.
 pwsh ./build-plugin.ps1      # publishes self-contained binaries into plugin/bin
 ```
 
-Then load it into Claude Code:
+Then load it into Claude Code — here the `plugin` subfolder is a **source-checkout** path (the prebuilt
+zip has no such subfolder, see Option A):
 
 ```
-claude --plugin-dir "<path>/plugin"     # one session
-/plugin add "<path>/plugin"             # persistent (run inside Claude Code)
+claude --plugin-dir "<repo>\plugin"     # one session
+/plugin add "<repo>\plugin"             # persistent (run inside Claude Code)
 ```
 
 > **Windows on ARM (Snapdragon):** there's no separate ARM build and you don't need one — the x64

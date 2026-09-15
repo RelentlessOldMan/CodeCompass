@@ -42,14 +42,24 @@ To allow `grep` again, set the environment variable `CODECOMPASS_ENFORCE=0`.
 
 ## Install
 
-**Prebuilt (no .NET needed):** download the latest `codecompass-plugin-<version>-win-x64.zip`
-from the repo's Releases page, unzip it, and run `/plugin add "<unzipped-folder>"`. Then skip to
-step 3.
+### Prebuilt (no .NET needed) — recommended
 
-**From source:**
+1. Download `codecompass-plugin-<version>-win-x64.zip` from the repo's Releases page.
+2. Unzip it. **The unzipped folder IS the plugin** — it directly contains `.claude-plugin\`,
+   `bin\`, and `hooks\`. There is **no** `plugin\` subfolder (that only exists in a source
+   checkout).
+3. In Claude Code, add it by its **full quoted path** (not a bare name, and not a `plugin`
+   subfolder):
 
-1. Build the self-contained binaries (needs the .NET 8 SDK; the *result* needs no
-   .NET on the target machine):
+   ```
+   /plugin add "C:\path\to\codecompass-plugin-<version>-win-x64"
+   ```
+
+4. Run `/mcp` to confirm the `codecompass` server is connected.
+
+### From source (needs the .NET 8 SDK)
+
+1. Build the self-contained binaries (the *result* needs no .NET on the target machine):
 
    ```powershell
    pwsh ./build-plugin.ps1
@@ -57,10 +67,11 @@ step 3.
 
    This publishes `plugin/bin/CodeCompass.Mcp.exe` and `CodeCompass.Cli.exe`.
 
-2. Load it:
+2. Load it — note the `plugin` subfolder here is a **source-checkout** path; the prebuilt zip
+   has no such subfolder (see Prebuilt above):
 
-   - One session:   `claude --plugin-dir "<path>/plugin"`
-   - Persistently:  `/plugin add "<path>/plugin"`
+   - One session:   `claude --plugin-dir "<repo>\plugin"`
+   - Persistently:  `/plugin add "<repo>\plugin"`
 
 3. In a session, run `/mcp` to confirm the `codecompass` server is connected.
 

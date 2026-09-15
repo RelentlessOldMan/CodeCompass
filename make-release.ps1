@@ -32,7 +32,30 @@ $pjPath = Join-Path $root "plugin/.claude-plugin/plugin.json"
 $version = (Get-Content $pjPath -Raw | ConvertFrom-Json).version
 if (-not $version) { throw "could not read version from $pjPath" }
 
-# 3) Zip the plugin folder's contents (so it extracts to a directory containing .claude-plugin).
+# 3) Drop a top-level INSTALL.txt into the plugin folder so it's the first thing a zip installer sees.
+#    (gitignored; regenerated each release.) It states the layout that trips people up: the unzipped
+#    folder IS the plugin - there is no plugin\ subfolder to point at.
+$installTxt = @"
+CodeCompass plugin $version - install (Windows, no .NET needed)
+==============================================================
+
+This folder IS the plugin. It directly contains .claude-plugin\, bin\, and hooks\.
+There is NO plugin\ subfolder to point at - use THIS folder.
+
+In Claude Code, run (the full quoted path to THIS folder):
+
+    /plugin add "<full path to this folder>"
+
+e.g.  /plugin add "C:\Tools\codecompass-plugin-$version-win-x64"
+
+Then run  /mcp  to confirm the "codecompass" server is connected.
+
+Docs: open CodeCompass.html in this folder, or see
+https://github.com/RelentlessOldMan/CodeCompass
+"@
+Set-Content -Path (Join-Path $root "plugin/INSTALL.txt") -Value $installTxt -Encoding utf8
+
+# 4) Zip the plugin folder's contents (so it extracts to a directory containing .claude-plugin).
 $zip = Join-Path $root ("codecompass-plugin-{0}-win-x64.zip" -f $version)
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Write-Host "Zipping plugin -> $zip ..."
