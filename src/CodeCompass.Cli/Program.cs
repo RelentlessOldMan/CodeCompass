@@ -40,6 +40,7 @@ return args.Length == 0
         "report" => CmdReport(args),
         "logs" => CmdLogs(),
         "version" or "--version" or "-v" => CmdVersion(),
+        "help" or "--help" or "-h" or "-?" or "/?" => Help(),
         "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
         "hook-context" => CmdHookContext(), // SessionStart hook: inject guidance
         _ => Usage(),
@@ -52,6 +53,9 @@ static int CmdVersion()
     Console.WriteLine($"CodeCompass {BuildInfo.Version}");
     return 0;
 }
+
+// Explicit help request: same text as Usage but a success exit code (no-args/unknown-command return 1).
+static int Help() { Usage(); return 0; }
 
 static int Usage()
 {

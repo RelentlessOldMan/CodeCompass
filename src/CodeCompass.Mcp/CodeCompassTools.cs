@@ -31,7 +31,10 @@ public static class CodeCompassTools
         // Fetch one extra to detect truncation: if we get maxResults+1 back, there are more than we
         // show, so tell the agent to narrow rather than trust this as the complete set.
         var matches = text.Search(query, maxResults + 1, caseSensitive);
-        if (matches.Count == 0) return $"No matches for \"{query}\".";
+        if (matches.Count == 0)
+            return caseSensitive
+                ? $"No matches for \"{query}\". Tip: retry with caseSensitive:false for a case-insensitive match, or try a shorter/more distinctive substring."
+                : $"No matches for \"{query}\". Tip: try a shorter or more distinctive substring.";
 
         bool truncated = matches.Count > maxResults;
         var sb = new StringBuilder();
@@ -56,7 +59,9 @@ public static class CodeCompassTools
         => ServerContext.Query((_, symbols) =>
     {
         var matches = symbols.FindByName(name);
-        if (matches.Count == 0) return $"No definition found for \"{name}\".";
+        if (matches.Count == 0)
+            return $"No definition found for \"{name}\". Tips: search_symbols for a partial or one-off name; " +
+                   "search_code if it may be a macro/#define, a language without symbol support, or spelled differently.";
 
         var sb = new StringBuilder();
         foreach (var s in matches)
@@ -134,7 +139,9 @@ public static class CodeCompassTools
                 if (hits.Count > maxResults) break;                          // got the overflow row
             }
 
-        if (hits.Count == 0) return $"No references found for \"{name}\".";
+        if (hits.Count == 0)
+            return $"No references found for \"{name}\". Tip: try search_code for a raw text search " +
+                   "(it may not resolve as a symbol here), or check the exact spelling/case.";
 
         bool truncated = hits.Count > maxResults;
         var shown = hits.Take(maxResults).ToList();
@@ -155,7 +162,9 @@ public static class CodeCompassTools
         => ServerContext.Query((_, symbols) =>
     {
         var matches = symbols.Find(query, maxResults + 1);
-        if (matches.Count == 0) return $"No symbols matching \"{query}\".";
+        if (matches.Count == 0)
+            return $"No symbols matching \"{query}\". Tip: try search_code for a text search " +
+                   "(it may not be a captured symbol - e.g. a macro, or an unsupported language).";
 
         bool truncated = matches.Count > maxResults;
         var sb = new StringBuilder();

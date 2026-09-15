@@ -126,6 +126,17 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void EmptyResults_IncludeActionableNextStepHints()
+    {
+        using var repo = NewIndexedRepo();
+        // Each dead-end should route the agent to a sensible next tool/option instead of just "nothing".
+        Assert.Contains("caseSensitive:false", CodeCompassTools.SearchCode("NoSuchTextZZZ")); // default is case-sensitive
+        Assert.Contains("search_symbols", CodeCompassTools.FindDefinition("NoSuchSymbolZZZ"));
+        Assert.Contains("search_code", CodeCompassTools.SearchSymbols("NoSuchSymbolZZZ"));
+        Assert.Contains("search_code", CodeCompassTools.FindReferences("NoSuchSymbolZZZ"));
+    }
+
+    [Fact]
     public void FindDefinition_ReportsLineRange_AndInlinesSmallDefinition()
     {
         using var repo = NewIndexedRepo();
