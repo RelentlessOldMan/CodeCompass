@@ -24,6 +24,22 @@ public class FileWalkerTests
     }
 
     [Fact]
+    public void CarriesSizeAndMTimeFromEnumeration()
+    {
+        using var repo = new TempRepo();
+        repo.Write("src/a.cs", "hello world\n");
+        var full = repo.FullPath("src/a.cs");
+
+        var rec = new FileWalker(new IgnoreRules()).Walk(repo.Root).Single(f => f.RelativePath == "src/a.cs");
+
+        // Size and mtime must match a direct stat - the walker reads them off the enumeration instead of
+        // re-stat'ing, so this guards that the piggybacked metadata is correct (not just present).
+        Assert.Equal(new System.IO.FileInfo(full).Length, rec.Size);
+        Assert.Equal(System.IO.File.GetLastWriteTimeUtc(full).Ticks, rec.MTimeTicks);
+        Assert.True(rec.MTimeTicks > 0);
+    }
+
+    [Fact]
     public void NormalizesRelativePathsWithForwardSlashes()
     {
         using var repo = new TempRepo();

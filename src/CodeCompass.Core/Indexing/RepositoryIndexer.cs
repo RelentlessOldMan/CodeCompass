@@ -143,7 +143,7 @@ public static class RepositoryIndexer
             (file, _, worker) =>
             {
                 int tid = Environment.CurrentManagedThreadId;
-                var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
+                var mtime = file.MTimeTicks; // from the walk enumeration (no extra stat)
 
                 // Large files are streamed, not read whole: the whole-file path decodes into a single
                 // .NET string, which caps near ~1 GB of text regardless of RAM. Streaming hashes and
@@ -374,7 +374,8 @@ public static class RepositoryIndexer
                     if (onScan is not null && (++walked & 0x1FF) == 0) onScan(walked); // heartbeat every 512 files
                     var rel = file.RelativePath;
                     seen.Add(rel);
-                    var mtime = File.GetLastWriteTimeUtc(file.FullPath).Ticks;
+                    var mtime = file.MTimeTicks; // from the walk enumeration - avoids a per-file stat (a full
+                                                 // extra round-trip per file over SMB; this is the no-op-update cost)
 
                     if (old.TryGetValue(rel, out var os) && os.Size == file.Size && os.MTimeTicks == mtime)
                     {

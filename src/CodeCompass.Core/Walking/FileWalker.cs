@@ -3,8 +3,10 @@ using CodeCompass.Core.Ignore;
 
 namespace CodeCompass.Core.Walking;
 
-/// <summary>A candidate file found by the walker. RelativePath is normalized with '/'.</summary>
-public readonly record struct FileRecord(string RelativePath, string FullPath, long Size);
+/// <summary>A candidate file found by the walker. RelativePath is normalized with '/'. <see cref="MTimeTicks"/>
+/// is the last-write time (UTC ticks) read from the directory enumeration - carried here so callers don't
+/// re-stat the file for its timestamp (a second network round-trip over SMB).</summary>
+public readonly record struct FileRecord(string RelativePath, string FullPath, long Size, long MTimeTicks);
 
 /// <summary>
 /// Iterative directory walk that prunes ignored directories before descending and
@@ -29,6 +31,12 @@ public sealed class FileWalker
         OverCapSkipped = 0;
         LargestOverCapBytes = 0;
         LargestOverCapPath = null;
+        // Read size/mtime/attributes off the enumerated FileInfo/DirectoryInfo objects: EnumerateFileSystemInfos
+        // pre-fills them from the single directory listing (find-data) and caches them, so it's ONE round-trip
+        // per directory instead of extra per-file stats for size and mtime - the difference between fast and
+        // ~minutes over an SMB share. AttributesToSkip=0 preserves coverage (default would drop Hidden/System);
+        // IgnoreInaccessible skips unreadable children instead of failing the whole directory.
+        var opts = new EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = false, AttributesToSkip = 0 };
         var stack = new Stack<string>();
         stack.Push(root);
 
@@ -36,11 +44,12 @@ public sealed class FileWalker
         {
             var dir = stack.Pop();
 
-            string[] subdirs, files;
+            List<FileSystemInfo> entries;
             try
             {
-                subdirs = Directory.GetDirectories(dir);
-                files = Directory.GetFiles(dir);
+                // Materialize under the try so a mid-iteration failure on this directory is caught here
+                // (one bad subtree is logged and skipped, not fatal) - never inside the yielding loop below.
+                entries = new DirectoryInfo(dir).EnumerateFileSystemInfos("*", opts).ToList();
             }
             catch (DirectoryNotFoundException) { continue; } // vanished between enqueue and read: fine
             catch (Exception ex)
@@ -51,36 +60,38 @@ public sealed class FileWalker
                 continue;
             }
 
-            foreach (var sub in subdirs)
+            foreach (var info in entries)
             {
-                var name = Path.GetFileName(sub);
-                if (_ignore.IsIgnoredDirectory(name)) continue;
-                try
+                if (info is DirectoryInfo sub)
                 {
-                    if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) continue;
+                    if (_ignore.IsIgnoredDirectory(sub.Name)) continue;
+                    try
+                    {
+                        if ((sub.Attributes & FileAttributes.ReparsePoint) != 0) continue; // cached from enumeration
+                    }
+                    catch { continue; }
+                    stack.Push(sub.FullName);
                 }
-                catch { continue; }
-                stack.Push(sub);
-            }
-
-            foreach (var file in files)
-            {
-                long size;
-                try { size = new FileInfo(file).Length; }
-                catch { continue; }
-
-                if (size > _ignore.MaxFileSizeBytes) // count over-cap skips so the coverage gap isn't silent
+                else if (info is FileInfo file)
                 {
-                    OverCapSkipped++;
-                    if (size > LargestOverCapBytes) { LargestOverCapBytes = size; LargestOverCapPath = file; }
-                    continue;
+                    long size;
+                    try { size = file.Length; } // cached from enumeration - no extra round-trip
+                    catch { continue; }
+
+                    if (size > _ignore.MaxFileSizeBytes) // count over-cap skips so the coverage gap isn't silent
+                    {
+                        OverCapSkipped++;
+                        if (size > LargestOverCapBytes) { LargestOverCapBytes = size; LargestOverCapPath = file.FullName; }
+                        continue;
+                    }
+
+                    if (_ignore.IsIgnoredFile(file.Name, size)) continue;
+
+                    long mtime;
+                    try { mtime = file.LastWriteTimeUtc.Ticks; } catch { mtime = 0; } // cached from enumeration
+                    var rel = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
+                    yield return new FileRecord(rel, file.FullName, size, mtime);
                 }
-
-                var name = Path.GetFileName(file);
-                if (_ignore.IsIgnoredFile(name, size)) continue;
-
-                var rel = Path.GetRelativePath(root, file).Replace('\\', '/');
-                yield return new FileRecord(rel, file, size);
             }
         }
     }

@@ -188,6 +188,16 @@ This is as important as the search itself, and it is where "smart" is earned.
 - The index is persisted on disk (memory-mapped, updated safely) so restarting
   never means re-indexing dozens of GB from scratch.
 
+- The change-scan reads each file's size and mtime from the DIRECTORY ENUMERATION
+  itself (EnumerateFileSystemInfos pre-fills and caches them from the one listing),
+  not from separate per-file stats. Locally that's a wash, but over an SMB share each
+  stat is a network round-trip: the old "list names, then stat each file for size, then
+  stat again for mtime" paid ~2 extra round-trips per file, which on a 43k-file share
+  was the entire ~5-minute no-op `update`. Reading metadata off the enumeration collapses
+  that to ~one round-trip per directory. (You can't scan fewer files: a directory's mtime
+  only moves on add/remove/rename, so an in-place content edit - the common case - is
+  invisible at the directory level; every file's own timestamp must be read.)
+
 - The change-detection ledger (path -> size/mtime/hash for every file) is itself
   kept on disk, not in RAM: an immutable, memory-mapped, path-sorted base file
   answers lookups by binary search, while recent edits live in a small in-memory
