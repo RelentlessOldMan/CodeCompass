@@ -1,3 +1,4 @@
+using CodeCompass.Core.Config;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Storage;
 
@@ -143,8 +144,7 @@ public sealed class SegmentedIndex : IDisposable
 
     public IReadOnlyList<SearchMatch> Search(string query, int maxResults = 200, bool caseSensitive = true)
     {
-        var results = new List<SearchMatch>();
-        if (string.IsNullOrEmpty(query)) return results;
+        if (string.IsNullOrEmpty(query)) return new List<SearchMatch>();
         if (_pending is { DocCount: > 0 }) FlushPending();
 
         var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
@@ -153,15 +153,36 @@ public sealed class SegmentedIndex : IDisposable
         // the candidate step matches any-case occurrences; the OrdinalIgnoreCase verify then confirms).
         var groups = query.Length >= 3 ? BuildTrigramGroups(query, caseSensitive) : null;
 
+        // Collect the ordered candidate paths (all local: mmap postings, no source reads). The
+        // trigram index only says a file MIGHT contain the query; the verify step below reads each and
+        // confirms. Ordering here (segment order, then in-segment doc order) fixes the result order for
+        // both the serial and parallel verify paths, so output is identical regardless of how we read.
+        var candidates = CollectCandidates(groups);
+        if (candidates.Count == 0) return new List<SearchMatch>();
+
+        // Over a network share, each verify is a whole-file read whose wall-clock is dominated by
+        // round-trip latency; reading candidates one at a time stacks that latency linearly. Overlap it
+        // with a bounded-parallel verify (SMB2 credits let many reads share one connection). Locally,
+        // reads are fast and the serial early-exit is already optimal, so keep the simple path.
+        return NetworkPath.IsNetwork(_root)
+            ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults)
+            : VerifySerial(candidates, query, comparison, caseSensitive, maxResults);
+    }
+
+    // Ordered list of candidate repo-relative paths across all segments (rarest-first trigram
+    // intersection per segment). Purely local work.
+    private List<string> CollectCandidates(List<long[]>? groups)
+    {
+        var candidates = new List<string>();
         for (int segId = 0; segId < _segments.Count; segId++)
         {
             var seg = _segments[segId];
             _tombstones.TryGetValue(segId, out var tomb);
 
-            IEnumerable<int> candidates;
+            IEnumerable<int> locals;
             if (groups is null)
             {
-                candidates = Enumerable.Range(0, seg.DocCount);
+                locals = Enumerable.Range(0, seg.DocCount);
             }
             else
             {
@@ -183,41 +204,99 @@ public sealed class SegmentedIndex : IDisposable
                 for (int k = 1; k < lists.Length && acc.Count > 0; k++)
                     acc = Intersect(acc, lists[k]);
                 if (acc.Count == 0) continue;
-                candidates = acc;
+                locals = acc;
             }
 
-            foreach (var local in candidates)
+            foreach (var local in locals)
             {
                 if (tomb is not null && tomb.Contains(local)) continue;
                 var rel = seg.GetPath(local);
                 // Defence in depth: paths come from the index, but a tampered/corrupt cache could
                 // hold a "../" or rooted path - never read (and return to the agent) outside the repo.
                 if (!PathSafety.IsInsideRepo(rel)) continue;
-                var full = Path.Combine(_root, rel.Replace('/', Path.DirectorySeparatorChar));
-                // Large candidate files are scanned line by line (bounded memory) - they can't be held
-                // as one string, and re-reading a multi-GB file whole would be ruinous over a network
-                // share. Normal files use the faster whole-text scan.
-                long size = 0;
-                try { size = new FileInfo(full).Length; } catch { }
-                if (size >= LargeFileIndexer.StreamThresholdBytes)
-                {
-                    // The positional sidecar's per-block Bloom filters are case-sensitive, so use it only
-                    // for the (default) case-sensitive path; a case-insensitive search into a huge file
-                    // falls back to a bounded whole-file line scan (correct, just no block-skipping - a
-                    // rare edge case). Prefer the sidecar; fall back if missing/invalid/non-UTF-8.
-                    if (!(caseSensitive && PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults)))
-                        FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison);
-                }
-                else
-                {
-                    string text;
-                    try { text = File.ReadAllText(full); }
-                    catch { continue; }
-                    FileScanner.ScanText(rel, text, query, results, maxResults, 0, comparison);
-                }
-                if (results.Count >= maxResults) return results;
+                candidates.Add(rel);
             }
         }
+        return candidates;
+    }
+
+    // Serial verify (local repos): read candidates in order, stopping the instant we have enough.
+    private List<SearchMatch> VerifySerial(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults)
+    {
+        var results = new List<SearchMatch>();
+        foreach (var rel in candidates)
+        {
+            results.AddRange(ScanCandidate(rel, query, comparison, caseSensitive, maxResults, network: false));
+            if (results.Count >= maxResults) return Cap(results, maxResults);
+        }
+        return Cap(results, maxResults);
+    }
+
+    // Parallel verify (network shares): scan candidates in bounded windows so we overlap SMB latency
+    // without speculatively reading the whole candidate set. Results are merged in candidate order, so
+    // the output is byte-identical to the serial path; we just reach it faster. A window's worth of
+    // reads may be wasted once we have enough matches - a good trade when latency dwarfs a few reads.
+    private List<SearchMatch> VerifyParallel(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults)
+    {
+        var results = new List<SearchMatch>();
+        int degree = Math.Max(1, CodeCompassConfig.WalkThreads(Environment.ProcessorCount));
+        int window = Math.Max(degree, degree * 4); // speculation bound: never more than one window ahead
+        var opts = new ParallelOptions { MaxDegreeOfParallelism = degree };
+
+        for (int start = 0; start < candidates.Count && results.Count < maxResults; start += window)
+        {
+            int count = Math.Min(window, candidates.Count - start);
+            var perFile = new List<SearchMatch>[count];
+            Parallel.For(0, count, opts, j =>
+                perFile[j] = ScanCandidate(candidates[start + j], query, comparison, caseSensitive, maxResults, network: true));
+
+            foreach (var list in perFile)
+            {
+                results.AddRange(list);
+                if (results.Count >= maxResults) break;
+            }
+        }
+        return Cap(results, maxResults);
+    }
+
+    private static List<SearchMatch> Cap(List<SearchMatch> results, int maxResults) =>
+        results.Count > maxResults ? results.GetRange(0, maxResults) : results;
+
+    // Verify ONE candidate file: confirm and locate the query in it, returning that file's matches
+    // (up to maxResults). Reads are network-aware and avoid a per-candidate stat: a file is known to be
+    // "large" from its LOCAL sidecar, and otherwise we read the size off the already-open handle rather
+    // than paying a separate round-trip. Never throws.
+    private List<SearchMatch> ScanCandidate(string rel, string query, StringComparison comparison, bool caseSensitive, int maxResults, bool network)
+    {
+        var results = new List<SearchMatch>();
+        var full = Path.Combine(_root, rel.Replace('/', Path.DirectorySeparatorChar));
+
+        // Large file (has a block index in the local cache): read only the candidate blocks (case-
+        // sensitive Blooms) or fall back to a bounded line scan. No network stat needed to know this.
+        if (PositionalSidecar.HasSidecar(_dir, rel))
+        {
+            if (!(caseSensitive && PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults)))
+                FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network);
+            return results;
+        }
+
+        // No sidecar: normally a small file. Open once (network-tuned) and read the size off the open
+        // handle - no separate stat round-trip. A large non-UTF-8 file (no block index) is rare; scan
+        // it line by line so we never materialize a multi-GB string.
+        try
+        {
+            using var fs = Storage.SourceFile.OpenSequential(full, network);
+            long size; try { size = fs.Length; } catch { size = 0; }
+            if (size < LargeFileIndexer.StreamThresholdBytes)
+            {
+                var text = Storage.SourceFile.ReadAllText(fs);
+                FileScanner.ScanText(rel, text, query, results, maxResults, 0, comparison);
+                return results;
+            }
+        }
+        catch { return results; }
+
+        FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network); // rare: large, no sidecar
         return results;
     }
 

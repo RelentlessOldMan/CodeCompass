@@ -545,6 +545,25 @@ newline); a non-UTF-8 large file falls back to a whole-file line scan. A missing
 invalid sidecar always falls back too, so it is an optimization, never a correctness
 dependency.
 
+Verifying normal candidates over a share: the same "trigram index is only a candidate
+filter" fact means every query still reads its candidate files to confirm the match and
+report line:col. On a local disk that is cheap and done serially (stop the instant the
+result limit is hit). Over an SMB share each read is dominated by round-trip latency, and
+reading candidates one at a time stacks that latency linearly - so when the root is a
+network path the verify runs BOUNDED-PARALLEL (default min(cores, 8), the walkThreads
+knob), overlapping the reads the way the walk overlaps enumerations. Results are merged
+back in candidate order, so the output is byte-identical to the serial path - only faster;
+the parallel path just reads up to one window ahead, trading a few possibly-wasted reads
+for latency hiding (a good trade only when latency dominates, hence the network gate).
+Two round-trips per candidate also became one: a file's large-vs-small decision is read
+from the LOCAL sidecar's presence instead of a network stat, and normal files read their
+size off the already-open handle rather than a separate stat before the open. Source reads
+open with a large buffer + sequential-scan hint on a share (fewer, bigger requests), and
+the same one-open-not-two applies to the inline definition snippet. All client-side; the
+local path is unchanged (framework defaults, serial early-exit). CODECOMPASS_FORCE_NETWORK
+exercises every network-gated path on a local dir (tests, or a DFS/junction the root check
+can't see).
+
 Diagnostics for tuning these knobs from data, not guesswork:
 
 - `codecompass survey <path>` reports what the caps currently skip (files with no

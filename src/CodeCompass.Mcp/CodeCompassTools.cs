@@ -111,11 +111,16 @@ public static class CodeCompassTools
             if (endLine < startLine) return null;
             if (endLine - startLine + 1 > SnippetMaxLines) return null; // too big to inline
             var full = System.IO.Path.Combine(ServerContext.Root, relPath.Replace('/', System.IO.Path.DirectorySeparatorChar));
-            var info = new System.IO.FileInfo(full);
-            if (!info.Exists || info.Length > 8L * 1024 * 1024) return null; // don't crack open large files
+            // One open instead of a stat + a separate open: read the size off the open handle (over a
+            // share that's one round-trip, not two), then stream just the span we need and stop.
+            var network = CodeCompass.Core.Storage.NetworkPath.IsNetwork(ServerContext.Root);
+            using var fs = CodeCompass.Core.Storage.SourceFile.OpenSequential(full, network);
+            if (fs.Length > 8L * 1024 * 1024) return null; // don't crack open large files
+            using var reader = new System.IO.StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
             var sb = new StringBuilder();
             int n = 0;
-            foreach (var line in System.IO.File.ReadLines(full))
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
             {
                 n++;
                 if (n < startLine) continue;

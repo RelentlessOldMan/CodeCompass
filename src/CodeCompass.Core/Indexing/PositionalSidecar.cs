@@ -41,6 +41,13 @@ public static class PositionalSidecar
     public static void Delete(string dir, string relPath) =>
         AtomicFile.TryDelete(Path.Combine(dir, SidecarName(relPath)));
 
+    /// <summary>True if a (large-file) sidecar exists for this path. A purely LOCAL cache check: it lets
+    /// search decide a candidate is a big file without a network <c>stat</c> on the source - a sidecar is
+    /// written only for files at/over the streaming threshold. (No sidecar means either a normal file or,
+    /// rarely, a large non-UTF-8 file that has no block index.)</summary>
+    public static bool HasSidecar(string dir, string relPath) =>
+        File.Exists(Path.Combine(dir, SidecarName(relPath)));
+
     /// <summary>Best-effort removal of sidecars not in <paramref name="keep"/> (the live large-file
     /// sidecar names), so a rebuild that drops a big file doesn't leave its sidecar behind.</summary>
     public static void CleanupOrphans(string dir, IReadOnlySet<string> keep) =>

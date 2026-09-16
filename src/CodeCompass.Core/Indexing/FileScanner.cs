@@ -36,11 +36,11 @@ public static class FileScanner
     /// works on files far larger than a single .NET string can hold. Matches <see cref="ScanText"/>
     /// for single-line queries; a query containing a newline won't be found by this path (rare, and
     /// only affects files large enough to require streaming).</summary>
-    public static void ScanByLine(string rel, string fullPath, string query, List<SearchMatch> results, int maxResults, StringComparison comparison = StringComparison.Ordinal)
+    public static void ScanByLine(string rel, string fullPath, string query, List<SearchMatch> results, int maxResults, StringComparison comparison = StringComparison.Ordinal, bool network = false)
     {
         int line = 0;
         IEnumerable<string> lines;
-        try { lines = File.ReadLines(fullPath); } // streams; honors BOM/encoding like ReadAllText
+        try { lines = Storage.SourceFile.ReadLines(fullPath, network); } // streams; honors BOM/encoding like ReadAllText
         catch { return; }
         foreach (var raw in lines)
         {
