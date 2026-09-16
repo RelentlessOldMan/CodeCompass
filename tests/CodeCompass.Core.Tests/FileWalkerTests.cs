@@ -30,7 +30,7 @@ public class FileWalkerTests
     }
 
     [Fact]
-    public void ParallelWalk_EarlyBreak_DoesNotHang()
+    public async Task ParallelWalk_EarlyBreak_DoesNotHang()
     {
         using var repo = new TempRepo();
         for (int i = 0; i < 300; i++) repo.Write($"d{i % 12}/f{i}.cs", "x");
@@ -38,8 +38,10 @@ public class FileWalkerTests
         var walker = new FileWalker(new IgnoreRules(), walkThreads: 8);
         // Abandon the walk after the first record - the workers must be cancelled cleanly, not deadlock
         // on a full output buffer or leak threads.
-        var done = Task.Run(() => { foreach (var _ in walker.Walk(repo.Root)) break; });
-        Assert.True(done.Wait(TimeSpan.FromSeconds(30)), "early-break parallel walk must not hang");
+        var work = Task.Run(() => { foreach (var _ in walker.Walk(repo.Root)) break; });
+        var finished = await Task.WhenAny(work, Task.Delay(TimeSpan.FromSeconds(30)));
+        Assert.Same(work, finished); // completed before the timeout => no hang
+        await work;                  // observe any fault
     }
 
     private static System.Collections.Generic.List<string> WalkRel(string root) =>

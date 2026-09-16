@@ -32,9 +32,9 @@ public static class CodeCompassTools
         // show, so tell the agent to narrow rather than trust this as the complete set.
         var matches = text.Search(query, maxResults + 1, caseSensitive);
         if (matches.Count == 0)
-            return caseSensitive
+            return (caseSensitive
                 ? $"No matches for \"{query}\". Tip: retry with caseSensitive:false for a case-insensitive match, or try a shorter/more distinctive substring."
-                : $"No matches for \"{query}\". Tip: try a shorter or more distinctive substring.";
+                : $"No matches for \"{query}\". Tip: try a shorter or more distinctive substring.") + CoverageCaveat();
 
         bool truncated = matches.Count > maxResults;
         var sb = new StringBuilder();
@@ -42,6 +42,23 @@ public static class CodeCompassTools
         sb.Append(Footer(Math.Min(matches.Count, maxResults), truncated, "match", "matches"));
         return sb.ToString();
     });
+
+    // Honest zeros: a "nothing found" is only true for what's INDEXED. Files excluded by the size cap
+    // aren't searched at all, so a match could be in one - disclose it rather than let the agent read a
+    // zero as "doesn't exist." Empty when there are no known coverage gaps. (Coverage is recorded in the
+    // per-repo meta at build/update time.)
+    private static string CoverageCaveat()
+    {
+        try
+        {
+            var meta = CodeCompass.Core.Storage.IndexMetaFile.Read(ServerContext.Root);
+            if (meta is { FilesOverCap: > 0 })
+                return $" (Note: {meta.FilesOverCap:N0} file(s) exceed the size cap and are NOT indexed - " +
+                       "a match could be in one; run `codecompass survey` to see them.)";
+        }
+        catch { /* meta is best-effort; a missing caveat just omits the note */ }
+        return "";
+    }
 
     // Result footer that distinguishes an exact count from a truncated one, so the agent knows
     // whether it has seen everything or must refine the query. `shown` is how many we actually list.
@@ -61,7 +78,7 @@ public static class CodeCompassTools
         var matches = symbols.FindByName(name);
         if (matches.Count == 0)
             return $"No definition found for \"{name}\". Tips: search_symbols for a partial or one-off name; " +
-                   "search_code if it may be a macro/#define, a language without symbol support, or spelled differently.";
+                   "search_code if it may be a macro/#define, a language without symbol support, or spelled differently." + CoverageCaveat();
 
         var sb = new StringBuilder();
         foreach (var s in matches)
@@ -141,7 +158,7 @@ public static class CodeCompassTools
 
         if (hits.Count == 0)
             return $"No references found for \"{name}\". Tip: try search_code for a raw text search " +
-                   "(it may not resolve as a symbol here), or check the exact spelling/case.";
+                   "(it may not resolve as a symbol here), or check the exact spelling/case." + CoverageCaveat();
 
         bool truncated = hits.Count > maxResults;
         var shown = hits.Take(maxResults).ToList();
@@ -164,7 +181,7 @@ public static class CodeCompassTools
         var matches = symbols.Find(query, maxResults + 1);
         if (matches.Count == 0)
             return $"No symbols matching \"{query}\". Tip: try search_code for a text search " +
-                   "(it may not be a captured symbol - e.g. a macro, or an unsupported language).";
+                   "(it may not be a captured symbol - e.g. a macro, or an unsupported language)." + CoverageCaveat();
 
         bool truncated = matches.Count > maxResults;
         var sb = new StringBuilder();

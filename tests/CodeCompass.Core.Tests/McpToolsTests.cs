@@ -126,6 +126,27 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void EmptyResults_DiscloseCoverageGap_WhenFilesExceedTheCap()
+    {
+        using var repo = new TempRepo();
+        repo.Write("small.cs", "class A { }\n");
+        repo.Write("big.cs", new string('x', 1_200 * 1024));   // 1.2 MB
+        repo.Write(".codecompass.json", "{ \"maxFileMb\": 1 }"); // repo-local cap => big.cs (1.2 MB) is excluded
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+
+            // A term absent from the indexed content: the zero must DISCLOSE that a file was excluded by
+            // the cap (honest zero - a match could be in it), not just say "nothing".
+            var res = CodeCompassTools.SearchCode("definitely_absent_token_zzq");
+            Assert.Contains("No matches", res);
+            Assert.Contains("exceed the size cap", res);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
     public void EmptyResults_IncludeActionableNextStepHints()
     {
         using var repo = NewIndexedRepo();

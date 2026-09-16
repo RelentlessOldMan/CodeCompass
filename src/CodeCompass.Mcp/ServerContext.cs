@@ -247,7 +247,8 @@ public static class ServerContext
             _state = IndexState.Ready;
         }
         finally { Rw.ExitWriteLock(); }
-        try { IndexMetaFile.Write(Root, text.DocumentCount); } catch { /* meta is best-effort */ }
+        // meta.json (path/version/coverage) is written by RepositoryIndexer.Build/Update, which have the
+        // walker's over-cap count; Swap must not overwrite it here (it has no coverage data).
         PublishStatus(); // now Ready (or reconciling, if a startup reconcile is still in flight)
     }
 

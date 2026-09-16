@@ -63,6 +63,8 @@ public static class RepoDiagnostics
             w.WriteLine($"built by version: {meta.Version}");
             w.WriteLine($"built (UTC):      {meta.BuiltUtc}");
             w.WriteLine($"files (at build): {meta.Files:N0}");
+            if (meta.FilesOverCap > 0)
+                w.WriteLine($"over size cap:    {meta.FilesOverCap:N0} file(s) NOT indexed (raise maxFileMb / run survey)");
             if (!string.Equals(Path.GetFullPath(meta.Root), root, StringComparison.OrdinalIgnoreCase))
                 w.WriteLine($"[!] meta root differs: {meta.Root}");
         }

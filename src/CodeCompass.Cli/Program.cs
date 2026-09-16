@@ -673,7 +673,8 @@ static int CmdIndex(string[] args)
 // before the MCP server's first tool call loads it. Respects the same config gate as the server.
 static void PublishReady(string root, int files)
 {
-    CodeCompass.Core.Storage.IndexMetaFile.Write(root, files); // record path/version/time (for doctor/cache/report)
+    // meta.json is written by RepositoryIndexer.Build/Update (they carry the coverage count); this only
+    // publishes the status line.
     CodeCompass.Core.Config.CodeCompassConfig.Load(root); // honor a repo's statusLine:false
     if (!CodeCompass.Core.Config.CodeCompassConfig.StatusLinePublish()) return;
     CodeCompass.Core.Storage.IndexStatusFile.Write(root,

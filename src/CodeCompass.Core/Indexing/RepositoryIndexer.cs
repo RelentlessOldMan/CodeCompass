@@ -255,6 +255,9 @@ public static class RepositoryIndexer
         Log.For(root).Debug($"build stats: {stats.Files:N0} files, {stats.TrigramPostings:N0} trigram postings, " +
                             $"{stats.Symbols:N0} symbols, index {stats.IndexBytes / 1048576.0:F0} MB, " +
                             $"{cores} core(s), {stats.Seconds:F1}s");
+        // Record path/version/time + coverage (files excluded by the size cap) so the search tools can be
+        // honest about a zero result and doctor/cache can report by real path.
+        IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped);
         return (text, symbols, stats);
     }
 
@@ -443,6 +446,7 @@ public static class RepositoryIndexer
 
             SaveAll(root, text, symbols, newSnapshot);
             sw.Stop();
+            IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped); // refresh coverage/meta
             return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false));
         }
     }

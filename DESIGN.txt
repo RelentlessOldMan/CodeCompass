@@ -272,6 +272,31 @@ replace file reads. The agent gets the signal without the surrounding noise it
 would otherwise pay for.
 
 
+Honest results (never a confident wrong answer)
+-----------------------------------------------
+
+An index that quietly omits things is worse than no index: an agent that reads a
+false "not found" may delete a caller that in fact exists. So results disclose
+their own limits (a principle shared with the ripwire project's "honesty
+contract"):
+
+- Truncation is a floor, not a total. A capped result says "showing the first N;
+  MORE EXIST" and the counts distinguish an exact total from a capped one, so the
+  agent knows whether to narrow rather than trusting a partial list as complete.
+
+- A zero means "none found," not "none exists." Files excluded by the size cap
+  aren't searched at all, so when a search returns nothing and the repo has such
+  files, the result says so ("N file(s) exceed the size cap and are NOT indexed -
+  a match could be in one"). The count is recorded in the per-repo meta at build
+  time; `survey` itemizes exactly which files, and `doctor` reports it.
+
+- Empty results also point at the next tool (case-insensitive retry, search_code
+  for a macro/unsupported language, etc.) instead of dead-ending.
+
+- Output is deterministic: the same repo yields the same results and the same
+  trigram-posting count run to run (order-independent), so a diff is a real change.
+
+
 Why not just use something that already exists
 ----------------------------------------------
 
