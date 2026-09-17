@@ -61,6 +61,43 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void FindDefinition_EmptyResult_DisclosesSymbolSkippedFiles()
+    {
+        using var repo = new TempRepo();
+        // A code file over the symbol cap (1 MB default): fully text-searchable, but tree-sitter symbol
+        // extraction is skipped - so its definitions are invisible to find_definition/search_symbols.
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("namespace Gen { public class NeedleType { public void Poke() { } } }");
+        while (sb.Length < 1_100_000) sb.AppendLine("// filler comment line to push this file over the symbol cap");
+        repo.Write("gen/Big.cs", sb.ToString());
+        repo.Write("app/Small.cs", "namespace App { public class Small { } }");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+
+            // The build must have recorded the symbol-skip coverage gap.
+            var meta = CodeCompass.Core.Storage.IndexMetaFile.Read(repo.Root);
+            Assert.NotNull(meta);
+            Assert.True(meta!.FilesSymbolSkipped >= 1, "the over-cap code file should be counted as symbol-skipped");
+
+            // find_definition finds nothing (symbols were skipped) but must NOT read as "doesn't exist":
+            // it discloses the symbol-skip gap and points at the text search that CAN find it.
+            var def = CodeCompassTools.FindDefinition("NeedleType");
+            Assert.StartsWith("No definition found", def);
+            Assert.Contains("NO symbols extracted", def);
+            Assert.Contains("search_code", def);
+
+            // Positive control: the definition really is there, reachable by text search.
+            Assert.Contains("gen/Big.cs", CodeCompassTools.SearchCode("NeedleType"));
+
+            // A small indexed file's symbols are still found normally (no false gap for the common case).
+            Assert.Contains("app/Small.cs", CodeCompassTools.FindDefinition("Small"));
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
     public void SemanticAnalyzers_EvictThenRebuild_ReturnSameResults()
     {
         using var repo = NewIndexedRepo();

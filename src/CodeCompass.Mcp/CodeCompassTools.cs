@@ -47,14 +47,24 @@ public static class CodeCompassTools
     // aren't searched at all, so a match could be in one - disclose it rather than let the agent read a
     // zero as "doesn't exist." Empty when there are no known coverage gaps. (Coverage is recorded in the
     // per-repo meta at build/update time.)
-    private static string CoverageCaveat()
+    private static string CoverageCaveat(bool includeSymbolSkipped = false)
     {
         try
         {
             var meta = CodeCompass.Core.Storage.IndexMetaFile.Read(ServerContext.Root);
-            if (meta is { FilesOverCap: > 0 })
-                return $" (Note: {meta.FilesOverCap:N0} file(s) exceed the size cap and are NOT indexed - " +
-                       "a match could be in one; run `codecompass survey` to see them.)";
+            if (meta is null) return "";
+            var sb = new StringBuilder();
+            if (meta.FilesOverCap > 0)
+                sb.Append($" (Note: {meta.FilesOverCap:N0} file(s) exceed the size cap and are NOT indexed - " +
+                          "a match could be in one; run `codecompass survey` to see them.)");
+            // Symbol-only gap: files that ARE text-searchable but had NO symbols extracted (over the symbol
+            // cap, a numeric data blob, or streamed). A go-to-definition zero could be one of these, so the
+            // symbol tools disclose it - search_code already covers these files, so it doesn't.
+            if (includeSymbolSkipped && meta.FilesSymbolSkipped > 0)
+                sb.Append($" (Note: {meta.FilesSymbolSkipped:N0} large/generated file(s) are text-searchable but " +
+                          "had NO symbols extracted - a definition could be in one; try search_code, or run " +
+                          "`codecompass survey`.)");
+            return sb.ToString();
         }
         catch { /* meta is best-effort; a missing caveat just omits the note */ }
         return "";
@@ -78,7 +88,7 @@ public static class CodeCompassTools
         var matches = symbols.FindByName(name);
         if (matches.Count == 0)
             return $"No definition found for \"{name}\". Tips: search_symbols for a partial or one-off name; " +
-                   "search_code if it may be a macro/#define, a language without symbol support, or spelled differently." + CoverageCaveat();
+                   "search_code if it may be a macro/#define, a language without symbol support, or spelled differently." + CoverageCaveat(includeSymbolSkipped: true);
 
         var sb = new StringBuilder();
         foreach (var s in matches)
@@ -186,7 +196,7 @@ public static class CodeCompassTools
         var matches = symbols.Find(query, maxResults + 1);
         if (matches.Count == 0)
             return $"No symbols matching \"{query}\". Tip: try search_code for a text search " +
-                   "(it may not be a captured symbol - e.g. a macro, or an unsupported language)." + CoverageCaveat();
+                   "(it may not be a captured symbol - e.g. a macro, or an unsupported language)." + CoverageCaveat(includeSymbolSkipped: true);
 
         bool truncated = matches.Count > maxResults;
         var sb = new StringBuilder();

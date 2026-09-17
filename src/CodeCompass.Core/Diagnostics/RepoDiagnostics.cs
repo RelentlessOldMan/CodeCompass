@@ -65,6 +65,8 @@ public static class RepoDiagnostics
             w.WriteLine($"files (at build): {meta.Files:N0}");
             if (meta.FilesOverCap > 0)
                 w.WriteLine($"over size cap:    {meta.FilesOverCap:N0} file(s) NOT indexed (raise maxFileMb / run survey)");
+            if (meta.FilesSymbolSkipped > 0)
+                w.WriteLine($"symbols skipped:  {meta.FilesSymbolSkipped:N0} file(s) text-searchable but no symbols (over symbol cap / data blob / streamed)");
             if (!string.Equals(Path.GetFullPath(meta.Root), root, StringComparison.OrdinalIgnoreCase))
                 w.WriteLine($"[!] meta root differs: {meta.Root}");
         }

@@ -41,6 +41,18 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
     // on files a raised cap admits. Deliberately not configurable - it's a safety rail, not a knob.
     public const int DataBlobCheckMinChars = 1024 * 1024;
 
+    /// <summary>Would <see cref="Extract"/> SKIP symbol extraction for this file because of a cap or the
+    /// data-blob guard - as opposed to parsing it and finding nothing? Mirrors Extract's guards exactly,
+    /// so the indexer can COUNT symbol-skipped files (for honest go-to-definition zeros) without paying to
+    /// parse them. False for a non-symbol language (nothing to skip) and for files that will be parsed.</summary>
+    public bool WouldSkipSymbols(string relativePath, string text)
+    {
+        if (LanguageRegistry.ForPath(relativePath) is null) return false;
+        if (text.Length > _maxChars) return true;
+        if (text.Length > DataBlobCheckMinChars && IsLikelyNumericData(text)) return true;
+        return false;
+    }
+
     /// <summary>
     /// Heuristic: is this text an overwhelmingly numeric/hex data blob (a generated array of literals)
     /// rather than code? Signal is the density of letters OUTSIDE numeric-literal context - i.e. the

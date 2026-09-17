@@ -121,6 +121,7 @@ public static class RepositoryIndexer
         int symSegCounter = SegmentedSymbolIndex.NextSegmentNumber(dir);
         long totalBytes = 0;
         long totalPostings = 0;
+        int totalSymbolSkipped = 0;
         var gate = new object();
 
         var sw = Stopwatch.StartNew();
@@ -168,6 +169,10 @@ public static class RepositoryIndexer
                             }
                             worker.Snapshot[file.RelativePath] = new FileState(len, mtime, bigHash);
                             worker.Bytes += len;
+                            // Streamed files are text-searchable but get no symbols (tree-sitter needs the
+                            // whole string). If it's a symbol-bearing language, count it so a go-to-definition
+                            // zero can disclose that a definition might live here.
+                            if (LanguageRegistry.ForPath(file.RelativePath) is not null) worker.SymbolSkipped++;
                             Interlocked.Increment(ref progressFiles);
                             Interlocked.Add(ref progressBytes, len);
                             if (worker.Text.ApproxBytes >= textBudget) FlushText(worker, dir, ref textSegCounter, textSegFiles);
@@ -201,8 +206,12 @@ public static class RepositoryIndexer
                     worker.Text.AddDocument(file.RelativePath, tg);
                     worker.TrigramPostings += tg.Length;
                     if (LanguageRegistry.ForPath(file.RelativePath) is not null)
-                        foreach (var s in worker.Extractor.Extract(file.RelativePath, content))
-                            worker.Symbols.Add(s);
+                    {
+                        // A symbol-bearing file whose symbols are skipped by a cap / data-blob guard is
+                        // counted (not parsed) so a go-to-definition zero can be honest about it.
+                        if (worker.Extractor.WouldSkipSymbols(file.RelativePath, content)) worker.SymbolSkipped++;
+                        else foreach (var s in worker.Extractor.Extract(file.RelativePath, content)) worker.Symbols.Add(s);
+                    }
                     worker.Snapshot[file.RelativePath] = new FileState(bytes.Length, mtime, hash);
                     worker.Bytes += bytes.Length;
                     Interlocked.Increment(ref progressFiles);
@@ -223,6 +232,7 @@ public static class RepositoryIndexer
                     foreach (var (rel, state) in worker.Snapshot) snapshot[rel] = state;
                     totalBytes += worker.Bytes;
                     totalPostings += worker.TrigramPostings;
+                    totalSymbolSkipped += worker.SymbolSkipped;
                 }
                 worker.Extractor.Dispose();
             });
@@ -255,9 +265,10 @@ public static class RepositoryIndexer
         Log.For(root).Debug($"build stats: {stats.Files:N0} files, {stats.TrigramPostings:N0} trigram postings, " +
                             $"{stats.Symbols:N0} symbols, index {stats.IndexBytes / 1048576.0:F0} MB, " +
                             $"{cores} core(s), {stats.Seconds:F1}s");
-        // Record path/version/time + coverage (files excluded by the size cap) so the search tools can be
-        // honest about a zero result and doctor/cache can report by real path.
-        IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped);
+        // Record path/version/time + coverage (files excluded by the size cap, and files indexed for text
+        // but with no symbols extracted) so the search tools can be honest about a zero result and
+        // doctor/cache can report by real path.
+        IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, totalSymbolSkipped);
         return (text, symbols, stats);
     }
 
@@ -348,6 +359,7 @@ public static class RepositoryIndexer
         public TreeSitterSymbolExtractor Extractor { get; } = new();
         public long Bytes;
         public long TrigramPostings; // sum of per-doc distinct-trigram counts (deterministic total)
+        public int SymbolSkipped;    // symbol-language files indexed for text but with NO symbols extracted
     }
 
     /// <param name="onScan">Optional heartbeat: invoked with the running count of files stat-walked,
@@ -446,7 +458,11 @@ public static class RepositoryIndexer
 
             SaveAll(root, text, symbols, newSnapshot);
             sw.Stop();
-            IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped); // refresh coverage/meta
+            // Refresh coverage/meta. OverCapSkipped is exact from this walk (a size decision, free per file);
+            // the symbol-skipped count needs file CONTENT to classify, which an incremental walk only has for
+            // changed files, so carry forward the last full build's value (a full reindex refreshes it exactly).
+            int carriedSymbolSkipped = IndexMetaFile.Read(root)?.FilesSymbolSkipped ?? 0;
+            IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, carriedSymbolSkipped);
             return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false));
         }
     }

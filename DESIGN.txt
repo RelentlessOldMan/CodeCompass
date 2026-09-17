@@ -306,6 +306,18 @@ contract"):
   a match could be in one"). The count is recorded in the per-repo meta at build
   time; `survey` itemizes exactly which files, and `doctor` reports it.
 
+- The SAME false-negative has a second door, and it's disclosed too. A file can be
+  fully text-searchable yet have NO symbols extracted - it's over the symbol cap, a
+  numeric data blob, or streamed (>=128 MB). So a go-to-definition could genuinely
+  live in a large generated file that find_definition/search_symbols can't see. A
+  separate per-file count (recorded at build time, next to the size-cap count) makes
+  those two tools disclose it on an empty result ("N large/generated file(s) are
+  text-searchable but had NO symbols extracted - a definition could be in one; try
+  search_code"). It's scoped to the symbol tools: search_code already covers those
+  files, so it doesn't repeat the note. The count is file-level (classified when the
+  file is read), so it costs nothing on the per-symbol hot path; an incremental
+  update carries the last full build's value forward (a full reindex refreshes it).
+
 - Empty results also point at the next tool (case-insensitive retry, search_code
   for a macro/unsupported language, etc.) instead of dead-ending.
 
