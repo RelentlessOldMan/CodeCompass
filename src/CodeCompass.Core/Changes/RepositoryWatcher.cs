@@ -87,7 +87,7 @@ public sealed class RepositoryWatcher : IDisposable
         string rel;
         try { rel = Path.GetRelativePath(_root, fullPath); }
         catch { return true; }
-        if (rel.StartsWith("..", StringComparison.Ordinal)) return false;
+        if (Storage.PathSafety.IsOutsideRepo(rel)) return false;
 
         var parts = rel.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
         foreach (var part in parts)

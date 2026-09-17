@@ -384,6 +384,11 @@ public static class RepositoryIndexer
 
             using (var extractor = new TreeSitterSymbolExtractor())
             {
+                // Update rebuilds the whole snapshot from the walk, so "record new state" is a dictionary
+                // write and "drop" is a no-op (a dropped file is simply absent from the fresh snapshot).
+                Action<string, FileState> upsert = (r, s) => newSnapshot[r] = s;
+                Action<string> drop = _ => { };
+
                 foreach (var file in walker.Walk(root))
                 {
                     if (onScan is not null && (++walked & 0x1FF) == 0) onScan(walked); // heartbeat every 512 files
@@ -391,55 +396,21 @@ public static class RepositoryIndexer
                     seen.Add(rel);
                     var mtime = file.MTimeTicks; // from the walk enumeration - avoids a per-file stat (a full
                                                  // extra round-trip per file over SMB; this is the no-op-update cost)
+                    FileState? oldState = old.TryGetValue(rel, out var os) ? os : (FileState?)null;
 
-                    if (old.TryGetValue(rel, out var os) && os.Size == file.Size && os.MTimeTicks == mtime)
+                    // Cheap size+mtime pre-filter: unchanged -> keep the old state, no read.
+                    if (oldState is { } u && u.Size == file.Size && u.MTimeTicks == mtime)
                     {
-                        newSnapshot[rel] = os;
+                        newSnapshot[rel] = u;
                         continue;
                     }
 
-                    // Large files: stream (bounded memory), trigrams only, no symbols - same as Build.
-                    if (file.Size >= LargeFileIndexer.StreamThresholdBytes)
+                    switch (ApplyExistingFile(text, symbols, dir, rel, file.FullPath, file.Size, mtime, oldState, extractor, upsert, drop))
                     {
-                        if (!LargeFileIndexer.TryStreamIndex(file.FullPath, out var big, out var len, out var bigHash, out _, out var bigBlocks)) continue;
-                        if (old.TryGetValue(rel, out var osBig) && osBig.ContentHash == bigHash)
-                        {
-                            newSnapshot[rel] = new FileState(len, mtime, bigHash);
-                            continue;
-                        }
-                        text.RemovePath(rel);
-                        text.AddDocument(rel, big);
-                        symbols.RemovePath(rel); // over the symbol cap anyway; clear any stale symbols
-                        if (bigBlocks is not null) PositionalSidecar.Write(dir, rel, bigBlocks); else PositionalSidecar.Delete(dir, rel);
-                        newSnapshot[rel] = new FileState(len, mtime, bigHash);
-                        if (old.ContainsKey(rel)) modified++; else added++;
-                        continue;
+                        case ChangeKind.Added: added++; break;
+                        case ChangeKind.Modified: modified++; break;
+                        case ChangeKind.Removed: removed++; break;
                     }
-
-                    // Was large last time but is small now -> drop its stale positional sidecar.
-                    if (old.TryGetValue(rel, out var prev) && prev.Size >= LargeFileIndexer.StreamThresholdBytes)
-                        PositionalSidecar.Delete(dir, rel);
-
-                    byte[] bytes;
-                    try { bytes = File.ReadAllBytes(file.FullPath); }
-                    catch { continue; }
-                    if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) continue;
-
-                    var hash = ContentHasher.Hash(bytes);
-                    if (old.TryGetValue(rel, out var os2) && os2.ContentHash == hash)
-                    {
-                        newSnapshot[rel] = new FileState(bytes.Length, mtime, hash);
-                        continue;
-                    }
-
-                    var content = TextDecoder.FromBytes(bytes);
-                    text.RemovePath(rel);
-                    text.AddDocumentText(rel, content);
-                    symbols.RemovePath(rel);
-                    if (LanguageRegistry.ForPath(rel) is not null)
-                        symbols.AddForPath(rel, extractor.Extract(rel, content));
-                    newSnapshot[rel] = new FileState(bytes.Length, mtime, hash);
-                    if (old.ContainsKey(rel)) modified++; else added++;
                 }
             }
 
@@ -535,7 +506,7 @@ public static class RepositoryIndexer
             catch { continue; }
             // Outside the repo: "../" escapes, "." is the root itself, and a different drive
             // (or a junction pointing off-root) yields a still-rooted path from GetRelativePath.
-            if (rel.StartsWith("..", StringComparison.Ordinal) || rel == "." || Path.IsPathRooted(rel)) continue;
+            if (PathSafety.IsOutsideRepo(rel)) continue;
 
             if (Directory.Exists(full))
             {
@@ -570,12 +541,15 @@ public static class RepositoryIndexer
         string rel, string full, IgnoreRules ignore, TreeSitterSymbolExtractor extractor,
         ref int added, ref int modified, ref int removed)
     {
-        bool wasPresent = snapshot.ContainsKey(rel);
-        bool wasLarge = snapshot.TryGetValue(rel, out var prevState) && prevState.Size >= LargeFileIndexer.StreamThresholdBytes;
+        FileState? oldState = snapshot.TryGetValue(rel, out var ps) ? ps : (FileState?)null;
+        bool wasLarge = oldState is { } o && o.Size >= LargeFileIndexer.StreamThresholdBytes;
 
+        // These two guards are specific to the TARGETED path: a single path can become newly-ignored or
+        // grow over the file cap, and must then be dropped. Build/Update never hit them because their
+        // full walk pre-filters ignored and over-cap files.
         if (IsIgnoredRelPath(rel, ignore))
         {
-            if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); if (wasLarge) PositionalSidecar.Delete(dir, rel); removed++; }
+            if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel, wasLarge); snapshot.Remove(rel); removed++; }
             return;
         }
 
@@ -584,50 +558,76 @@ public static class RepositoryIndexer
         catch { return; }
         if (size > ignore.MaxFileSizeBytes) // over the file cap -> not indexed (drop if we had it)
         {
-            if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); if (wasLarge) PositionalSidecar.Delete(dir, rel); removed++; }
+            if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel, wasLarge); snapshot.Remove(rel); removed++; }
             return;
         }
-        var mtime = File.GetLastWriteTimeUtc(full).Ticks;
 
-        // Large files: stream (bounded memory), trigrams only, no symbols - same as Build.
+        var mtime = File.GetLastWriteTimeUtc(full).Ticks; // targeted path has no walk record -> stat once
+        switch (ApplyExistingFile(text, symbols, dir, rel, full, size, mtime, oldState, extractor,
+                                  (r, s) => snapshot[r] = s, r => snapshot.Remove(r)))
+        {
+            case ChangeKind.Added: added++; break;
+            case ChangeKind.Modified: modified++; break;
+            case ChangeKind.Removed: removed++; break;
+        }
+    }
+
+    private enum ChangeKind { None, Added, Modified, Removed }
+
+    /// <summary>
+    /// Index ONE existing file against a LIVE index + snapshot. This is the single routine the two
+    /// incremental callers share - <see cref="Update"/>'s per-file body and <see cref="ApplyFile"/> -
+    /// so the read/classify/diff/mutate pipeline lives in one place instead of drifting across copies.
+    /// Given the file's size + mtime and its previous state, it: reads and classifies (streamed-large vs
+    /// whole-file vs binary/unreadable), skips a touched-but-identical file, and otherwise re-indexes it
+    /// (removing any prior doc + sidecar first). The caller supplies <paramref name="upsert"/> (record the
+    /// new snapshot state) and <paramref name="drop"/> (forget it), because the two callers use different
+    /// snapshot models: Update rebuilds a fresh dictionary, ApplyFile mutates a <see cref="DiskSnapshot"/>
+    /// in place. Returns what changed so the caller can count it.
+    ///
+    /// Build deliberately does NOT use this: it fills per-worker segment buffers in parallel with no
+    /// diffing and its own RAM budget/watchdog, so folding it in would compromise the hot path.
+    /// </summary>
+    private static ChangeKind ApplyExistingFile(
+        SegmentedIndex text, SegmentedSymbolIndex symbols, string dir,
+        string rel, string full, long size, long mtime, FileState? oldState,
+        TreeSitterSymbolExtractor extractor,
+        Action<string, FileState> upsert, Action<string> drop)
+    {
+        bool wasPresent = oldState is not null;
+        bool wasLarge = oldState is { } os0 && os0.Size >= LargeFileIndexer.StreamThresholdBytes;
+
+        // Large files: stream (bounded memory), trigrams only, no symbols.
         if (size >= LargeFileIndexer.StreamThresholdBytes)
         {
-            if (!LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out _, out var bigBlocks))
+            if (!LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out _, out var blocks))
             {
-                if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); PositionalSidecar.Delete(dir, rel); removed++; } // binary/unreadable
-                return;
+                // Binary/unreadable: drop it if it was indexed, so we never leave stale content behind.
+                if (wasPresent) { RemoveFromIndex(text, symbols, dir, rel, wasLarge); drop(rel); return ChangeKind.Removed; }
+                return ChangeKind.None;
             }
-            if (snapshot.TryGetValue(rel, out var oldBig) && oldBig.ContentHash == bigHash)
-            {
-                snapshot[rel] = new FileState(len, mtime, bigHash);
-                return;
-            }
+            if (oldState?.ContentHash == bigHash) { upsert(rel, new FileState(len, mtime, bigHash)); return ChangeKind.None; } // touched, identical
             text.RemovePath(rel);
             text.AddDocument(rel, big);
-            symbols.RemovePath(rel);
-            if (bigBlocks is not null) PositionalSidecar.Write(dir, rel, bigBlocks); else PositionalSidecar.Delete(dir, rel);
-            snapshot[rel] = new FileState(len, mtime, bigHash);
-            if (wasPresent) modified++; else added++;
-            return;
+            symbols.RemovePath(rel); // over the symbol cap anyway; clear any stale symbols
+            if (blocks is not null) PositionalSidecar.Write(dir, rel, blocks); else PositionalSidecar.Delete(dir, rel);
+            upsert(rel, new FileState(len, mtime, bigHash));
+            return wasPresent ? ChangeKind.Modified : ChangeKind.Added;
         }
 
         if (wasLarge) PositionalSidecar.Delete(dir, rel); // shrank below the streaming threshold
 
         byte[] bytes;
         try { bytes = File.ReadAllBytes(full); }
-        catch { return; }
+        catch { if (oldState is { } keep) upsert(rel, keep); return ChangeKind.None; } // transient read error: keep as-was
         if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
         {
-            if (wasPresent) { text.RemovePath(rel); symbols.RemovePath(rel); snapshot.Remove(rel); removed++; }
-            return;
+            if (wasPresent) { RemoveFromIndex(text, symbols, dir, rel, large: false); drop(rel); return ChangeKind.Removed; }
+            return ChangeKind.None;
         }
 
         var hash = ContentHasher.Hash(bytes);
-        if (snapshot.TryGetValue(rel, out var old) && old.ContentHash == hash)
-        {
-            snapshot[rel] = new FileState(bytes.Length, mtime, hash);
-            return;
-        }
+        if (oldState?.ContentHash == hash) { upsert(rel, new FileState(bytes.Length, mtime, hash)); return ChangeKind.None; } // touched, identical
 
         var content = TextDecoder.FromBytes(bytes);
         text.RemovePath(rel);
@@ -635,9 +635,16 @@ public static class RepositoryIndexer
         symbols.RemovePath(rel);
         if (LanguageRegistry.ForPath(rel) is not null)
             symbols.AddForPath(rel, extractor.Extract(rel, content));
-        snapshot[rel] = new FileState(bytes.Length, mtime, hash);
+        upsert(rel, new FileState(bytes.Length, mtime, hash));
+        return wasPresent ? ChangeKind.Modified : ChangeKind.Added;
+    }
 
-        if (wasPresent) modified++; else added++;
+    // Remove a file's doc, symbols, and (if it was a large file) its positional sidecar from a live index.
+    private static void RemoveFromIndex(SegmentedIndex text, SegmentedSymbolIndex symbols, string dir, string rel, bool large)
+    {
+        text.RemovePath(rel);
+        symbols.RemovePath(rel);
+        if (large) PositionalSidecar.Delete(dir, rel);
     }
 
     private static void RemovePathAndChildren(

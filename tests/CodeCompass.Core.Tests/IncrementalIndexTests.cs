@@ -109,6 +109,43 @@ public class IncrementalIndexTests
         Assert.NotEmpty(incSymbols.FindByName("Added"));
     }
 
+    [Theory]
+    [InlineData(false)] // full-walk Update
+    [InlineData(true)]  // targeted UpdatePaths
+    public void Incremental_TextFileBecomesBinary_IsRemovedNotLeftStale(bool targeted)
+    {
+        // A previously-indexed text file that turns binary/unreadable must be DROPPED from the index, not
+        // left as stale content. This pins the now-unified incremental behavior: the full-walk Update path
+        // used to just skip such a file (leaving its old doc searchable) while the targeted path removed it;
+        // both now share one routine and remove it.
+        using var repo = new TempRepo();
+        WriteBumped(repo, "keep.cs", "namespace N { class Keep { } }", 1);
+        WriteBumped(repo, "data.cs", "namespace N { class UniqueNeedleToken { } }", 1);
+
+        var (bt, bs, _) = RepositoryIndexer.Build(repo.Root);
+        using (bt) using (bs)
+        {
+            Assert.NotEmpty(bt.Search("UniqueNeedleToken", 10)); // sanity: indexed as text
+            Assert.NotEmpty(bs.FindByName("UniqueNeedleToken")); // and as a symbol
+        }
+
+        // Overwrite the source with binary content (a NUL byte -> LooksBinary), and bump its mtime.
+        var full = Path.Combine(repo.Root, "data.cs");
+        File.WriteAllBytes(full, new byte[] { 0x00, 0x01, 0x02, 0x00, (byte)'x' });
+        File.SetLastWriteTimeUtc(full, DateTime.UtcNow.AddSeconds(60));
+
+        var (text, symbols, _) = targeted
+            ? RepositoryIndexer.UpdatePaths(repo.Root, new[] { full })
+            : RepositoryIndexer.Update(repo.Root);
+
+        using (text) using (symbols)
+        {
+            Assert.Empty(text.Search("UniqueNeedleToken", 10));   // stale text content is gone
+            Assert.Empty(symbols.FindByName("UniqueNeedleToken")); // stale symbol is gone
+            Assert.NotEmpty(text.Search("Keep", 10));              // the untouched file is unaffected
+        }
+    }
+
     [Fact]
     public void Update_WithNoChanges_IsANoOp()
     {
