@@ -17,16 +17,32 @@ public readonly record struct SemanticLocation(string RelativePath, int Line, in
 /// resolve symbols defined in the codebase and find their true references - so a match
 /// in a comment or string is never counted, unlike lexical search.
 ///
-/// The workspace is built once, lazily, and cached. Rebuild by creating a new instance.
+/// The workspace is built once, lazily, and cached. Rebuild by creating a new instance. It holds the
+/// whole solution (every .cs file's text, plus a cached compilation after the first reference search)
+/// in memory, so a long-lived server disposes it when idle to reclaim that RAM (see ServerContext).
 /// </summary>
-public sealed class RoslynCSharpAnalyzer
+public sealed class RoslynCSharpAnalyzer : IDisposable
 {
     private readonly string _root;
     private readonly object _gate = new();
+    private AdhocWorkspace? _workspace;
     private Solution? _solution;
     private ProjectId? _projectId;
 
     public RoslynCSharpAnalyzer(string root) => _root = Path.GetFullPath(root);
+
+    /// <summary>Release the in-memory solution/compilation (hundreds of MB to GB on a large repo). Safe
+    /// to call while the instance is being discarded; a fresh instance rebuilds lazily on next use.</summary>
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            _workspace?.Dispose();
+            _workspace = null;
+            _solution = null;
+            _projectId = null;
+        }
+    }
 
     /// <summary>Definitions of <paramref name="name"/> declared in the C# sources.</summary>
     public IReadOnlyList<SemanticLocation> FindDefinitions(string name)
@@ -105,6 +121,7 @@ public sealed class RoslynCSharpAnalyzer
                         SourceText.From(text), VersionStamp.Create(), file.RelativePath))));
             }
 
+            _workspace = workspace;
             _solution = solution;
             _projectId = projectId;
             return (solution, solution.GetProject(projectId)!);

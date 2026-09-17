@@ -70,4 +70,23 @@ public class ClangSemanticTests
         var runRefs = analyzer.FindReferences("Run");
         Assert.Contains(runRefs, r => r.LineText.Contains("w.Run()"));
     }
+
+    [Fact]
+    public void Dispose_ReleasesModel_AndRebuildsLazilyOnReuse()
+    {
+        using var repo = new TempRepo();
+        repo.Write("add.cpp", "int add(int a, int b) { return a + b; }");
+        repo.Write("main.cpp", "int add(int a, int b);\nint main() { return add(1, 2); }");
+
+        var analyzer = new ClangCppAnalyzer(repo.Root);
+        var before = analyzer.FindReferences("add").Select(r => (r.RelativePath, r.Line, r.Column, r.LineText)).ToList();
+        Assert.NotEmpty(before);
+
+        // Idle-eviction clears the resident semantic model; the next query must rebuild and match,
+        // and the line text (read via a per-query cache now, not a resident field) must still resolve.
+        analyzer.Dispose();
+        var after = analyzer.FindReferences("add").Select(r => (r.RelativePath, r.Line, r.Column, r.LineText)).ToList();
+        Assert.Equal(before, after);
+        Assert.All(after, r => Assert.Contains("add(1, 2)", r.LineText));
+    }
 }

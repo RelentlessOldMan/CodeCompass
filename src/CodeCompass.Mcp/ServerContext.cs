@@ -40,6 +40,11 @@ public static class ServerContext
     private static ClangCppAnalyzer? _cpp;
     private static RepositoryWatcher? _watcher;
 
+    // Idle-eviction of the (large) semantic analyzers: a background timer drops them after a stretch
+    // with no semantic query so a long session doesn't pin hundreds of MB / GB it's no longer using.
+    private static long _lastSemanticUseMs;
+    private static Timer? _evictTimer;
+
     private static IndexState _state = IndexState.NotStarted;
     private static int _progressFiles;
     private static long _progressBytes;
@@ -67,11 +72,14 @@ public static class ServerContext
     public static void Init(string root)
     {
         RepositoryWatcher? oldWatcher;
+        RoslynCSharpAnalyzer? oldCs;
+        ClangCppAnalyzer? oldCpp;
         Rw.EnterWriteLock();
         try
         {
             oldWatcher = _watcher; // dispose after releasing the lock (see StopLiveIndex)
             _watcher = null;
+            oldCs = _csharp; oldCpp = _cpp; // ditto - dispose off-lock
             Root = Path.GetFullPath(root);
             CodeCompassConfig.Load(Root); // per-repo .codecompass.json in effect for the size gate + build
             _text?.Dispose();
@@ -89,6 +97,7 @@ public static class ServerContext
         }
         finally { Rw.ExitWriteLock(); }
         oldWatcher?.Dispose();
+        oldCs?.Dispose(); oldCpp?.Dispose();
     }
 
     /// <summary>Stop live indexing and release the watcher (clean shutdown / re-point).</summary>
@@ -191,14 +200,71 @@ public static class ServerContext
         Task.Run(() => IndexStatusFile.Write(root, status));
     }
 
+    // These getters run inside Query's read lock (find_references), so they can't race the write-locked
+    // eviction below - a query holds the read lock across its whole semantic call, and eviction waits
+    // for it. Each access stamps "last used" and arms the idle-eviction timer.
     public static RoslynCSharpAnalyzer CSharp
     {
-        get { lock (AnalyzerGate) { return _csharp ??= new RoslynCSharpAnalyzer(Root); } }
+        get { lock (AnalyzerGate) { TouchSemantic(); return _csharp ??= new RoslynCSharpAnalyzer(Root); } }
     }
 
     public static ClangCppAnalyzer Cpp
     {
-        get { lock (AnalyzerGate) { return _cpp ??= new ClangCppAnalyzer(Root); } }
+        get { lock (AnalyzerGate) { TouchSemantic(); return _cpp ??= new ClangCppAnalyzer(Root); } }
+    }
+
+    // Stamp semantic use and make sure the eviction timer is running (armed once, on first semantic use).
+    private static void TouchSemantic()
+    {
+        Volatile.Write(ref _lastSemanticUseMs, Environment.TickCount64);
+        if (_evictTimer is not null) return;
+        int idleMin = CodeCompassConfig.SemanticIdleMinutes();
+        if (idleMin <= 0) return; // eviction disabled -> keep resident
+        long periodMs = Math.Clamp(idleMin * 60_000L / 4, 15_000L, 60_000L); // check a few times per window
+        _evictTimer = new Timer(_ => EvictIdleAnalyzers(), null, periodMs, periodMs);
+    }
+
+    // Drop the semantic analyzers if they've gone unused past the idle window, freeing their (large)
+    // in-memory models. Takes the write lock so it can't dispose an analyzer mid-query (find_references
+    // holds the read lock for its whole duration); the analyzers rebuild lazily on the next access.
+    private static void EvictIdleAnalyzers()
+    {
+        int idleMin = CodeCompassConfig.SemanticIdleMinutes();
+        if (idleMin <= 0) return;
+        long idleMs = idleMin * 60_000L;
+        if (Environment.TickCount64 - Volatile.Read(ref _lastSemanticUseMs) < idleMs) return;
+        if (_csharp is null && _cpp is null) return;
+
+        RoslynCSharpAnalyzer? cs;
+        ClangCppAnalyzer? cpp;
+        Rw.EnterWriteLock();
+        try
+        {
+            if (Environment.TickCount64 - Volatile.Read(ref _lastSemanticUseMs) < idleMs) return; // used just now
+            cs = _csharp; cpp = _cpp;
+            if (cs is null && cpp is null) return;
+            _csharp = null; _cpp = null;
+        }
+        finally { Rw.ExitWriteLock(); }
+        cs?.Dispose(); cpp?.Dispose(); // outside the lock; they're detached and unreachable now
+        Log.For(Root).Info($"evicted idle semantic analyzer(s) after ~{idleMin} min unused to free memory");
+    }
+
+    /// <summary>Test seam: are the semantic analyzers currently resident?</summary>
+    internal static bool HasResidentSemanticAnalyzers()
+    {
+        lock (AnalyzerGate) return _csharp is not null || _cpp is not null;
+    }
+
+    /// <summary>Test seam: force the idle-eviction path now, regardless of the idle window.</summary>
+    internal static void EvictSemanticAnalyzersNow()
+    {
+        RoslynCSharpAnalyzer? cs;
+        ClangCppAnalyzer? cpp;
+        Rw.EnterWriteLock();
+        try { cs = _csharp; cpp = _cpp; _csharp = null; _cpp = null; }
+        finally { Rw.ExitWriteLock(); }
+        cs?.Dispose(); cpp?.Dispose();
     }
 
     /// <summary>Force a full rebuild (the reindex tool). Builds off-lock so searches keep
@@ -233,12 +299,15 @@ public static class ServerContext
     // in-flight search to finish, so a search never touches a disposed mmap).
     private static void Swap(SegmentedIndex text, SegmentedSymbolIndex symbols)
     {
+        RoslynCSharpAnalyzer? oldCs;
+        ClangCppAnalyzer? oldCpp;
         Rw.EnterWriteLock();
         try
         {
             _text?.Dispose();
             _symbols?.Dispose();
             _snapshot?.Dispose();
+            oldCs = _csharp; oldCpp = _cpp; // stale after a rebuild; dispose off-lock to free their model
             _text = text;
             _symbols = symbols;
             _snapshot = null;
@@ -247,6 +316,7 @@ public static class ServerContext
             _state = IndexState.Ready;
         }
         finally { Rw.ExitWriteLock(); }
+        oldCs?.Dispose(); oldCpp?.Dispose();
         // meta.json (path/version/coverage) is written by RepositoryIndexer.Build/Update, which have the
         // walker's over-cap count; Swap must not overwrite it here (it has no coverage data).
         PublishStatus(); // now Ready (or reconciling, if a startup reconcile is still in flight)
@@ -499,8 +569,8 @@ public static class ServerContext
             _snapshot ??= RepositoryIndexer.LoadSnapshot(Root);
             var c = RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, changedFullPaths);
             RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
-            _csharp = null;
-            _cpp = null;
+            _csharp?.Dispose(); _csharp = null; // stale after an edit; free the model, rebuilds lazily
+            _cpp?.Dispose(); _cpp = null;
             if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
                 Log.For(Root).Info($"incremental reindex: +{c.Added} ~{c.Modified} -{c.Removed} " +
                                    $"({changedCount} path(s) changed)");

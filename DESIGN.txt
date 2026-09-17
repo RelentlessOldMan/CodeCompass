@@ -162,6 +162,22 @@ The intelligence layers, cheapest first:
   pretending to be exact. C++ is honestly the hardest language here and we treat
   it with the respect it deserves.
 
+- Semantic analyzers are the one part NOT memory-mapped: Roslyn holds a whole
+  in-memory solution (every .cs file's text, plus a cached compilation once
+  find_references runs) and clang holds its keyed declaration/reference model -
+  hundreds of MB to GB on a large repo. They are built LAZILY (only when
+  find_references is first called) and, on a long-lived server, EVICTED after a
+  stretch with no semantic query (default 10 min; CODECOMPASS_SEMANTIC_IDLE_MIN /
+  semanticIdleMinutes, 0 = keep resident). Eviction disposes the Roslyn workspace
+  and clears clang's maps, then they rebuild lazily on the next use - so a session
+  that greps and reads but stops resolving symbols doesn't pin memory it isn't
+  using. Eviction takes the same write lock a rebuild does, so it can never dispose
+  an analyzer mid-query (a find_references holds the read lock for its whole
+  duration). The clang line-context cache is now per-query (freed when the query
+  returns) rather than a resident field that grew with every file ever returned.
+  This is the counterpart to the mmap'd trigram/symbol indexes: everything that
+  scales with repo size is either mmap'd or reclaimable.
+
 
 Keeping the index fresh without churning on noise
 -------------------------------------------------

@@ -69,4 +69,22 @@ public class RoslynSemanticTests
         var analyzer = new RoslynCSharpAnalyzer(repo.Root);
         Assert.Empty(analyzer.FindReferences("Nonexistent"));
     }
+
+    [Fact]
+    public void Dispose_ReleasesModel_AndRebuildsLazilyOnReuse()
+    {
+        using var repo = new TempRepo();
+        repo.Write("Widget.cs", "namespace App; public class Widget { public void Run() { } }");
+        repo.Write("Caller.cs", "namespace App; public class Caller { public void Go() { new Widget().Run(); } }");
+
+        var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var before = analyzer.FindReferences("Run").Select(r => (r.RelativePath, r.Line, r.Column)).ToList();
+        Assert.NotEmpty(before);
+
+        // Idle-eviction disposes the resident solution to free memory; a subsequent query must rebuild
+        // it lazily and return byte-identical results (proves Dispose doesn't corrupt reusable state).
+        analyzer.Dispose();
+        var after = analyzer.FindReferences("Run").Select(r => (r.RelativePath, r.Line, r.Column)).ToList();
+        Assert.Equal(before, after);
+    }
 }

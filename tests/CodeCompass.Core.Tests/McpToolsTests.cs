@@ -61,6 +61,29 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void SemanticAnalyzers_EvictThenRebuild_ReturnSameResults()
+    {
+        using var repo = NewIndexedRepo();
+        try
+        {
+            // First find_references builds and caches the (large) semantic analyzer.
+            var first = CodeCompassTools.FindReferences("Run");
+            Assert.Contains("src/Caller.cs", first);
+            Assert.True(ServerContext.HasResidentSemanticAnalyzers(), "a semantic query should make the analyzer resident");
+
+            // Idle-eviction (what the background timer does after CODECOMPASS_SEMANTIC_IDLE_MIN) frees it.
+            ServerContext.EvictSemanticAnalyzersNow();
+            Assert.False(ServerContext.HasResidentSemanticAnalyzers(), "eviction must drop the resident analyzer");
+
+            // The next query must rebuild lazily and return byte-identical results.
+            var second = CodeCompassTools.FindReferences("Run");
+            Assert.Equal(first, second);
+            Assert.True(ServerContext.HasResidentSemanticAnalyzers(), "reuse after eviction should rebuild it");
+        }
+        finally { ServerContext.Init(repo.Root); } // reset shared static state
+    }
+
+    [Fact]
     public void SearchCode_SignalsTruncationVsExactCount()
     {
         using var repo = new TempRepo();

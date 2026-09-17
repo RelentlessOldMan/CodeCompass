@@ -13,9 +13,11 @@ namespace CodeCompass.Semantics;
 /// and strings are never counted. Uses compile_commands.json when present (root or
 /// root/build) for accurate include paths/defines; otherwise best-effort default flags.
 ///
-/// Built once, lazily, and cached. Rebuild by creating a new instance.
+/// Built once, lazily, and cached. Rebuild by creating a new instance. The keyed declaration/reference
+/// maps hold the whole C/C++ semantic model in memory, so a long-lived server disposes it when idle to
+/// reclaim that RAM (see ServerContext).
 /// </summary>
-public sealed class ClangCppAnalyzer
+public sealed class ClangCppAnalyzer : IDisposable
 {
     private static readonly HashSet<string> SourceExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".c", ".cc", ".cpp", ".cxx", ".c++" };
@@ -27,12 +29,25 @@ public sealed class ClangCppAnalyzer
     private readonly Dictionary<string, HashSet<string>> _usrsByName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<Loc>> _defsByName = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<Loc>> _refsByUsr = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, string[]> _lineCache = new(StringComparer.Ordinal);
     private Dictionary<string, string[]>? _compileArgs;
 
     private readonly record struct Loc(string Rel, int Line, int Column);
 
     public ClangCppAnalyzer(string root) => _root = Path.GetFullPath(root);
+
+    /// <summary>Release the in-memory semantic model. Safe to call while the instance is being
+    /// discarded; a fresh instance rebuilds lazily on next use.</summary>
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            _usrsByName.Clear();
+            _defsByName.Clear();
+            _refsByUsr.Clear();
+            _compileArgs = null;
+            _built = false;
+        }
+    }
 
     public IReadOnlyList<SemanticLocation> FindDefinitions(string name)
     {
@@ -41,8 +56,9 @@ public sealed class ClangCppAnalyzer
         if (_defsByName.TryGetValue(name, out var locs))
         {
             var seen = new HashSet<Loc>();
+            var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal); // per-query; freed on return
             foreach (var l in locs)
-                if (seen.Add(l)) result.Add(ToSemantic(l));
+                if (seen.Add(l)) result.Add(ToSemantic(l, lineCache));
         }
         return result;
     }
@@ -54,6 +70,7 @@ public sealed class ClangCppAnalyzer
         if (!_usrsByName.TryGetValue(name, out var usrs)) return result;
 
         var seen = new HashSet<Loc>();
+        var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal); // per-query; freed on return
         foreach (var usr in usrs)
         {
             if (!_refsByUsr.TryGetValue(usr, out var locs)) continue;
@@ -61,7 +78,7 @@ public sealed class ClangCppAnalyzer
             {
                 if (seen.Add(l))
                 {
-                    result.Add(ToSemantic(l));
+                    result.Add(ToSemantic(l, lineCache));
                     if (result.Count >= max) return result;
                 }
             }
@@ -238,14 +255,16 @@ public sealed class ClangCppAnalyzer
         return result.ToArray();
     }
 
-    private SemanticLocation ToSemantic(Loc loc)
+    // lineCache is passed in per query and discarded when the query returns, so scattered references in
+    // one file still read it once, without the analyzer holding whole files resident for the session.
+    private SemanticLocation ToSemantic(Loc loc, Dictionary<string, string[]> lineCache)
     {
         var text = "";
-        if (!_lineCache.TryGetValue(loc.Rel, out var lines))
+        if (!lineCache.TryGetValue(loc.Rel, out var lines))
         {
             try { lines = File.ReadAllLines(Path.Combine(_root, loc.Rel.Replace('/', Path.DirectorySeparatorChar))); }
             catch { lines = Array.Empty<string>(); }
-            _lineCache[loc.Rel] = lines;
+            lineCache[loc.Rel] = lines;
         }
         if (loc.Line >= 1 && loc.Line <= lines.Length)
             text = lines[loc.Line - 1].Trim();

@@ -20,6 +20,7 @@ public sealed class RepoConfig
     [JsonPropertyName("readBudgetMb")] public long? ReadBudgetMb { get; set; }
     [JsonPropertyName("autoReconcile")] public bool? AutoReconcile { get; set; }
     [JsonPropertyName("statusLine")] public bool? StatusLine { get; set; }
+    [JsonPropertyName("semanticIdleMinutes")] public int? SemanticIdleMinutes { get; set; }
     [JsonPropertyName("ignore")] public string[]? Ignore { get; set; }
 }
 
@@ -56,6 +57,9 @@ public static class CodeCompassConfig
                               //   always, false = never.
   // "statusLine": true,      // publish index state for the `codecompass statusline` command (shown in
                               //   Claude Code's status area). Default true; harmless if unused.
+  // "semanticIdleMinutes": 10, // evict the resident C#/C++ semantic analyzer after this many minutes
+                              //   with no find_references, to free memory (rebuilds on next use).
+                              //   Default 10; 0 = keep resident.
   // "threads": 0,            // indexing parallelism; 0 / omitted = all CPU cores.
   // "walkThreads": 0,        // concurrent directory reads during the walk; 0 / omitted = min(cores, 8),
                               //   1 = serial. Raise for a high-latency network share (overlaps SMB
@@ -136,6 +140,19 @@ public static class CodeCompassConfig
     /// CODECOMPASS_STATUS_LINE / config `statusLine`.</summary>
     public static bool StatusLinePublish() => StatusLinePublish(_current);
     public static bool StatusLinePublish(RepoConfig cfg) => EnvBool("CODECOMPASS_STATUS_LINE") ?? cfg.StatusLine ?? true;
+
+    /// <summary>Minutes the long-lived server keeps a built semantic analyzer (Roslyn C# / clang C++)
+    /// resident with no semantic query before evicting it to free memory (it rebuilds lazily on the next
+    /// use). These hold the whole language model in RAM - hundreds of MB to GB on a large repo - so on a
+    /// long session that stops using find_references, eviction reclaims the largest resident chunk.
+    /// Default 10; 0 disables eviction (keep resident). Env CODECOMPASS_SEMANTIC_IDLE_MIN / config
+    /// `semanticIdleMinutes`.</summary>
+    public static int SemanticIdleMinutes() => SemanticIdleMinutes(_current);
+    public static int SemanticIdleMinutes(RepoConfig cfg)
+    {
+        int? n = EnvInt("CODECOMPASS_SEMANTIC_IDLE_MIN") ?? cfg.SemanticIdleMinutes;
+        return n is >= 0 ? n.Value : 10; // 0 = never evict
+    }
 
     // Each knob has a pure overload taking an explicit RepoConfig (deterministic; used by tests and
     // tools) and an ambient no-arg overload that resolves against the active repo config.
