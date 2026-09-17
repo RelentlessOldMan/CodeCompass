@@ -80,7 +80,8 @@ Write-Host ("Release zip ready: {0} ({1} MB)" -f $zip, $zipMb)
 Write-Host ""
 Write-Host "Install from the zip (no .NET needed):"
 Write-Host "  1. unzip it to a folder, e.g. C:\Tools\codecompass-plugin"
-Write-Host "  2. in Claude Code:  /plugin add `"C:\Tools\codecompass-plugin`""
+Write-Host "  2. in Claude Code:  /plugin marketplace add `"C:\Tools\codecompass-plugin`""
+Write-Host "                then  /plugin install codecompass@codecompass"
 Write-Host ""
 
 if (-not $Publish) {
