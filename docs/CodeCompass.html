@@ -79,10 +79,11 @@ CodeCompass exposes exactly <b>5 tools</b> with terse descriptions &mdash; that'
 <p>Requires the .NET 8 SDK to <i>build</i>; the produced binaries are self-contained (no .NET needed to run them). Windows x64.</p>
 <p class="muted"><b>Windows on ARM (Snapdragon):</b> no separate ARM build is needed &mdash; the x64 binaries run on Windows 11 on ARM through its built-in x64 emulation (the whole process, native dependencies included, runs emulated). Searches stay effectively instant; only the first index build runs somewhat slower than on native x64.</p>
 <pre>pwsh ./build-plugin.ps1      # publishes self-contained binaries into plugin/bin</pre>
-<p>Then load it into Claude Code:</p>
-<pre>claude --plugin-dir "&lt;path&gt;/plugin"     # one session
-/plugin add "&lt;path&gt;/plugin"             # persistent (run inside Claude Code)</pre>
-<p>In a session, run <code>/mcp</code> to confirm the <b>codecompass</b> server is connected.</p>
+<p>Then load it into Claude Code (there is no <code>/plugin add</code> command):</p>
+<pre>claude --plugin-dir "&lt;path&gt;/plugin"                    # one session
+/plugin marketplace add "&lt;path&gt;/plugin"                # persistent: register the folder…
+/plugin install codecompass@codecompass                # …then install (run inside Claude Code)</pre>
+<p>The prebuilt release zip unzips to a folder you point at the same way (it ships a self-marketplace). In a session, run <code>/mcp</code> to confirm the <b>codecompass</b> server is connected.</p>
 
 <h2>Using it from Claude Code</h2>
 <p>Once installed you don't do anything special &mdash; just ask Claude to work in your repo. It gets the CodeCompass tools, and a

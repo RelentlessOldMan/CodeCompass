@@ -1,0 +1,7 @@
+{
+  "name": "codecompass",
+  "owner": { "name": "CodeCompass" },
+  "plugins": [
+    { "name": "codecompass", "source": "./" }
+  ]
+}

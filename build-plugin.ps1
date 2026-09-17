@@ -49,4 +49,4 @@ if ($manifestVer -match '^\d+\.\d+\.\d+' -and (Test-Path $pjPath)) {
 Write-Host ""
 Write-Host "Plugin ready: $(Join-Path $root 'plugin')  ($version, bin is $size MB)"
 Write-Host "Install for one session:   claude --plugin-dir `"$(Join-Path $root 'plugin')`""
-Write-Host "Install persistently:      /plugin add `"$(Join-Path $root 'plugin')`""
+Write-Host "Install persistently:      /plugin marketplace add `"$(Join-Path $root 'plugin')`"  then  /plugin install codecompass@codecompass"

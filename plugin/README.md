@@ -42,17 +42,30 @@ To allow `grep` again, set the environment variable `CODECOMPASS_ENFORCE=0`.
 
 ## Install
 
+> There is **no** `/plugin add "<path>"` command — that's not how Claude Code installs a local
+> plugin. Use one of the two flows below. In both, the folder you point at is the one that
+> directly contains `.claude-plugin\` (with `plugin.json` + `marketplace.json`), `bin\`, and
+> `hooks\`. The prebuilt zip unzips to exactly that folder; a source checkout uses `<repo>\plugin`.
+
 ### Prebuilt (no .NET needed) — recommended
 
-1. Download `codecompass-plugin-<version>-win-x64.zip` from the repo's Releases page.
-2. Unzip it. **The unzipped folder IS the plugin** — it directly contains `.claude-plugin\`,
-   `bin\`, and `hooks\`. There is **no** `plugin\` subfolder (that only exists in a source
-   checkout).
-3. In Claude Code, add it by its **full quoted path** (not a bare name, and not a `plugin`
-   subfolder):
+1. Download `codecompass-plugin-<version>-win-x64.zip` from the repo's Releases page and unzip it.
+   **The unzipped folder IS the plugin** (it contains `.claude-plugin\`, `bin\`, `hooks\`); there is
+   no `plugin\` subfolder (that only exists in a source checkout).
+
+2. **Persistent install** (stays across sessions) — the folder ships a self-marketplace, so:
 
    ```
-   /plugin add "C:\path\to\codecompass-plugin-<version>-win-x64"
+   /plugin marketplace add "C:\path\to\codecompass-plugin-<version>-win-x64"
+   /plugin install codecompass@codecompass
+   ```
+
+   (`codecompass@codecompass` = plugin `codecompass` from the marketplace named `codecompass`.)
+
+3. **Or, one session only** (no install) — launch Claude Code with:
+
+   ```
+   claude --plugin-dir "C:\path\to\codecompass-plugin-<version>-win-x64"
    ```
 
 4. Run `/mcp` to confirm the `codecompass` server is connected.
@@ -67,11 +80,10 @@ To allow `grep` again, set the environment variable `CODECOMPASS_ENFORCE=0`.
 
    This publishes `plugin/bin/CodeCompass.Mcp.exe` and `CodeCompass.Cli.exe`.
 
-2. Load it — note the `plugin` subfolder here is a **source-checkout** path; the prebuilt zip
-   has no such subfolder (see Prebuilt above):
+2. Load it (the `plugin` subfolder here is the source-checkout plugin root):
 
+   - Persistently:  `/plugin marketplace add "<repo>\plugin"` then `/plugin install codecompass@codecompass`
    - One session:   `claude --plugin-dir "<repo>\plugin"`
-   - Persistently:  `/plugin add "<repo>\plugin"`
 
 3. In a session, run `/mcp` to confirm the `codecompass` server is connected.
 

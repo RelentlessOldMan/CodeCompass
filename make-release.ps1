@@ -42,11 +42,19 @@ CodeCompass plugin $version - install (Windows, no .NET needed)
 This folder IS the plugin. It directly contains .claude-plugin\, bin\, and hooks\.
 There is NO plugin\ subfolder to point at - use THIS folder.
 
-In Claude Code, run (the full quoted path to THIS folder):
+NOTE: there is no "/plugin add <path>" command. Use one of these:
 
-    /plugin add "<full path to this folder>"
+PERSISTENT (stays installed across sessions) - this folder is a self-marketplace:
 
-e.g.  /plugin add "C:\Tools\codecompass-plugin-$version-win-x64"
+    /plugin marketplace add "<full path to this folder>"
+    /plugin install codecompass@codecompass
+
+e.g.  /plugin marketplace add "C:\Tools\codecompass-plugin-$version-win-x64"
+      /plugin install codecompass@codecompass
+
+ONE SESSION ONLY (no install) - launch Claude Code with:
+
+    claude --plugin-dir "<full path to this folder>"
 
 Then run  /mcp  to confirm the "codecompass" server is connected.
 
@@ -86,10 +94,17 @@ $tag = "v$version"
 $notes = @"
 CodeCompass $version - prebuilt, self-contained Windows (x64) plugin.
 
-Install (no .NET SDK required):
-1. Download codecompass-plugin-$version-win-x64.zip below and unzip it.
-2. In Claude Code:  /plugin add "<unzipped-folder>"
-3. Run /mcp to confirm the codecompass server is connected.
+Install (no .NET SDK required). Download codecompass-plugin-$version-win-x64.zip below and unzip it,
+then in Claude Code EITHER install persistently (the folder is a self-marketplace):
+
+    /plugin marketplace add "<unzipped-folder>"
+    /plugin install codecompass@codecompass
+
+OR load it for one session only:
+
+    claude --plugin-dir "<unzipped-folder>"
+
+Then run /mcp to confirm the codecompass server is connected. (There is no ``/plugin add`` command.)
 
 The ARM64 Windows build runs via x64 emulation. See the bundled CodeCompass.html for docs.
 "@
