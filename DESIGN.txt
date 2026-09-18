@@ -151,7 +151,13 @@ The intelligence layers, cheapest first:
 - Syntactic layer (all languages). Tree-sitter parses every supported language
   into a syntax tree, giving us symbol names, definitions, and clean chunk
   boundaries. This is what makes Python, MATLAB, and the long tail useful, and
-  it is the baseline for C# and C++ too.
+  it is the baseline for C# and C++ too. Most grammars come from the
+  TreeSitter.DotNet package; a grammar it doesn't ship (e.g. Lauterbach TRACE32
+  PRACTICE, .cmm) is added by vendoring the grammar's MIT C sources under
+  grammars/, building them to a native DLL (grammars/build-t32.ps1, committed so
+  a normal build needs no C compiler), and registering the extension + a capture
+  query in LanguageRegistry. A grammar that can't load (wrong arch, missing DLL)
+  degrades silently to text-only search - never an error.
 
 - Semantic layer for C# (Roslyn). Precise, cross-file understanding for C#:
   real find-all-references, go-to-definition, call hierarchy across a solution.

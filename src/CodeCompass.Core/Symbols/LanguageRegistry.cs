@@ -40,6 +40,7 @@ public static class LanguageRegistry
         Register(Tsx, ".tsx");
         Register(Go, ".go");
         Register(Rust, ".rs");
+        Register(T32, ".cmm");
     }
 
     private static void Register(LanguageDefinition def, params string[] extensions)
@@ -136,5 +137,14 @@ public static class LanguageRegistry
         (enum_item name: (type_identifier) @enum)
         (trait_item name: (type_identifier) @trait)
         (mod_item name: (identifier) @namespace)
+        """);
+
+    // Lauterbach TRACE32 PRACTICE scripts (.cmm). Grammar: codeberg.org/xasc/tree-sitter-t32 (MIT),
+    // vendored + built to a native DLL (see grammars/). Captures mirror the grammar's tags.scm
+    // definitions: a SUBROUTINE block and a labeled block are the two things you go-to-definition on.
+    private static readonly LanguageDefinition T32 = new("t32",
+        "tree-sitter-t32.dll", "tree_sitter_t32", """
+        (subroutine_block subroutine: (identifier) @function)
+        (labeled_expression label: (identifier) @label)
         """);
 }

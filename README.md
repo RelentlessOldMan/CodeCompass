@@ -29,7 +29,7 @@ editing it keeps just the changed files in memory. This is what lets an 87 GB re
 | Capability | Status |
 |---|---|
 | Literal / substring search (all files) | ✅ Yes |
-| Go-to-definition & symbol search | ✅ C#, C, C++, Python, JS, TS/TSX, Go, Rust |
+| Go-to-definition & symbol search | ✅ C#, C, C++, Python, JS, TS/TSX, Go, Rust, TRACE32 PRACTICE (.cmm) |
 | Semantic find-references (excludes comments/strings) | ✅ C# & C/C++; lexical whole-word elsewhere |
 | Auto re-index on file changes | ✅ debounced, content-hash verified, ignores build output |
 | Runs fully local, no GPU, no cloud | ✅ Yes |

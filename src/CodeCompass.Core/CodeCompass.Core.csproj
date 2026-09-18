@@ -11,4 +11,12 @@
     <PackageReference Include="System.IO.Hashing" Version="8.0.0" />
   </ItemGroup>
 
+  <!-- The TRACE32 PRACTICE (.cmm) grammar isn't in TreeSitter.DotNet, so ship the vendored, pre-built
+       win-x64 DLL next to the package's grammar DLLs in every build/publish output. Rebuild it from the
+       vendored MIT sources with grammars/build-t32.ps1 (needs MSVC). Missing/other-arch -> .cmm quietly
+       falls back to text-only (the extractor tolerates a grammar that can't load). -->
+  <ItemGroup>
+    <None Include="..\..\grammars\prebuilt\win-x64\tree-sitter-t32.dll" Link="tree-sitter-t32.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
