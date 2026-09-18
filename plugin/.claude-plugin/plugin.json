@@ -6,6 +6,5 @@
   "author": { "name": "CodeCompass" },
   "license": "MIT",
   "keywords": ["code-search", "mcp", "indexing", "navigation"],
-  "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json"
+  "mcpServers": "./.mcp.json"
 }
