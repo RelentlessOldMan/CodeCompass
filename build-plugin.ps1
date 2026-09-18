@@ -42,7 +42,10 @@ $pjPath = Join-Path $root "plugin/.claude-plugin/plugin.json"
 if ($manifestVer -match '^\d+\.\d+\.\d+' -and (Test-Path $pjPath)) {
     $pj = Get-Content $pjPath -Raw
     $pj = [regex]::Replace($pj, '("version"\s*:\s*")[^"]*(")', "`${1}$manifestVer`${2}")
-    Set-Content $pjPath $pj -Encoding utf8 -NoNewline
+    # UTF-8 WITHOUT a BOM. Windows PowerShell 5.1's `Set-Content -Encoding utf8` prepends a BOM, which
+    # Claude Code's JSON parser rejects ("Unrecognized token") - so the plugin won't install. Write the
+    # bytes directly with a no-BOM UTF-8 encoder instead.
+    [System.IO.File]::WriteAllText($pjPath, $pj, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "Stamped plugin.json version = $manifestVer"
 }
 
