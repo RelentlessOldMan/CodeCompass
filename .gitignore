@@ -498,3 +498,6 @@ plugin/CodeCompass.html
 
 # Install note generated into the plugin at release time (make-release.ps1)
 plugin/INSTALL.txt
+
+# Local Claude Code session state (plugin enablement, etc.)
+.claude/

@@ -64,12 +64,28 @@ public sealed class IgnoreRules
         return !string.IsNullOrEmpty(ext) && _ignoredExtensions.Contains(ext);
     }
 
-    /// <summary>A NUL byte in the leading chunk is a reliable "this is binary" signal.</summary>
+    /// <summary>A NUL byte in the leading chunk is a reliable "this is binary" signal - EXCEPT for
+    /// UTF-16/UTF-32 text, whose ASCII characters carry NUL bytes. A recognized Unicode byte-order mark
+    /// means the file is text in that encoding, so we let it through (the decoders detect the same BOM and
+    /// read it correctly). Without a BOM, UTF-16/32 is indistinguishable from binary here, so a NUL still
+    /// reads as binary - that BOM-less case stays excluded (a documented limitation).</summary>
     public static bool LooksBinary(ReadOnlySpan<byte> head)
     {
+        if (HasTextBom(head)) return false;
         foreach (var b in head)
             if (b == 0)
                 return true;
+        return false;
+    }
+
+    // A leading UTF-8 / UTF-16 / UTF-32 byte-order mark - the reliable "this is Unicode text" signal.
+    private static bool HasTextBom(ReadOnlySpan<byte> b)
+    {
+        if (b.Length >= 4 && b[0] == 0xFF && b[1] == 0xFE && b[2] == 0x00 && b[3] == 0x00) return true; // UTF-32 LE
+        if (b.Length >= 4 && b[0] == 0x00 && b[1] == 0x00 && b[2] == 0xFE && b[3] == 0xFF) return true; // UTF-32 BE
+        if (b.Length >= 2 && b[0] == 0xFF && b[1] == 0xFE) return true;                                 // UTF-16 LE
+        if (b.Length >= 2 && b[0] == 0xFE && b[1] == 0xFF) return true;                                 // UTF-16 BE
+        if (b.Length >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF) return true;                 // UTF-8
         return false;
     }
 }

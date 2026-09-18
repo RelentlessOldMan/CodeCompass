@@ -622,6 +622,10 @@ the features:
   A search into one uses the per-file block/positional sidecar to read only the
   candidate ~1 MB blocks (network-friendly); UTF-8 only, else it falls back to a
   whole-file line scan.
+- Text is indexed if it is UTF-8/ASCII or carries a UTF-16/UTF-32 byte-order mark
+  (the decoders honor the BOM). A BOM-LESS UTF-16/32 file is indistinguishable from
+  binary here - its ASCII bytes carry NULs with no marker - so it is treated as
+  binary and skipped. Add a BOM (most Windows tools do) to have it indexed.
 - `#define`/macro definitions are not captured as symbols by design; they are
   findable as text.
 - The native tree-sitter parse cannot be cancelled through the binding, so slow
