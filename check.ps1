@@ -154,9 +154,14 @@ if ($Fetch) {
     Section "real repos: fetch + correctness bench"
     & (Join-Path $root "fetch-corpus.ps1") small | Out-Null
     Check "fetch small corpus" ($LASTEXITCODE -eq 0)
-    # bench verify is the lexical oracle (trigram search vs brute force) on the fetched repos.
+    # bench verify is the lexical oracle (trigram search vs brute force) over every repo in the small
+    # tier - now including t32scripts, so .cmm text search is checked against real PRACTICE, not synthetic.
     dotnet run -c Release --project (Join-Path $root "src/CodeCompass.Bench") -- verify small
     Check "bench verify (search oracle)" ($LASTEXITCODE -eq 0)
+    # Symbol smoke on the real TRACE32 PRACTICE repo: proves the vendored .cmm grammar extracts symbols
+    # from real board scripts (a zero here = grammar not loading / node-name drift).
+    dotnet run -c Release --project (Join-Path $root "src/CodeCompass.Bench") -- symbols t32scripts
+    Check "bench symbols (.cmm PRACTICE grammar)" ($LASTEXITCODE -eq 0)
 }
 
 # ---- Manual: real network share -----------------------------------------------------------------

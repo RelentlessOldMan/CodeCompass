@@ -1,6 +1,10 @@
 using System.Text.Json;
 using CodeCompass.Bench;
 using CodeCompass.Core.Diagnostics;
+using CodeCompass.Core.Ignore;
+using CodeCompass.Core.Symbols;
+using CodeCompass.Core.Text;
+using CodeCompass.Core.Walking;
 
 ProcessPerformance.RequestFullSpeed(); // opt out of EcoQoS so bench numbers reflect full-speed indexing
 
@@ -13,6 +17,7 @@ switch (args[0].ToLowerInvariant())
     case "run": return CmdRun(args);
     case "bench": return await CmdBench(args);
     case "verify": return await CmdVerify(args);
+    case "symbols": return await CmdSymbols(args);
     case "eval": return CmdEval(args);
     case "all": return CmdAll(args);
     default: return Usage();
@@ -26,8 +31,9 @@ static int Usage()
     Console.Error.WriteLine("  bench fetch <id|tier|all>      download+extract pinned corpora to .corpus/");
     Console.Error.WriteLine("  bench run    <path>            benchmark a local directory");
     Console.Error.WriteLine("  bench bench  <id>              fetch (if needed) then benchmark a manifest corpus");
-    Console.Error.WriteLine("  bench verify <path|id> [budgetMB] [queries]");
+    Console.Error.WriteLine("  bench verify <path|id|tier> [budgetMB] [queries]");
     Console.Error.WriteLine("                                 correctness: trigram search vs brute-force on real files");
+    Console.Error.WriteLine("  bench symbols <path|id>        symbol-extraction smoke: per-language symbol counts (fails on zero)");
     Console.Error.WriteLine("  bench eval   <path> [sampleSize]  estimate tokens saved: find_definition vs grep+read");
     Console.Error.WriteLine("  bench all    [all|tier|id]     perf + correctness over fetched corpora -> HTML report");
     Console.Error.WriteLine();
@@ -105,35 +111,104 @@ static async Task<int> CmdVerify(string[] args)
 {
     if (args.Length < 2) return Usage();
 
-    // Argument is either a manifest corpus id (fetch it) or a local path.
-    string path;
-    var manifest = File.Exists(ManifestPath()) ? CorpusManifest.Load(ManifestPath()) : new CorpusManifest();
-    var entry = manifest.Corpora.FirstOrDefault(c => c.Id == args[1]);
-    if (entry is not null)
-    {
-        path = await CorpusFetcher.FetchAsync(entry);
-    }
-    else
-    {
-        path = Path.GetFullPath(args[1]);
-        if (!Directory.Exists(path)) { Console.Error.WriteLine($"not a directory: {path}"); return 1; }
-    }
-
     long budgetMb = args.Length > 2 && long.TryParse(args[2], out var b) ? b : 100;
     int queries = args.Length > 3 && int.TryParse(args[3], out var q) ? q : 40;
 
-    var r = Verifier.LexicalOracle(path, budgetMb * 1024 * 1024, queries);
-    Console.WriteLine();
-    Console.WriteLine($"Lexical oracle: {r.Queries} queries over {r.SubsetFiles:N0} files " +
-                      $"({r.SubsetBytes / (1024.0 * 1024.0):N1} MB verified)");
-    if (r.Mismatches == 0)
+    var paths = await ResolveTargets(args[1]); // a corpus id, a whole tier, or a local path
+    if (paths is null) return 1;
+
+    int failures = 0;
+    foreach (var path in paths)
     {
-        Console.WriteLine("PASS - trigram search matches the brute-force scan exactly.");
-        return 0;
+        var r = Verifier.LexicalOracle(path, budgetMb * 1024 * 1024, queries);
+        Console.WriteLine();
+        Console.WriteLine($"[{Path.GetFileName(path)}] lexical oracle: {r.Queries} queries over {r.SubsetFiles:N0} files " +
+                          $"({r.SubsetBytes / (1024.0 * 1024.0):N1} MB verified)");
+        if (r.Mismatches == 0)
+            Console.WriteLine("  PASS - trigram search matches the brute-force scan exactly.");
+        else
+        {
+            failures++;
+            Console.WriteLine($"  FAIL - {r.Mismatches} mismatch(es):");
+            foreach (var ex in r.Examples) Console.WriteLine("    " + ex);
+        }
     }
-    Console.WriteLine($"FAIL - {r.Mismatches} mismatch(es):");
-    foreach (var ex in r.Examples) Console.WriteLine("  " + ex);
-    return 1;
+    return failures == 0 ? 0 : 1;
+}
+
+// Symbol-extraction smoke over real files: for every symbol-bearing file (bounded budget), extract and
+// tally by extension, so a language whose grammar silently stopped producing symbols (e.g. a bad DLL or
+// a grammar node-name drift) shows up as a zero. Fails if NOTHING extracted.
+static async Task<int> CmdSymbols(string[] args)
+{
+    if (args.Length < 2) return Usage();
+    var paths = await ResolveTargets(args[1]);
+    if (paths is null) return 1;
+
+    int overall = 0;
+    foreach (var path in paths)
+    {
+        var walker = new FileWalker(new IgnoreRules());
+        using var extractor = new TreeSitterSymbolExtractor();
+        var byExt = new Dictionary<string, (int Files, int Symbols)>(StringComparer.OrdinalIgnoreCase);
+        long acc = 0; const long budget = 200L * 1024 * 1024;
+
+        foreach (var f in walker.Walk(path))
+        {
+            if (acc >= budget) break;
+            if (LanguageRegistry.ForPath(f.RelativePath) is null) continue; // only symbol-bearing languages
+            string content;
+            try
+            {
+                var bytes = File.ReadAllBytes(f.FullPath);
+                if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) continue;
+                content = TextDecoder.FromBytes(bytes);
+                acc += bytes.Length;
+            }
+            catch { continue; }
+
+            int n = extractor.Extract(f.RelativePath, content).Count;
+            var ext = Path.GetExtension(f.RelativePath).ToLowerInvariant();
+            var cur = byExt.TryGetValue(ext, out var v) ? v : (Files: 0, Symbols: 0);
+            byExt[ext] = (cur.Files + 1, cur.Symbols + n);
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"[{Path.GetFileName(path)}] symbols by extension:");
+        int total = 0;
+        foreach (var kv in byExt.OrderByDescending(k => k.Value.Symbols))
+        {
+            Console.WriteLine($"  {kv.Key,-6} {kv.Value.Files,6:N0} files  {kv.Value.Symbols,9:N0} symbols");
+            total += kv.Value.Symbols;
+        }
+        if (total == 0)
+        {
+            Console.WriteLine("  FAIL - no symbols extracted from any symbol-bearing file (grammar not loading?).");
+            overall = 1;
+        }
+        else Console.WriteLine($"  PASS - {total:N0} symbols across {byExt.Count} language(s).");
+    }
+    return overall;
+}
+
+// Resolve a CLI target into one-or-more local repo paths: a manifest corpus id (fetch it), a whole tier
+// (fetch+return every corpus in it), or a local directory path. Null on a bad path.
+static async Task<List<string>?> ResolveTargets(string selector)
+{
+    var manifest = File.Exists(ManifestPath()) ? CorpusManifest.Load(ManifestPath()) : new CorpusManifest();
+    var matches = manifest.Corpora.Where(c => c.Id == selector).ToList();
+    if (matches.Count == 0) matches = manifest.Corpora.Where(c => c.Tier == selector).ToList();
+
+    if (matches.Count > 0)
+    {
+        var paths = new List<string>();
+        foreach (var e in matches) paths.Add(await CorpusFetcher.FetchAsync(e));
+        return paths;
+    }
+
+    var path = Path.GetFullPath(selector);
+    if (!Directory.Exists(path)) { Console.Error.WriteLine($"not a corpus id/tier or directory: {selector}"); return null; }
+    return new List<string> { path };
 }
 
 static int CmdAll(string[] args)

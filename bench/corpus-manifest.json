@@ -24,6 +24,17 @@
       "note": "~10 MB. Small, clean C++."
     },
     {
+      "id": "t32scripts",
+      "tier": "small",
+      "owner": "Benetti-Engineering",
+      "repo": "trace32-scripts",
+      "ref": "master",
+      "commit": "5a728f5e552af2ff53661c23421f63afe1e09bf0",
+      "language": "t32",
+      "sha256": null,
+      "note": "~0.1 MB, 42 real TRACE32 PRACTICE (.cmm) board scripts. Exercises .cmm text search + symbol extraction on real code, not just synthetic snippets. GPL-2.0; fetched locally only (never redistributed)."
+    },
+    {
       "id": "efcore",
       "tier": "medium",
       "owner": "dotnet",
