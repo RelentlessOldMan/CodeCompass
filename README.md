@@ -377,4 +377,4 @@ exact commits) and never checked in.
 
 ## License
 
-[MIT](LICENSE).
+MIT — see [LICENSE](LICENSE). © 2026 RelentlessOldMan.
