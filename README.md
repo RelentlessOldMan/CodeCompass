@@ -375,6 +375,10 @@ See [`DESIGN.txt`](DESIGN.txt) for the architecture and [`TESTING.txt`](TESTING.
 plan. The optional benchmark corpus is fetched by [`fetch-corpus.ps1`](fetch-corpus.ps1) (pinned to
 exact commits) and never checked in.
 
+## Contributing
+
+This is a personal tool, published as-is — **issues and pull requests aren't accepted** (PRs auto-close). Fork it and make it your own. 🧭
+
 ## License
 
 MIT — see [LICENSE](LICENSE). © 2026 RelentlessOldMan.
