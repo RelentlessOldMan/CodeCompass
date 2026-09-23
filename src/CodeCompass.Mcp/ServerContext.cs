@@ -67,8 +67,6 @@ public static class ServerContext
 
     public static string Root { get; private set; } = "";
 
-    private static long AutoIndexLimitBytes() => CodeCompassConfig.MaxAutoBytes();
-
     public static void Init(string root)
     {
         RepositoryWatcher? oldWatcher;
@@ -460,18 +458,9 @@ public static class ServerContext
         DrainPending();
     }
 
-    private static bool ExceedsAutoLimit(out long totalBytes)
-    {
-        long limit = AutoIndexLimitBytes();
-        long sum = 0;
-        foreach (var f in new FileWalker(new IgnoreRules()).Walk(Root))
-        {
-            sum += f.Size;
-            if (sum > limit) { totalBytes = sum; return true; }
-        }
-        totalBytes = sum;
-        return false;
-    }
+    // The auto-index size policy lives in Core (RepositoryIndexer.ExceedsAutoLimit) so the project root
+    // (here) and linked roots (`link add`) apply the identical "small -> index, large -> defer" rule.
+    private static bool ExceedsAutoLimit(out long totalBytes) => RepositoryIndexer.ExceedsAutoLimit(Root, out totalBytes);
 
     private static string BuildingMessage()
     {

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using CodeCompass.Core.Changes;
+using CodeCompass.Core.Config;
 using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Hooks;
 using CodeCompass.Core.Ignore;
@@ -8,6 +9,7 @@ using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Symbols;
 using CodeCompass.Core.Symbols.Segments;
+using CodeCompass.Core.Storage;
 using CodeCompass.Core.Text;
 using CodeCompass.Core.Walking;
 using CodeCompass.Semantics;
@@ -24,6 +26,7 @@ return args.Length == 0
     : args[0].ToLowerInvariant() switch
     {
         "index" => CmdIndex(args),
+        "link" => CmdLink(args),
         "update" => CmdUpdate(args),
         "search" => CmdSearch(args),
         "def" => CmdDef(args),
@@ -667,6 +670,130 @@ static int CmdIndex(string[] args)
     Console.WriteLine($"Text index: {s.IndexBytes / (1024.0 * 1024.0):F1} MB ({ratio:F2}x corpus)");
     PublishReady(root, (int)s.Files); // so the status line shows "ready" even before the MCP server loads
     return 0;
+}
+
+// ---- link: associate external directories with a project's index (federated at query time) ----------
+
+static int CmdLink(string[] args) => (args.Length < 2 ? "" : args[1].ToLowerInvariant()) switch
+{
+    "add" => CmdLinkAdd(args),
+    "remove" or "rm" => CmdLinkRemove(args),
+    "list" or "ls" => CmdLinkList(args),
+    _ => LinkUsage(),
+};
+
+static int LinkUsage()
+{
+    Console.Error.WriteLine("usage:");
+    Console.Error.WriteLine("  codecompass link add <path> [project-dir]        index an external directory and attach it to the project");
+    Console.Error.WriteLine("  codecompass link remove <path> [project-dir]     detach it (prompts to delete its index if unused; --purge/--keep to skip)");
+    Console.Error.WriteLine("  codecompass link list [project-dir]              show the project's linked roots and their index status");
+    Console.Error.WriteLine("project-dir defaults to the current directory.");
+    return 1;
+}
+
+static int CmdLinkAdd(string[] args)
+{
+    if (args.Length < 3) { Console.Error.WriteLine("usage: codecompass link add <path> [project-dir]"); return 1; }
+    var linked = Path.GetFullPath(args[2]);
+    var project = Path.GetFullPath(args.Length > 3 && !args[3].StartsWith("--") ? args[3] : Directory.GetCurrentDirectory());
+
+    if (!Directory.Exists(linked)) { Console.Error.WriteLine($"not a directory: {linked}"); return 1; }
+
+    // A sub-dir or parent of the project (or of an existing link) is already covered - reject the overlap.
+    if (Nested(project, linked, out var why)) { Console.Error.WriteLine("cannot link: " + why); return 1; }
+    foreach (var existing in LinkStore.Read(project))
+        if (Nested(existing, linked, out var why2)) { Console.Error.WriteLine("cannot link: " + why2); return 1; }
+
+    if (!LinkStore.Add(project, linked)) { Console.WriteLine($"already linked: {linked}"); return 0; }
+    Console.WriteLine($"linked: {linked}");
+
+    // Reuse an existing index (the shared-root case), else apply the same size policy the project root uses.
+    if (RepositoryIndexer.TryLoad(linked, out var t0, out var s0)) { t0.Dispose(); s0.Dispose(); Console.WriteLine("  index already present - reused."); return 0; }
+
+    CodeCompassConfig.Load(linked); // the linked root's own .codecompass.json governs its build/size gate
+    if (RepositoryIndexer.ExceedsAutoLimit(linked, out var total))
+    {
+        Console.WriteLine($"  {linked} is large (~{total / 1048576.0:F0} MB) - build it once, then it's part of this project:");
+        Console.WriteLine($"      codecompass index \"{linked}\"");
+        return 0;
+    }
+    Console.Error.Write("  indexing...");
+    try
+    {
+        var (ti, sy, st) = RepositoryIndexer.Build(linked);
+        ti.Dispose(); sy.Dispose();
+        Console.Error.Write("\r" + new string(' ', 20) + "\r");
+        Console.WriteLine($"  indexed {st.Files:N0} files ({st.Bytes / 1048576.0:F1} MB) in {st.Seconds:F1}s; {st.Symbols:N0} symbols.");
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"\r  index failed: {ex.Message}"); return 1; }
+    return 0;
+}
+
+static int CmdLinkRemove(string[] args)
+{
+    if (args.Length < 3) { Console.Error.WriteLine("usage: codecompass link remove <path> [project-dir]"); return 1; }
+    var linked = Path.GetFullPath(args[2]);
+    var project = Path.GetFullPath(args.Length > 3 && !args[3].StartsWith("--") ? args[3] : Directory.GetCurrentDirectory());
+
+    if (!LinkStore.Remove(project, linked)) { Console.Error.WriteLine($"not linked to this project: {linked}"); return 1; }
+    Console.WriteLine($"unlinked: {linked}");
+
+    var others = LinkStore.ProjectsLinking(linked, excludingProjectRoot: project);
+    if (others.Count > 0)
+    {
+        Console.WriteLine($"  its index is kept - still linked by {others.Count} other project(s):");
+        foreach (var o in others) Console.WriteLine($"      {o}");
+        return 0;
+    }
+
+    var cacheDir = IndexStore.CacheDirPath(linked);
+    if (!Directory.Exists(cacheDir)) return 0; // no index to reclaim
+
+    bool purge = args.Contains("--purge");
+    if (!purge && !args.Contains("--keep") && !Console.IsInputRedirected)
+    {
+        Console.Write($"  no other project uses {linked}'s index. Delete it to reclaim disk? [y/N] ");
+        var ans = Console.ReadLine();
+        purge = ans is not null && ans.Trim().StartsWith("y", StringComparison.OrdinalIgnoreCase);
+    }
+    if (purge)
+    {
+        try { Directory.Delete(cacheDir, recursive: true); Console.WriteLine("  index deleted."); }
+        catch (Exception ex) { Console.Error.WriteLine($"  could not delete index ({ex.Message})."); }
+    }
+    else
+    {
+        Console.WriteLine($"  index kept at {cacheDir}. Re-run with --purge to delete it, or manage caches with: codecompass cache");
+    }
+    return 0;
+}
+
+static int CmdLinkList(string[] args)
+{
+    var project = Path.GetFullPath(args.Length > 2 ? args[2] : Directory.GetCurrentDirectory());
+    var links = LinkStore.Read(project);
+    Console.WriteLine($"project: {project}");
+    if (links.Count == 0) { Console.WriteLine("  (no linked roots)"); return 0; }
+    foreach (var l in links)
+    {
+        string status;
+        if (!Directory.Exists(l)) status = "MISSING (directory gone)";
+        else if (RepositoryIndexer.TryLoad(l, out var t, out var s)) { using (t) using (s) status = $"indexed, {t.DocumentCount:N0} files"; }
+        else status = $"not indexed - run: codecompass index \"{l}\"";
+        Console.WriteLine($"  {l}   [{status}]");
+    }
+    return 0;
+}
+
+// True if `a` and `b` are the same directory or one is nested in the other (so linking `b` is redundant).
+static bool Nested(string a, string b, out string why)
+{
+    if (PathSafety.IsUnderOrEqual(b, a) && PathSafety.IsUnderOrEqual(a, b)) { why = $"{b} is the project or an existing linked root itself."; return true; }
+    if (PathSafety.IsUnderOrEqual(b, a)) { why = $"{b} is already inside {a} - it's covered by that index."; return true; }
+    if (PathSafety.IsUnderOrEqual(a, b)) { why = $"{a} is inside {b} - link the outer directory instead of nesting."; return true; }
+    why = "";
+    return false;
 }
 
 // Publish a "ready" status file so `codecompass statusline` reflects a freshly CLI-built index even

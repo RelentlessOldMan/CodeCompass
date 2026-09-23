@@ -27,4 +27,18 @@ public static class PathSafety
     /// <summary>A bare filename (no directory separators, not rooted) - resolves only inside its dir.</summary>
     public static bool IsBareFileName(string name) =>
         name.Length > 0 && name == Path.GetFileName(name);
+
+    /// <summary>Is <paramref name="child"/> the same directory as, or nested inside, <paramref name="parent"/>?
+    /// Both are absolutized and compared case-insensitively (Windows). Used to reject linking a directory
+    /// already covered by another root, and (federation) to confirm a result path belongs to a known root.</summary>
+    public static bool IsUnderOrEqual(string child, string parent)
+    {
+        var c = Normalize(child);
+        var p = Normalize(parent);
+        if (string.Equals(c, p, StringComparison.OrdinalIgnoreCase)) return true;
+        var rel = Path.GetRelativePath(p, c);
+        return rel != "." && !rel.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(rel);
+    }
+
+    private static string Normalize(string p) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p));
 }

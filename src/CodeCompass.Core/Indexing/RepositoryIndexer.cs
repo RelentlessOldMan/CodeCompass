@@ -326,6 +326,26 @@ public static class RepositoryIndexer
     public static int DegreeOfParallelism() => CodeCompassConfig.Threads(Environment.ProcessorCount);
 
     /// <summary>
+    /// The shared "first encounter" size policy: is <paramref name="root"/> over the auto-index budget
+    /// (<c>maxAutoMb</c>, default 100 MB)? A small root is indexed automatically/inline; a large one is
+    /// deferred to an explicit <c>codecompass index</c>. Used identically for the project root (MCP
+    /// startup) and for linked roots (<c>link add</c>), so both behave the same. Stops summing the moment
+    /// the limit is crossed. Caller should <see cref="CodeCompassConfig.Load"/> the relevant config first.
+    /// </summary>
+    public static bool ExceedsAutoLimit(string root, out long totalBytes)
+    {
+        long limit = CodeCompassConfig.MaxAutoBytes();
+        long sum = 0;
+        foreach (var f in new FileWalker(new IgnoreRules()).Walk(Path.GetFullPath(root)))
+        {
+            sum += f.Size;
+            if (sum > limit) { totalBytes = sum; return true; }
+        }
+        totalBytes = sum;
+        return false;
+    }
+
+    /// <summary>
     /// Per-worker trigram/symbol segment byte budgets, scaled so total build buffers
     /// (cores x (text+symbol)) fit a fraction of available RAM - keeps first-time builds
     /// within reach on small machines. Override the text budget with CODECOMPASS_SEGMENT_MB.
