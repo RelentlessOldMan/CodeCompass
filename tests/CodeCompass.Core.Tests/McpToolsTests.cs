@@ -356,6 +356,45 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void Federation_OwnedLinkedRoot_PicksUpLiveEdits()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { public void Run() { } } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class Gizmo { } }");
+
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            // First federated query loads the linked root and (nothing else holds it) wins write-ownership,
+            // so this session live-watches the linked root - exactly like the project root. (A "no matches"
+            // reply echoes the query, so key the assertions on the FILE PATH, which only a real hit carries.)
+            Assert.DoesNotContain("Fresh.cs", CodeCompassTools.SearchCode("BrandNewLinkedSymbol"));
+
+            // Edit the linked root out-of-band; the owner's watcher should index it live and federate it.
+            external.Write("lib/Fresh.cs", "namespace Ext { public class Fresh { public void BrandNewLinkedSymbol() { } } }");
+
+            string res = "";
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.Elapsed < System.TimeSpan.FromSeconds(20))
+            {
+                res = CodeCompassTools.SearchCode("BrandNewLinkedSymbol");
+                if (res.Contains("Fresh.cs")) break;
+                Thread.Sleep(200);
+            }
+            Assert.Contains("BrandNewLinkedSymbol", res);
+            Assert.Contains("Fresh.cs", res);
+            Assert.Contains(external.Root, res); // shown as an absolute path into the linked root
+        }
+        finally { ServerContext.Init(project.Root); } // resets shared static state (disposes linked watcher)
+    }
+
+    [Fact]
     public void FindReferences_SemanticForCpp()
     {
         using var repo = NewIndexedRepo();

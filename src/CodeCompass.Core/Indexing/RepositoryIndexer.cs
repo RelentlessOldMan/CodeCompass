@@ -332,9 +332,15 @@ public static class RepositoryIndexer
     /// startup) and for linked roots (<c>link add</c>), so both behave the same. Stops summing the moment
     /// the limit is crossed. Caller should <see cref="CodeCompassConfig.Load"/> the relevant config first.
     /// </summary>
-    public static bool ExceedsAutoLimit(string root, out long totalBytes)
+    public static bool ExceedsAutoLimit(string root, out long totalBytes) =>
+        ExceedsAutoLimit(root, CodeCompassConfig.Current, out totalBytes);
+
+    /// <summary>As <see cref="ExceedsAutoLimit(string,out long)"/> but against an EXPLICIT config, so a
+    /// caller can gate a root other than the ambient one (e.g. a linked root) without loading and
+    /// clobbering the global config from a background thread.</summary>
+    public static bool ExceedsAutoLimit(string root, RepoConfig cfg, out long totalBytes)
     {
-        long limit = CodeCompassConfig.MaxAutoBytes();
+        long limit = CodeCompassConfig.MaxAutoBytes(cfg);
         long sum = 0;
         foreach (var f in new FileWalker(new IgnoreRules()).Walk(Path.GetFullPath(root)))
         {

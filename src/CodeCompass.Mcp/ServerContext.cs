@@ -49,7 +49,20 @@ public static class ServerContext
     // queried alongside the primary. Loaded when the primary becomes Ready and refreshed on reindex, so
     // a `link add` run in a terminal is picked up on the next session/reindex. Guarded by Rw.
     internal readonly record struct IndexHandle(string Root, SegmentedIndex Text, SegmentedSymbolIndex Symbols, bool IsPrimary);
-    private static List<IndexHandle> _linked = new();
+
+    // One attached external root. If this session won write-ownership (WriteOwnership - a crash-proof OS
+    // handle), it also runs a watcher so edits to that root are indexed live, exactly like the project
+    // root; otherwise another session owns writing and this one serves it read-only. Text/Symbols are the
+    // current federated handles, swapped under Rw when the owner updates.
+    private sealed class LinkedRoot
+    {
+        public required string Root;
+        public required SegmentedIndex Text;
+        public required SegmentedSymbolIndex Symbols;
+        public WriteOwnership? Own;       // non-null => this session owns writing this root
+        public RepositoryWatcher? Watcher; // non-null => owner + live-watching
+    }
+    private static List<LinkedRoot> _linked = new();
 
     private static IndexState _state = IndexState.NotStarted;
     private static int _progressFiles;
@@ -94,8 +107,6 @@ public static class ServerContext
             _snapshot = null;
             _csharp = null;
             _cpp = null;
-            foreach (var h in _linked) { h.Text.Dispose(); h.Symbols.Dispose(); }
-            _linked = new List<IndexHandle>();
             _state = IndexState.NotStarted;
             _pendingPaths.Clear();
             _pendingReconcile = false;
@@ -104,27 +115,128 @@ public static class ServerContext
         finally { Rw.ExitWriteLock(); }
         oldWatcher?.Dispose();
         oldCs?.Dispose(); oldCpp?.Dispose();
+        // Off-lock: tearing down linked roots disposes their watchers, which must never happen under Rw
+        // (a watcher.Dispose drains an in-flight OnLinkedChanges -> SwapLinked that itself takes Rw).
+        DisposeLinkedRoots();
     }
 
-    // Open (read-only) the index of each linked root for this project, so federated queries can include
-    // them. Linked indexes are built + kept fresh by their own root (`codecompass index` / `link add` /
-    // that root's own watcher); here we only read them. A not-yet-indexed linked root is skipped (its
-    // status shows in `link list`/doctor). Call under the write lock. Replaces any previously-loaded set.
-    private static void LoadLinkedIndexes()
+    // All linked-root LIFECYCLE (load/dispose) is serialized here, and NEVER runs while holding Rw - a
+    // RepositoryWatcher.Dispose drains an in-flight callback that itself takes Rw, so disposing a watcher
+    // under Rw would deadlock. The pattern throughout: watcher create/dispose happen off-lock; the _linked
+    // list and old mmap indexes are swapped/disposed under a brief Rw write. Rw is never held while taking
+    // this gate, so there is no lock-ordering hazard with QueryAll (which only takes Rw read).
+    private static readonly object _linkedGate = new();
+    private static bool _linkedInitialized;
+
+    // Tear down every linked root: swap _linked empty under Rw, then dispose watchers (off-lock) and the
+    // now-unreferenced indexes/ownership. Resets the load-once flag so a re-point reloads fresh.
+    private static void DisposeLinkedRoots()
     {
-        foreach (var h in _linked) { h.Text.Dispose(); h.Symbols.Dispose(); }
-        var loaded = new List<IndexHandle>();
-        foreach (var linkedRoot in LinkStore.Read(Root))
+        lock (_linkedGate)
         {
-            try
-            {
-                if (RepositoryIndexer.TryLoad(linkedRoot, out var t, out var s))
-                    loaded.Add(new IndexHandle(Path.GetFullPath(linkedRoot), t, s, IsPrimary: false));
-            }
-            catch (Exception ex) { Log.For(Root).Warn($"linked root not loaded: {linkedRoot}: {ex.Message}"); }
+            List<LinkedRoot> old;
+            Rw.EnterWriteLock();
+            try { old = _linked; _linked = new List<LinkedRoot>(); } finally { Rw.ExitWriteLock(); }
+            foreach (var lr in old) lr.Watcher?.Dispose();                      // off-lock: safe drain
+            foreach (var lr in old) { lr.Text.Dispose(); lr.Symbols.Dispose(); lr.Own?.Dispose(); } // no reader holds these post-swap
+            _linkedInitialized = false;
         }
-        _linked = loaded;
-        if (loaded.Count > 0) Log.For(Root).Info($"federating {loaded.Count} linked root index(es)");
+    }
+
+    // Load this project's linked roots ONCE per session (first time the primary is Ready). Each gets the
+    // SAME freshness handling as the project root: this session tries to win crash-proof write-ownership;
+    // if it does, it live-watches that root (local AND network, like the project) and reconciles it on
+    // load (gated for network/huge); if another live session already owns it, we serve it read-only (that
+    // owner keeps the on-disk index fresh). A `link add`/`remove` done in a terminal mid-session is picked
+    // up on the next session. Idempotent; off-lock except the brief Rw-write swap.
+    private static void EnsureLinkedLoaded()
+    {
+        lock (_linkedGate)
+        {
+            if (_linkedInitialized) return;
+            _linkedInitialized = true;
+            var root = Root;
+
+            var loaded = new List<LinkedRoot>();
+            foreach (var raw in LinkStore.Read(root))
+            {
+                var linkedRoot = Path.GetFullPath(raw);
+                try
+                {
+                    if (!RepositoryIndexer.TryLoad(linkedRoot, out var t, out var s)) continue; // not indexed yet
+                    var own = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(linkedRoot));
+                    loaded.Add(new LinkedRoot { Root = linkedRoot, Text = t, Symbols = s, Own = own });
+                }
+                catch (Exception ex) { Log.For(root).Warn($"linked root not loaded: {linkedRoot}: {ex.Message}"); }
+            }
+            if (loaded.Count == 0) return;
+
+            Rw.EnterWriteLock();
+            try { _linked = loaded; } finally { Rw.ExitWriteLock(); }
+
+            foreach (var lr in loaded) // owners live-watch (off-lock) + reconcile out-of-session changes (gated)
+            {
+                if (lr.Own is null) continue;
+                var linkedRoot = lr.Root;
+                lr.Watcher = new RepositoryWatcher(linkedRoot, b => OnLinkedChanges(linkedRoot, b), 1000);
+                lr.Watcher.Start();
+                Task.Run(() => ReconcileLinkedOnLoad(linkedRoot));
+            }
+            Log.For(root).Info($"federating {loaded.Count} linked root(s): {loaded.Count(l => l.Own is not null)} owned/watched, {loaded.Count(l => l.Own is null)} read-only");
+        }
+    }
+
+    // A linked root we own: a debounced batch of edits -> update THAT root's own index on disk (its own
+    // cache/snapshot), then swap the federated handle. Mirrors the project's OnChanges but simpler - a
+    // linked root has no compaction-escalation state machine here. Serialized against all builds by BuildGate.
+    private static void OnLinkedChanges(string linkedRoot, ChangeBatch batch)
+    {
+        BuildGate.Wait();
+        SegmentedIndex? nt = null;
+        SegmentedSymbolIndex? ns = null;
+        try
+        {
+            if (batch.FullReconcile) { var b = RepositoryIndexer.Build(linkedRoot); nt = b.Text; ns = b.Symbols; }
+            else { var u = RepositoryIndexer.UpdatePaths(linkedRoot, batch.ChangedFullPaths); nt = u.Text; ns = u.Symbols; }
+            SwapLinked(linkedRoot, nt, ns);
+            nt = null; ns = null; // ownership transferred to _linked
+        }
+        catch (Exception ex) { Log.For(linkedRoot).Error("linked root live update failed", ex); }
+        finally { nt?.Dispose(); ns?.Dispose(); BuildGate.Release(); }
+    }
+
+    // Install fresh indexes for a linked root under the write lock (so no in-flight federated read touches
+    // a disposed mmap), disposing the old ones. If the root was unlinked meanwhile, the new ones are dropped.
+    private static void SwapLinked(string linkedRoot, SegmentedIndex text, SegmentedSymbolIndex symbols)
+    {
+        SegmentedIndex? oldT = null; SegmentedSymbolIndex? oldS = null; bool installed = false;
+        Rw.EnterWriteLock();
+        try
+        {
+            var lr = _linked.FirstOrDefault(l => PathSafety.IsUnderOrEqual(l.Root, linkedRoot) && PathSafety.IsUnderOrEqual(linkedRoot, l.Root));
+            if (lr is not null) { oldT = lr.Text; oldS = lr.Symbols; lr.Text = text; lr.Symbols = symbols; installed = true; }
+        }
+        finally { Rw.ExitWriteLock(); }
+        oldT?.Dispose(); oldS?.Dispose();
+        if (!installed) { text.Dispose(); symbols.Dispose(); } // unlinked while updating
+    }
+
+    // Reconcile a linked root against its current tree on load (out-of-session changes), gated exactly
+    // like the project root: local + within the auto limit -> reconcile now; network/huge -> deferred to
+    // a manual `codecompass update "<root>"` (a full stat-walk of a huge/network tree is too slow to auto-run).
+    private static void ReconcileLinkedOnLoad(string linkedRoot)
+    {
+        try
+        {
+            // ShouldAutoReconcile reads the linked root's own config via ReadFrom (not the ambient _current),
+            // and Update() reloads config for its root internally under BuildGate - so no Load() here, which
+            // would race the project root's ambient config from this background thread.
+            if (!ShouldAutoReconcile(linkedRoot)) return;
+            BuildGate.Wait();
+            try { var u = RepositoryIndexer.Update(linkedRoot); SwapLinked(linkedRoot, u.Text, u.Symbols); }
+            finally { BuildGate.Release(); }
+        }
+        catch (Exception ex) { Log.For(linkedRoot).Warn($"linked root reconcile skipped: {ex.Message}"); }
     }
 
     /// <summary>
@@ -135,12 +247,13 @@ public static class ServerContext
     internal static string QueryAll(Func<IReadOnlyList<IndexHandle>, string> op)
     {
         EnsureStartedLocked();
+        EnsureLinkedLoaded(); // load-once (cheap after first); guarantees a federated query sees linked roots
         Rw.EnterReadLock();
         try
         {
             if (_state != IndexState.Ready || _text is null || _symbols is null) return StatusMessage();
             var handles = new List<IndexHandle>(1 + _linked.Count) { new(Root, _text, _symbols, IsPrimary: true) };
-            handles.AddRange(_linked);
+            foreach (var lr in _linked) handles.Add(new IndexHandle(lr.Root, lr.Text, lr.Symbols, IsPrimary: false));
             return op(handles);
         }
         finally { Rw.ExitReadLock(); }
@@ -151,7 +264,7 @@ public static class ServerContext
     internal static bool IsUnderAnyRoot(string absPath)
     {
         if (PathSafety.IsUnderOrEqual(absPath, Root)) return true;
-        foreach (var h in _linked) if (PathSafety.IsUnderOrEqual(absPath, h.Root)) return true;
+        foreach (var lr in _linked) if (PathSafety.IsUnderOrEqual(absPath, lr.Root)) return true;
         return false;
     }
 
@@ -369,13 +482,13 @@ public static class ServerContext
             _csharp = null;
             _cpp = null;
             _state = IndexState.Ready;
-            LoadLinkedIndexes(); // refresh linked roots (picks up a `link add` done since the last load)
         }
         finally { Rw.ExitWriteLock(); }
         oldCs?.Dispose(); oldCpp?.Dispose();
         // meta.json (path/version/coverage) is written by RepositoryIndexer.Build/Update, which have the
         // walker's over-cap count; Swap must not overwrite it here (it has no coverage data).
         PublishStatus(); // now Ready (or reconciling, if a startup reconcile is still in flight)
+        Task.Run(EnsureLinkedLoaded); // load-once; a no-op if linked roots are already federated
     }
 
     public static void EnableLiveIndex(int debounceMs = 1000)
@@ -403,13 +516,14 @@ public static class ServerContext
             if (RepositoryIndexer.TryLoad(Root, out var text, out var symbols))
             {
                 Rw.EnterWriteLock();
-                try { _text = text; _symbols = symbols; _state = IndexState.Ready; LoadLinkedIndexes(); }
+                try { _text = text; _symbols = symbols; _state = IndexState.Ready; }
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info($"loaded existing index ({text.DocumentCount:N0} files)");
                 PublishStatus(); // Ready
                 // Catch changes made while we weren't watching (a source-control sync, branch switch)
                 // by reconciling in the background - the gate/decision runs off-lock in MaybeReconcile.
                 Task.Run(MaybeReconcile);
+                Task.Run(EnsureLinkedLoaded); // load linked roots once, off-lock (own watchers/reconcile)
                 return;
             }
 
@@ -483,6 +597,18 @@ public static class ServerContext
         if (cfg == true) return true;
         if (NetworkPath.IsNetwork(Root)) return false;
         return !ExceedsAutoLimit(out _); // local only; the walk here is cheap on local disk
+    }
+
+    // Same gate for a linked root, reading THAT root's own config (not the ambient project config, since
+    // this runs on a background thread) so a network/huge linked root is likewise left to a manual update.
+    private static bool ShouldAutoReconcile(string root)
+    {
+        var cfg = CodeCompassConfig.ReadFrom(root) ?? new RepoConfig();
+        var ar = CodeCompassConfig.AutoReconcile(cfg);
+        if (ar == false) return false;
+        if (ar == true) return true;
+        if (NetworkPath.IsNetwork(root)) return false;
+        return !RepositoryIndexer.ExceedsAutoLimit(root, cfg, out _);
     }
 
     // Reconcile the loaded index against the current tree (picks up out-of-session changes), in the
