@@ -20,6 +20,45 @@ public static class LinkStore
     public static IReadOnlyList<string> Read(string projectRoot) =>
         ReadFromCacheDir(IndexStore.CacheDirPath(projectRoot));
 
+    /// <summary>
+    /// A cheap change signature for a project's links.json (last-write time xor length), so a caller can
+    /// detect an edit by comparing signatures without re-parsing. Returns 0 when the file is ABSENT (a
+    /// legitimate "no links" state) and -1 when it exists but couldn't be stat'd (transient) - the caller
+    /// should treat -1 as "unknown, don't act." The cache dir is always local, so this stat is sub-ms.
+    /// </summary>
+    public static long Signature(string projectRoot)
+    {
+        try
+        {
+            var fi = new FileInfo(Path.Combine(IndexStore.CacheDirPath(projectRoot), Name));
+            if (!fi.Exists) return 0;
+            return fi.LastWriteTimeUtc.Ticks ^ (fi.Length << 1);
+        }
+        catch { return -1; }
+    }
+
+    /// <summary>
+    /// Read the linked roots, distinguishing "no links" from "couldn't read them right now." Returns true
+    /// with the roots when the file is absent (empty list) or parses cleanly; returns FALSE when the file
+    /// exists but can't be read/parsed (a transient IO race with the atomic write, or corruption) - so a
+    /// caller reconciling live state keeps its current set instead of destructively reading a momentary
+    /// empty. <see cref="Read"/> is the lenient form (any failure -> empty) for one-shot callers.
+    /// </summary>
+    public static bool TryRead(string projectRoot, out IReadOnlyList<string> roots)
+    {
+        roots = Array.Empty<string>();
+        try
+        {
+            var path = Path.Combine(IndexStore.CacheDirPath(projectRoot), Name);
+            if (!File.Exists(path)) return true; // legitimately no links
+            var arr = JsonSerializer.Deserialize<string[]>(File.ReadAllText(path));
+            if (arr is null) return false;       // malformed (deserialized to null)
+            roots = arr;
+            return true;
+        }
+        catch { return false; }                  // transient/parse error -> caller keeps current set
+    }
+
     /// <summary>As <see cref="Read"/> but from a cache dir directly (for the cross-project scan).</summary>
     public static IReadOnlyList<string> ReadFromCacheDir(string cacheDir)
     {

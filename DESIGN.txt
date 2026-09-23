@@ -465,10 +465,17 @@ them as one federated result set. The design choices, and their whys:
   that wins ownership live-watches and reconciles the root; a session that doesn't
   serves it read-only from the owner's kept-fresh index.
 
-- Load-once per session, off the index lock. Linked roots are loaded once when the
-  primary becomes Ready (a link add/remove done in a terminal mid-session is picked
-  up next session). All linked-root lifecycle is serialized by a dedicated gate and
-  never runs while holding the index RW lock: a RepositoryWatcher.Dispose drains an
+- Live link-set reconcile, off the index lock. links.json lives in the project's
+  cache dir, which is always LOCAL, so a stat is sub-ms: each query compares its cheap
+  signature (mtime^length) to the last seen one and reconciles only on a change - so a
+  link add/remove done in a terminal is picked up WITHOUT restarting the session. The
+  reconcile is a safe DIFF: roots already served keep their index, ownership, and
+  watcher untouched, and only the delta is added/removed. This is deliberate - blindly
+  reloading would re-TryAcquire ownership of a root we already hold, which fails against
+  our OWN exclusive handle and would demote us to reader. A transient unreadable read
+  (racing the atomic write) keeps the current set rather than reading a momentary empty
+  as "all links removed". All linked-root lifecycle is serialized by a dedicated gate
+  and never runs while holding the index RW lock: a RepositoryWatcher.Dispose drains an
   in-flight callback that itself takes the RW lock, so watchers are created/disposed
   OFF-lock and only the mmap handles are swapped under a brief write. The lock order
   is always gate-then-RW, never the reverse, so there is no AB-BA hazard with reads.
@@ -708,12 +715,12 @@ the features:
   to syntactic.
 - Cross-process safety of deleting memory-mapped segment/base files while a reader
   holds them relies on Windows file-locking semantics.
-- Linked roots: a link add/remove run mid-session is picked up on the NEXT session
-  (loaded once when the primary becomes Ready). A shared root edited by ANOTHER
-  session's owner is refreshed in a read-only session eventually (on that session's
-  next reconcile/restart), not pushed live cross-process. A manual `codecompass
-  index` on a root that already has a live owner is uncoordinated - the same as the
-  project root's existing behavior.
+- Linked roots: a link add/remove run in a terminal is picked up live (a signature
+  check on links.json per query), but a shared root edited by ANOTHER session's owner
+  is refreshed in a read-only session only eventually (on that session's next
+  reconcile/restart), not pushed live cross-process. A manual `codecompass index` on a
+  root that already has a live owner is uncoordinated - the same as the project root's
+  existing behavior.
 - No embeddings / semantic-meaning search, and no multi-user server - both are
   out of scope for v1 by design, not by omission.
 

@@ -58,6 +58,40 @@ public class LinkStoreTests
         => Assert.Equal(expected, PathSafety.IsUnderOrEqual(child, parent));
 
     [Fact]
+    public void TryRead_DistinguishesAbsentFromUnreadable()
+    {
+        using var proj = new TempRepo();
+
+        // Absent links.json is a legitimate "no links" - succeeds with an empty list.
+        Assert.True(LinkStore.TryRead(proj.Root, out var none));
+        Assert.Empty(none);
+
+        LinkStore.Add(proj.Root, Path.GetFullPath(@"C:\some\linked\root"));
+        Assert.True(LinkStore.TryRead(proj.Root, out var one));
+        Assert.Single(one);
+
+        // A malformed file (not the empty state) must FAIL, so a live reconcile keeps its current set
+        // instead of reading a garbage/partial write as "zero links."
+        File.WriteAllText(Path.Combine(IndexStore.CacheDirPath(proj.Root), "links.json"), "{ this is not json");
+        Assert.False(LinkStore.TryRead(proj.Root, out _));
+    }
+
+    [Fact]
+    public void Signature_ChangesWhenLinksChange_ZeroWhenAbsent()
+    {
+        using var proj = new TempRepo();
+        using var ext = new TempRepo();
+
+        Assert.Equal(0, LinkStore.Signature(proj.Root)); // no file yet
+        LinkStore.Add(proj.Root, ext.Root);
+        var afterAdd = LinkStore.Signature(proj.Root);
+        Assert.NotEqual(0, afterAdd);
+
+        LinkStore.Remove(proj.Root, ext.Root);
+        Assert.NotEqual(afterAdd, LinkStore.Signature(proj.Root)); // content shrank -> signature moved
+    }
+
+    [Fact]
     public void ExceedsAutoLimit_SmallTree_IsUnderTheDefaultCap()
     {
         using var repo = new TempRepo();

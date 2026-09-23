@@ -395,6 +395,78 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void Federation_PicksUpLinkAddAndRemove_MidSession()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class Gizmo { public void UniqueMidSessionThing() { } } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        // NOT linked yet - the session starts with no linked roots.
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.DoesNotContain("Gizmo.cs", CodeCompassTools.SearchCode("UniqueMidSessionThing"));
+
+            // Link it in a "terminal" while the session is live - the next query must pick it up, no restart.
+            CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+            var added = CodeCompassTools.SearchCode("UniqueMidSessionThing");
+            Assert.Contains("Gizmo.cs", added);
+            Assert.Contains(external.Root, added); // linked hit shown absolute
+
+            // Unlink it mid-session - the next query must drop it again.
+            CodeCompass.Core.Storage.LinkStore.Remove(project.Root, external.Root);
+            Assert.DoesNotContain("Gizmo.cs", CodeCompassTools.SearchCode("UniqueMidSessionThing"));
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    [Fact]
+    public void Federation_MidSessionLinkAdd_PreservesExistingRootWatcher()
+    {
+        using var project = new TempRepo();
+        using var rootA = new TempRepo();
+        using var rootB = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        rootA.Write("a/Ay.cs", "namespace A { public class Ay { } }");
+        rootB.Write("b/Bee.cs", "namespace B { public class Bee { public void BeeSymbol() { } } }");
+        foreach (var r in new[] { rootA.Root, rootB.Root })
+        {
+            var (t, s, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(r);
+            t.Dispose(); s.Dispose();
+        }
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, rootA.Root); // A linked from the start
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            _ = CodeCompassTools.SearchCode("Ay"); // load + own + watch A
+
+            // Add B mid-session; the reconcile must KEEP A (its ownership + watcher intact), not rebuild the set.
+            CodeCompass.Core.Storage.LinkStore.Add(project.Root, rootB.Root);
+            Assert.Contains("Bee.cs", CodeCompassTools.SearchCode("BeeSymbol")); // B picked up live
+
+            // Now edit A. If A's watcher survived the reconcile, this new symbol shows up without a restart.
+            rootA.Write("a/Later.cs", "namespace A { public class Later { public void LaterAySymbol() { } } }");
+            string res = "";
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.Elapsed < System.TimeSpan.FromSeconds(20))
+            {
+                res = CodeCompassTools.SearchCode("LaterAySymbol");
+                if (res.Contains("Later.cs")) break;
+                Thread.Sleep(200);
+            }
+            Assert.Contains("Later.cs", res);          // A's watcher still live after B was added
+            Assert.Contains(rootA.Root, res);
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    [Fact]
     public void FindReferences_SemanticForCpp()
     {
         using var repo = NewIndexedRepo();

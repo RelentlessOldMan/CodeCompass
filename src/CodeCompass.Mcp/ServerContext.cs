@@ -126,7 +126,8 @@ public static class ServerContext
     // list and old mmap indexes are swapped/disposed under a brief Rw write. Rw is never held while taking
     // this gate, so there is no lock-ordering hazard with QueryAll (which only takes Rw read).
     private static readonly object _linkedGate = new();
-    private static bool _linkedInitialized;
+    private static bool _linksChecked;   // have we reconciled the link set at least once this session?
+    private static long _linksSig;        // last-seen links.json signature (LinkStore.Signature) - cheap change probe
 
     // Tear down every linked root: swap _linked empty under Rw, then dispose watchers (off-lock) and the
     // now-unreferenced indexes/ownership. Resets the load-once flag so a re-point reloads fresh.
@@ -141,54 +142,91 @@ public static class ServerContext
             had = old.Count > 0;
             foreach (var lr in old) lr.Watcher?.Dispose();                      // off-lock: safe drain
             foreach (var lr in old) { lr.Text.Dispose(); lr.Symbols.Dispose(); lr.Own?.Dispose(); } // no reader holds these post-swap
-            _linkedInitialized = false;
+            _linksChecked = false; // re-point: next query reloads the new project's link set from scratch
         }
         if (had) InvalidateSemanticAnalyzers(); // root set shrank - rebuild analyzers over the primary alone
     }
 
-    // Load this project's linked roots ONCE per session (first time the primary is Ready). Each gets the
-    // SAME freshness handling as the project root: this session tries to win crash-proof write-ownership;
-    // if it does, it live-watches that root (local AND network, like the project) and reconciles it on
-    // load (gated for network/huge); if another live session already owns it, we serve it read-only (that
-    // owner keeps the on-disk index fresh). A `link add`/`remove` done in a terminal mid-session is picked
-    // up on the next session. Idempotent; off-lock except the brief Rw-write swap.
-    private static void EnsureLinkedLoaded()
+    // Pick up a `link add`/`remove` done in a terminal WITHOUT restarting the session. links.json lives in
+    // the project's cache dir, which is always LOCAL, so a stat is sub-ms: on each query we compare its cheap
+    // signature (mtime^length) to the last seen one and only do real work when it changed. The reconcile
+    // itself preserves roots we already hold (keeping their ownership + watcher) and only adds/removes the
+    // delta - so we never re-acquire ownership of a root we already own (which would fail against our own
+    // exclusive handle and demote us to reader). A transient unreadable read keeps the current set intact.
+    private static void MaybeReconcileLinks()
     {
+        long sig = LinkStore.Signature(Root);
+        if (_linksChecked && sig == Volatile.Read(ref _linksSig)) return; // unchanged: the hot path, no lock
         lock (_linkedGate)
         {
-            if (_linkedInitialized) return;
-            _linkedInitialized = true;
-            var root = Root;
-
-            var loaded = new List<LinkedRoot>();
-            foreach (var raw in LinkStore.Read(root))
-            {
-                var linkedRoot = Path.GetFullPath(raw);
-                try
-                {
-                    if (!RepositoryIndexer.TryLoad(linkedRoot, out var t, out var s)) continue; // not indexed yet
-                    var own = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(linkedRoot));
-                    loaded.Add(new LinkedRoot { Root = linkedRoot, Text = t, Symbols = s, Own = own });
-                }
-                catch (Exception ex) { Log.For(root).Warn($"linked root not loaded: {linkedRoot}: {ex.Message}"); }
-            }
-            if (loaded.Count == 0) return;
-
-            Rw.EnterWriteLock();
-            try { _linked = loaded; } finally { Rw.ExitWriteLock(); }
-            InvalidateSemanticAnalyzers(); // root set grew - the next semantic query spans the linked roots too
-
-            foreach (var lr in loaded) // owners live-watch (off-lock) + reconcile out-of-session changes (gated)
-            {
-                if (lr.Own is null) continue;
-                var linkedRoot = lr.Root;
-                lr.Watcher = new RepositoryWatcher(linkedRoot, b => OnLinkedChanges(linkedRoot, b), 1000);
-                lr.Watcher.Start();
-                Task.Run(() => ReconcileLinkedOnLoad(linkedRoot));
-            }
-            Log.For(root).Info($"federating {loaded.Count} linked root(s): {loaded.Count(l => l.Own is not null)} owned/watched, {loaded.Count(l => l.Own is null)} read-only");
+            sig = LinkStore.Signature(Root);
+            if (_linksChecked && sig == _linksSig) return; // another thread just reconciled it
+            if (!LinkStore.TryRead(Root, out var desired)) return; // couldn't read (racing the atomic write) - keep set, retry next query
+            ReconcileTo(desired);
+            Volatile.Write(ref _linksSig, sig);
+            _linksChecked = true;
         }
     }
+
+    // Bring the federated set in line with the desired link list (caller holds _linkedGate). Each newly-added
+    // root gets the SAME freshness handling as the project root: try to win crash-proof write-ownership, and
+    // if we do, live-watch it (local AND network) and reconcile out-of-session changes on load (gated for
+    // network/huge); otherwise serve it read-only from whoever owns it. Roots already present are untouched
+    // (their index/ownership/watcher persist); removed roots are torn down. Off-lock except the brief Rw swap.
+    private static void ReconcileTo(IReadOnlyList<string> desiredRaw)
+    {
+        var root = Root;
+        var desired = new List<string>();
+        foreach (var raw in desiredRaw)
+        {
+            try { desired.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(raw))); } catch { /* skip a bad path */ }
+        }
+
+        var current = _linked; // mutated only under _linkedGate, which we hold
+        var keep = current.Where(lr => desired.Any(d => PathEq(d, lr.Root))).ToList();
+        var remove = current.Where(lr => !desired.Any(d => PathEq(d, lr.Root))).ToList();
+        var addRoots = desired.Where(d => !current.Any(lr => PathEq(lr.Root, d))).ToList();
+        if (remove.Count == 0 && addRoots.Count == 0) return; // signature changed but the set didn't (e.g. a re-add of the same path)
+
+        var added = new List<LinkedRoot>();
+        foreach (var linkedRoot in addRoots)
+        {
+            try
+            {
+                if (!RepositoryIndexer.TryLoad(linkedRoot, out var t, out var s)) continue; // not indexed yet
+                var own = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(linkedRoot));
+                added.Add(new LinkedRoot { Root = linkedRoot, Text = t, Symbols = s, Own = own });
+            }
+            catch (Exception ex) { Log.For(root).Warn($"linked root not loaded: {linkedRoot}: {ex.Message}"); }
+        }
+
+        var next = new List<LinkedRoot>(keep.Count + added.Count);
+        next.AddRange(keep);
+        next.AddRange(added);
+        Rw.EnterWriteLock();
+        try { _linked = next; } finally { Rw.ExitWriteLock(); }
+
+        foreach (var lr in remove) lr.Watcher?.Dispose();                        // off-lock: safe drain (see note above)
+        foreach (var lr in remove) { lr.Text.Dispose(); lr.Symbols.Dispose(); lr.Own?.Dispose(); }
+
+        foreach (var lr in added) // owners live-watch (off-lock) + reconcile out-of-session changes (gated)
+        {
+            if (lr.Own is null) continue;
+            var linkedRoot = lr.Root;
+            lr.Watcher = new RepositoryWatcher(linkedRoot, b => OnLinkedChanges(linkedRoot, b), 1000);
+            lr.Watcher.Start();
+            Task.Run(() => ReconcileLinkedOnLoad(linkedRoot));
+        }
+
+        InvalidateSemanticAnalyzers(); // the root set changed - the next semantic query rebuilds over it
+        Log.For(root).Info($"linked roots reconciled: +{added.Count} -{remove.Count}; now federating {next.Count} " +
+                           $"({next.Count(l => l.Own is not null)} owned/watched, {next.Count(l => l.Own is null)} read-only)");
+    }
+
+    // Case-insensitive absolute-path equality (both sides absolutized + trailing-separator-trimmed).
+    private static bool PathEq(string a, string b) =>
+        string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)),
+                      Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)), StringComparison.OrdinalIgnoreCase);
 
     // A linked root we own: a debounced batch of edits -> update THAT root's own index on disk (its own
     // cache/snapshot), then swap the federated handle. Mirrors the project's OnChanges but simpler - a
@@ -254,7 +292,7 @@ public static class ServerContext
     internal static string QueryAll(Func<IReadOnlyList<IndexHandle>, string> op)
     {
         EnsureStartedLocked();
-        EnsureLinkedLoaded(); // load-once (cheap after first); guarantees a federated query sees linked roots
+        MaybeReconcileLinks(); // cheap stat; picks up a terminal `link add`/`remove` and guarantees the query sees the current set
         Rw.EnterReadLock();
         try
         {
@@ -522,7 +560,7 @@ public static class ServerContext
         // meta.json (path/version/coverage) is written by RepositoryIndexer.Build/Update, which have the
         // walker's over-cap count; Swap must not overwrite it here (it has no coverage data).
         PublishStatus(); // now Ready (or reconciling, if a startup reconcile is still in flight)
-        Task.Run(EnsureLinkedLoaded); // load-once; a no-op if linked roots are already federated
+        Task.Run(MaybeReconcileLinks); // warm the federated set off-lock (cheap no-op if unchanged)
     }
 
     public static void EnableLiveIndex(int debounceMs = 1000)
@@ -557,7 +595,7 @@ public static class ServerContext
                 // Catch changes made while we weren't watching (a source-control sync, branch switch)
                 // by reconciling in the background - the gate/decision runs off-lock in MaybeReconcile.
                 Task.Run(MaybeReconcile);
-                Task.Run(EnsureLinkedLoaded); // load linked roots once, off-lock (own watchers/reconcile)
+                Task.Run(MaybeReconcileLinks); // warm the federated set off-lock (own watchers/reconcile)
                 return;
             }
 

@@ -303,7 +303,9 @@ codecompass link list   [project-dir]          show the project's linked roots +
 many other projects share it — and warns if one is missing or unindexed (so it isn't silently absent
 from results).
 
-> A `link add`/`remove` run in a terminal while a session is open is picked up on the **next** session.
+> A `link add`/`remove` run in a terminal **while a session is open is picked up automatically** — the
+> server notices `links.json` changed (a sub-millisecond check on the local cache dir, on the next
+> query) and reconciles the set, keeping the roots it already serves and only adding/removing the delta.
 
 ## Status line (optional)
 
