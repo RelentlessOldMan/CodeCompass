@@ -132,15 +132,18 @@ public static class ServerContext
     // now-unreferenced indexes/ownership. Resets the load-once flag so a re-point reloads fresh.
     private static void DisposeLinkedRoots()
     {
+        bool had;
         lock (_linkedGate)
         {
             List<LinkedRoot> old;
             Rw.EnterWriteLock();
             try { old = _linked; _linked = new List<LinkedRoot>(); } finally { Rw.ExitWriteLock(); }
+            had = old.Count > 0;
             foreach (var lr in old) lr.Watcher?.Dispose();                      // off-lock: safe drain
             foreach (var lr in old) { lr.Text.Dispose(); lr.Symbols.Dispose(); lr.Own?.Dispose(); } // no reader holds these post-swap
             _linkedInitialized = false;
         }
+        if (had) InvalidateSemanticAnalyzers(); // root set shrank - rebuild analyzers over the primary alone
     }
 
     // Load this project's linked roots ONCE per session (first time the primary is Ready). Each gets the
@@ -173,6 +176,7 @@ public static class ServerContext
 
             Rw.EnterWriteLock();
             try { _linked = loaded; } finally { Rw.ExitWriteLock(); }
+            InvalidateSemanticAnalyzers(); // root set grew - the next semantic query spans the linked roots too
 
             foreach (var lr in loaded) // owners live-watch (off-lock) + reconcile out-of-session changes (gated)
             {
@@ -219,6 +223,9 @@ public static class ServerContext
         finally { Rw.ExitWriteLock(); }
         oldT?.Dispose(); oldS?.Dispose();
         if (!installed) { text.Dispose(); symbols.Dispose(); } // unlinked while updating
+        // The C#/C++ analyzers span this linked root too, so its content just changed under them - drop the
+        // cached model so the next semantic query rebuilds over the fresh sources (lazy, off the query path).
+        InvalidateSemanticAnalyzers();
     }
 
     // Reconcile a linked root against its current tree on load (out-of-session changes), gated exactly
@@ -371,14 +378,41 @@ public static class ServerContext
     // These getters run inside Query's read lock (find_references), so they can't race the write-locked
     // eviction below - a query holds the read lock across its whole semantic call, and eviction waits
     // for it. Each access stamps "last used" and arms the idle-eviction timer.
+    // The analyzers span the project root AND every linked root, so find_references / find_callees resolve
+    // across the boundary (a call in the project to a type defined in a linked root binds). They're built
+    // lazily from the current root set; a change to that set or to any root's content invalidates them
+    // (see InvalidateSemanticAnalyzers) so the next semantic query rebuilds over the new set. The getters
+    // run inside a Query/QueryAll read lock, so reading _linked here can't race a swap.
     public static RoslynCSharpAnalyzer CSharp
     {
-        get { lock (AnalyzerGate) { TouchSemantic(); return _csharp ??= new RoslynCSharpAnalyzer(Root); } }
+        get { lock (AnalyzerGate) { TouchSemantic(); return _csharp ??= new RoslynCSharpAnalyzer(AllRootsSnapshot()); } }
     }
 
     public static ClangCppAnalyzer Cpp
     {
-        get { lock (AnalyzerGate) { TouchSemantic(); return _cpp ??= new ClangCppAnalyzer(Root); } }
+        get { lock (AnalyzerGate) { TouchSemantic(); return _cpp ??= new ClangCppAnalyzer(AllRootsSnapshot()); } }
+    }
+
+    // The project root first (primary, for path display) then every linked root. Call under an Rw read/write
+    // lock (the getters hold the query read lock) so _linked isn't swapped mid-read.
+    private static IReadOnlyList<string> AllRootsSnapshot()
+    {
+        var list = new List<string>(1 + _linked.Count) { Root };
+        foreach (var lr in _linked) list.Add(lr.Root);
+        return list;
+    }
+
+    // Drop the cached semantic analyzers so the next semantic query rebuilds them over the current root set
+    // (or current content). Same write-lock discipline as EvictIdleAnalyzers - a query holds the read lock
+    // across its whole semantic call, so disposal can't pull an analyzer out from under it. Dispose off-lock.
+    private static void InvalidateSemanticAnalyzers()
+    {
+        RoslynCSharpAnalyzer? cs;
+        ClangCppAnalyzer? cpp;
+        Rw.EnterWriteLock();
+        try { cs = _csharp; cpp = _cpp; _csharp = null; _cpp = null; }
+        finally { Rw.ExitWriteLock(); }
+        cs?.Dispose(); cpp?.Dispose();
     }
 
     // Stamp semantic use and make sure the eviction timer is running (armed once, on first semantic use).

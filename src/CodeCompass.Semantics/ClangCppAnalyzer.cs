@@ -2,6 +2,7 @@ using System.Text.Json;
 using ClangSharp;
 using ClangSharp.Interop;
 using CodeCompass.Core.Ignore;
+using CodeCompass.Core.Storage;
 using CodeCompass.Core.Walking;
 
 namespace CodeCompass.Semantics;
@@ -16,13 +17,18 @@ namespace CodeCompass.Semantics;
 /// Built once, lazily, and cached. Rebuild by creating a new instance. The keyed declaration/reference
 /// maps hold the whole C/C++ semantic model in memory, so a long-lived server disposes it when idle to
 /// reclaim that RAM (see ServerContext).
+///
+/// It can span several roots (a project plus its linked external roots): every root's translation units
+/// are parsed into one USR-keyed model, so a reference in one root to a symbol defined in another is
+/// captured (subject to include paths resolving across the boundary). Each result carries the absolute
+/// root it belongs to (see <see cref="SemanticLocation.Root"/>) so callers can address it correctly.
 /// </summary>
 public sealed class ClangCppAnalyzer : IDisposable
 {
     private static readonly HashSet<string> SourceExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".c", ".cc", ".cpp", ".cxx", ".c++" };
 
-    private readonly string _root;
+    private readonly IReadOnlyList<string> _roots; // absolute; [0] is the primary (project) root
     private readonly object _gate = new();
     private bool _built;
 
@@ -31,9 +37,14 @@ public sealed class ClangCppAnalyzer : IDisposable
     private readonly Dictionary<string, List<Loc>> _refsByUsr = new(StringComparer.Ordinal);
     private Dictionary<string, string[]>? _compileArgs;
 
-    private readonly record struct Loc(string Rel, int Line, int Column);
+    private readonly record struct Loc(string Full, int Line, int Column); // Full = absolute path
 
-    public ClangCppAnalyzer(string root) => _root = Path.GetFullPath(root);
+    public ClangCppAnalyzer(string root) : this(new[] { root }) { }
+
+    /// <summary>Span multiple roots (project + linked external roots) in one semantic model, so references
+    /// resolve across the boundary. The first root is treated as primary by callers for path display.</summary>
+    public ClangCppAnalyzer(IReadOnlyList<string> roots) =>
+        _roots = roots.Select(r => Path.TrimEndingDirectorySeparator(Path.GetFullPath(r))).ToList();
 
     /// <summary>Release the in-memory semantic model. Safe to call while the instance is being
     /// discarded; a fresh instance rebuilds lazily on next use.</summary>
@@ -97,7 +108,8 @@ public sealed class ClangCppAnalyzer : IDisposable
 
             var walker = new FileWalker(new IgnoreRules());
             using var index = CXIndex.Create();
-            foreach (var file in walker.Walk(_root))
+            foreach (var root in _roots)
+            foreach (var file in walker.Walk(root))
             {
                 if (!SourceExtensions.Contains(Path.GetExtension(file.RelativePath))) continue;
                 try { ParseFile(index, file.FullPath); }
@@ -181,10 +193,9 @@ public sealed class ClangCppAnalyzer : IDisposable
         try { full = Path.GetFullPath(name); }
         catch { return false; }
 
-        if (!full.StartsWith(_root, StringComparison.OrdinalIgnoreCase)) return false; // skip system headers
+        if (OwnerOf(full) is null) return false; // skip system headers / anything outside our roots
 
-        var rel = Path.GetRelativePath(_root, full).Replace('\\', '/');
-        loc = new Loc(rel, (int)line, (int)column);
+        loc = new Loc(full, (int)line, (int)column);
         return true;
     }
 
@@ -192,49 +203,54 @@ public sealed class ClangCppAnalyzer : IDisposable
     {
         if (_compileArgs is not null && _compileArgs.TryGetValue(Path.GetFullPath(fullPath), out var a))
             return a;
-        var dir = Path.GetDirectoryName(fullPath) ?? _root;
-        return new[] { "-std=c++17", "-I" + _root, "-I" + dir };
+        var dir = Path.GetDirectoryName(fullPath) ?? _roots[0];
+        var args = new List<string> { "-std=c++17", "-I" + dir };
+        foreach (var root in _roots) args.Add("-I" + root); // let includes resolve across every root
+        return args.ToArray();
     }
 
     private void LoadCompileCommands()
     {
-        string? path = null;
-        foreach (var candidate in new[]
-                 {
-                     Path.Combine(_root, "compile_commands.json"),
-                     Path.Combine(_root, "build", "compile_commands.json"),
-                 })
+        var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        foreach (var root in _roots)
         {
-            if (File.Exists(candidate)) { path = candidate; break; }
-        }
-        if (path is null) return;
-
-        try
-        {
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
-            foreach (var entry in doc.RootElement.EnumerateArray())
+            string? path = null;
+            foreach (var candidate in new[]
+                     {
+                         Path.Combine(root, "compile_commands.json"),
+                         Path.Combine(root, "build", "compile_commands.json"),
+                     })
             {
-                if (!entry.TryGetProperty("file", out var fileProp)) continue;
-                var fileName = fileProp.GetString();
-                if (string.IsNullOrEmpty(fileName)) continue;
-
-                var dir = entry.TryGetProperty("directory", out var d) ? d.GetString() : null;
-                var full = Path.GetFullPath(dir is null ? fileName : Path.Combine(dir, fileName));
-
-                List<string> tokens;
-                if (entry.TryGetProperty("arguments", out var argsArr) && argsArr.ValueKind == JsonValueKind.Array)
-                    tokens = argsArr.EnumerateArray().Select(x => x.GetString() ?? "").ToList();
-                else if (entry.TryGetProperty("command", out var cmd) && cmd.GetString() is string c)
-                    tokens = c.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
-                else
-                    continue;
-
-                map[full] = CleanArgs(tokens, fileName);
+                if (File.Exists(candidate)) { path = candidate; break; }
             }
-            _compileArgs = map;
+            if (path is null) continue;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                foreach (var entry in doc.RootElement.EnumerateArray())
+                {
+                    if (!entry.TryGetProperty("file", out var fileProp)) continue;
+                    var fileName = fileProp.GetString();
+                    if (string.IsNullOrEmpty(fileName)) continue;
+
+                    var dir = entry.TryGetProperty("directory", out var d) ? d.GetString() : null;
+                    var full = Path.GetFullPath(dir is null ? fileName : Path.Combine(dir, fileName));
+
+                    List<string> tokens;
+                    if (entry.TryGetProperty("arguments", out var argsArr) && argsArr.ValueKind == JsonValueKind.Array)
+                        tokens = argsArr.EnumerateArray().Select(x => x.GetString() ?? "").ToList();
+                    else if (entry.TryGetProperty("command", out var cmd) && cmd.GetString() is string c)
+                        tokens = c.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
+                    else
+                        continue;
+
+                    map[full] = CleanArgs(tokens, fileName); // later roots don't clobber earlier files (distinct keys)
+                }
+            }
+            catch { /* malformed DB in this root: fall back to defaults for its files */ }
         }
-        catch { /* malformed DB: fall back to defaults */ }
+        if (map.Count > 0) _compileArgs = map;
     }
 
     // Drop the compiler executable, the source file, and output/compile-step flags;
@@ -260,15 +276,30 @@ public sealed class ClangCppAnalyzer : IDisposable
     private SemanticLocation ToSemantic(Loc loc, Dictionary<string, string[]> lineCache)
     {
         var text = "";
-        if (!lineCache.TryGetValue(loc.Rel, out var lines))
+        if (!lineCache.TryGetValue(loc.Full, out var lines))
         {
-            try { lines = File.ReadAllLines(Path.Combine(_root, loc.Rel.Replace('/', Path.DirectorySeparatorChar))); }
+            try { lines = File.ReadAllLines(loc.Full); }
             catch { lines = Array.Empty<string>(); }
-            lineCache[loc.Rel] = lines;
+            lineCache[loc.Full] = lines;
         }
         if (loc.Line >= 1 && loc.Line <= lines.Length)
             text = lines[loc.Line - 1].Trim();
 
-        return new SemanticLocation(loc.Rel, loc.Line, loc.Column, text);
+        var (root, rel) = OwnerOf(loc.Full) ?? ("", loc.Full.Replace('\\', '/'));
+        return new SemanticLocation(rel, loc.Line, loc.Column, text, root);
+    }
+
+    // Map an absolute path to its (owning root, forward-slash relative path), or null if it's under none of
+    // our roots (a system header). For a single-root analyzer Root is empty and Rel is the FileWalker
+    // relative path, so single-root behaviour (and its tests) are unchanged.
+    private (string Root, string Rel)? OwnerOf(string fullPath)
+    {
+        for (int i = 0; i < _roots.Count; i++)
+        {
+            if (!PathSafety.IsUnderOrEqual(fullPath, _roots[i])) continue;
+            var rel = Path.GetRelativePath(_roots[i], fullPath).Replace('\\', '/');
+            return (i == 0 ? "" : _roots[i], rel); // primary root -> empty (path is repo-relative)
+        }
+        return null;
     }
 }

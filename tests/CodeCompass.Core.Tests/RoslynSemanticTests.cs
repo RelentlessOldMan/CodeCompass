@@ -62,6 +62,40 @@ public class RoslynSemanticTests
     }
 
     [Fact]
+    public void FindReferences_ResolvesAcrossLinkedRoots()
+    {
+        // The whole point of cross-root semantics: a call in the PROJECT to a type defined in a LINKED
+        // root must resolve. A per-root union can't do this (the project compilation has no source for the
+        // linked type); one compilation spanning both roots can.
+        using var lib = new TempRepo();   // linked external root - defines the type
+        using var app = new TempRepo();   // primary project root - uses it
+        lib.Write("Gizmo.cs", """
+        namespace Ext;
+        public class Gizmo { public void Spin() { } }
+        """);
+        app.Write("Caller.cs", """
+        using Ext;
+        namespace App;
+        public class Caller { public void Go() { var g = new Gizmo(); g.Spin(); } }
+        """);
+
+        // roots[0] = primary (app), roots[1] = linked (lib).
+        var analyzer = new RoslynCSharpAnalyzer(new[] { app.Root, lib.Root });
+
+        // A reference to the linked-defined method is found in the PROJECT, and it's addressed as
+        // primary (empty Root => repo-relative).
+        var spin = Assert.Single(analyzer.FindReferences("Spin"));
+        Assert.Equal("Caller.cs", spin.RelativePath);
+        Assert.Equal("", spin.Root);
+        Assert.Contains("g.Spin()", spin.LineText);
+
+        // The type's own definition (in the linked root) is addressed to that root.
+        var def = Assert.Single(analyzer.FindDefinitions("Gizmo"));
+        Assert.Equal("Gizmo.cs", def.RelativePath);
+        Assert.Equal(lib.Root, def.Root); // non-empty => a linked root, shown absolute by the tools
+    }
+
+    [Fact]
     public void FindReferences_IgnoresXmlDocCrefMentions()
     {
         // The tool advertises "ignores comments." An XML-doc <see cref="..."/> resolves in Roslyn as a

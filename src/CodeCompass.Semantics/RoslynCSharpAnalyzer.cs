@@ -1,4 +1,5 @@
 using CodeCompass.Core.Ignore;
+using CodeCompass.Core.Storage;
 using CodeCompass.Core.Walking;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -8,8 +9,11 @@ using Microsoft.CodeAnalysis.Text;
 
 namespace CodeCompass.Semantics;
 
-/// <summary>A semantically-resolved source location: 1-based line/column plus the line text.</summary>
-public readonly record struct SemanticLocation(string RelativePath, int Line, int Column, string LineText);
+/// <summary>A semantically-resolved source location: 1-based line/column plus the line text. When the
+/// analyzer spans multiple roots (a project plus its linked external roots), <see cref="Root"/> is the
+/// absolute root the hit belongs to and <see cref="RelativePath"/> is relative to it; a single-root
+/// analyzer leaves Root empty (the path is relative to that one root).</summary>
+public readonly record struct SemanticLocation(string RelativePath, int Line, int Column, string LineText, string Root = "");
 
 /// <summary>
 /// Precise C# code intelligence via Roslyn. Rather than loading .sln/.csproj through
@@ -21,16 +25,26 @@ public readonly record struct SemanticLocation(string RelativePath, int Line, in
 /// The workspace is built once, lazily, and cached. Rebuild by creating a new instance. It holds the
 /// whole solution (every .cs file's text, plus a cached compilation after the first reference search)
 /// in memory, so a long-lived server disposes it when idle to reclaim that RAM (see ServerContext).
+///
+/// It can span several roots (a project plus its linked external roots): all their .cs files go into one
+/// compilation, so a call in the project to a type defined in a linked root resolves - true cross-root
+/// go-to-references, not a per-root union that would miss the boundary. Each result carries the absolute
+/// root it belongs to (see <see cref="SemanticLocation.Root"/>) so callers can address it correctly.
 /// </summary>
 public sealed class RoslynCSharpAnalyzer : IDisposable
 {
-    private readonly string _root;
+    private readonly IReadOnlyList<string> _roots; // absolute; [0] is the primary (project) root
     private readonly object _gate = new();
     private AdhocWorkspace? _workspace;
     private Solution? _solution;
     private ProjectId? _projectId;
 
-    public RoslynCSharpAnalyzer(string root) => _root = Path.GetFullPath(root);
+    public RoslynCSharpAnalyzer(string root) : this(new[] { root }) { }
+
+    /// <summary>Span multiple roots (project + linked external roots) in one compilation, so references
+    /// resolve across the boundary. The first root is treated as primary by callers for path display.</summary>
+    public RoslynCSharpAnalyzer(IReadOnlyList<string> roots) =>
+        _roots = roots.Select(r => Path.TrimEndingDirectorySeparator(Path.GetFullPath(r))).ToList();
 
     /// <summary>Release the in-memory solution/compilation (hundreds of MB to GB on a large repo). Safe
     /// to call while the instance is being discarded; a fresh instance rebuilds lazily on next use.</summary>
@@ -164,20 +178,23 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             var solution = workspace.CurrentSolution.AddProject(info);
 
             var walker = new FileWalker(new IgnoreRules());
-            foreach (var file in walker.Walk(_root))
+            foreach (var root in _roots)
+            foreach (var file in walker.Walk(root))
             {
                 if (!file.RelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
                 string text;
                 try { text = File.ReadAllText(file.FullPath); }
                 catch { continue; }
 
+                // Key documents by ABSOLUTE path so two roots with the same relative path (e.g. both have
+                // src/App.cs) don't collide; ToLocation maps the path back to its owning root for display.
                 var documentId = DocumentId.CreateNewId(projectId);
                 solution = solution.AddDocument(DocumentInfo.Create(
                     documentId,
-                    name: file.RelativePath,
-                    filePath: file.RelativePath,
+                    name: file.FullPath,
+                    filePath: file.FullPath,
                     loader: TextLoader.From(TextAndVersion.Create(
-                        SourceText.From(text), VersionStamp.Create(), file.RelativePath))));
+                        SourceText.From(text), VersionStamp.Create(), file.FullPath))));
             }
 
             _workspace = workspace;
@@ -206,7 +223,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         return refs;
     }
 
-    private static SemanticLocation ToLocation(Location location)
+    private SemanticLocation ToLocation(Location location)
     {
         var span = location.GetLineSpan();
         int line = span.StartLinePosition.Line;
@@ -220,6 +237,22 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             if (line < text.Lines.Count)
                 lineText = text.Lines[line].ToString().Trim();
         }
-        return new SemanticLocation(span.Path, line + 1, column + 1, lineText);
+        var (root, rel) = OwnerOf(span.Path);
+        return new SemanticLocation(rel, line + 1, column + 1, lineText, root);
+    }
+
+    // Map a document's absolute path back to the (owning root, forward-slash relative path) pair. For a
+    // single-root analyzer this yields exactly the FileWalker relative path (root-relative, '/'-separated),
+    // so single-root behaviour is unchanged; Root is empty for the primary root so single-root callers and
+    // tests that ignore Root see identical results.
+    private (string Root, string Rel) OwnerOf(string fullPath)
+    {
+        for (int i = 0; i < _roots.Count; i++)
+        {
+            if (!PathSafety.IsUnderOrEqual(fullPath, _roots[i])) continue;
+            var rel = Path.GetRelativePath(_roots[i], fullPath).Replace('\\', '/');
+            return (i == 0 ? "" : _roots[i], rel); // primary root -> empty (path is repo-relative)
+        }
+        return ("", fullPath.Replace('\\', '/')); // unexpected: show as-is under the primary
     }
 }

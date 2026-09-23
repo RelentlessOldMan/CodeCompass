@@ -55,6 +55,14 @@ public static class CodeCompassTools
     private static string DisplayPath(ServerContext.IndexHandle h, string rel) =>
         h.IsPrimary ? rel : System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
 
+    // A semantic hit's display path. The analyzers span all roots; a hit in the primary root carries an
+    // empty Root (repo-relative), a hit in a linked root carries that root (shown absolute) - same
+    // addressing convention as the lexical/symbol federation above.
+    private static string DisplayPath(CodeCompass.Semantics.SemanticLocation s) =>
+        string.IsNullOrEmpty(s.Root)
+            ? s.RelativePath
+            : System.IO.Path.GetFullPath(System.IO.Path.Combine(s.Root, s.RelativePath.Replace('/', System.IO.Path.DirectorySeparatorChar)));
+
     // Honest zeros: a "nothing found" is only true for what's INDEXED. Files excluded by the size cap
     // aren't searched at all, so a match could be in one - disclose it rather than let the agent read a
     // zero as "doesn't exist." Empty when there are no known coverage gaps. (Coverage is recorded in the
@@ -181,26 +189,32 @@ public static class CodeCompassTools
     public static string FindReferences(
         [Description("Symbol/identifier to find references to (case-sensitive).")] string name,
         [Description("Maximum number of results.")] int maxResults = 100)
-        => ServerContext.Query((text, _) =>
+        => ServerContext.QueryAll(handles =>
     {
         // Collect one past the cap across all sources (C# semantic, C/C++ semantic, then lexical in
         // other files) so truncation is detected by the same overflow probe the other tools use -
-        // exact, not a fuzzy threshold. Kind tags let the footer report the shown breakdown.
+        // exact, not a fuzzy threshold. Kind tags let the footer report the shown breakdown. The
+        // semantic analyzers span the project + every linked root, so a cross-root reference resolves;
+        // the lexical fallback iterates each root's text index (linked hits shown as absolute paths).
         int probe = maxResults + 1;
         var hits = new List<(string Line, char Kind)>();
         foreach (var s in ServerContext.CSharp.FindReferences(name, probe))
-            hits.Add(($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
+            hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
         foreach (var s in ServerContext.Cpp.FindReferences(name, probe))
-            hits.Add(($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
+            hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
 
         if (hits.Count <= maxResults)
-            foreach (var m in text.Search(name, probe * 5))
+            foreach (var h in handles)
             {
-                if (SemanticCoverage.IsCovered(m.Path)) continue;             // semantic files handled above
-                if (!IsCodeReferenceFile(m.Path)) continue;                  // a name in a CSV/JSON/log is not a code reference
-                if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
-                hits.Add(($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}", 'l'));
-                if (hits.Count > maxResults) break;                          // got the overflow row
+                foreach (var m in h.Text.Search(name, probe * 5))
+                {
+                    if (SemanticCoverage.IsCovered(m.Path)) continue;             // semantic files handled above
+                    if (!IsCodeReferenceFile(m.Path)) continue;                  // a name in a CSV/JSON/log is not a code reference
+                    if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
+                    hits.Add(($"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}: {m.LineText}", 'l'));
+                    if (hits.Count > maxResults) break;                          // got the overflow row
+                }
+                if (hits.Count > maxResults) break;
             }
 
         if (hits.Count == 0)
@@ -227,13 +241,15 @@ public static class CodeCompassTools
     public static string FindCallees(
         [Description("Exact C# method name (case-sensitive).")] string name,
         [Description("Maximum number of callees.")] int maxResults = 50)
-        => ServerContext.Query((_, symbols) =>
+        => ServerContext.QueryAll(handles =>
     {
+        // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
+        // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
         var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1);
         if (callees.Count == 0)
             // Distinguish "no such symbol" from "found, but calls no repo code" - answering a bare
             // "nothing" to both is the silent-empty hazard that turns a typo into a false finding.
-            return (symbols.FindByName(name).Count > 0
+            return (handles.Any(h => h.Symbols.FindByName(name).Count > 0)
                 ? $"\"{name}\" is defined here, but calls no in-repo methods - it may call only " +
                   "framework/external code, or it isn't C# (callees are semantic for C# only)."
                 : $"No symbol named \"{name}\" is indexed - check the exact spelling/case, or it may be a " +
@@ -241,7 +257,7 @@ public static class CodeCompassTools
 
         bool truncated = callees.Count > maxResults;
         var sb = new StringBuilder();
-        foreach (var c in callees.Take(maxResults)) sb.AppendLine($"{c.RelativePath}:{c.Line}:{c.Column}: {c.LineText}");
+        foreach (var c in callees.Take(maxResults)) sb.AppendLine($"{DisplayPath(c)}:{c.Line}:{c.Column}: {c.LineText}");
         sb.Append(Footer(Math.Min(callees.Count, maxResults), truncated, "callee", "callees"));
         return sb.ToString();
     });
