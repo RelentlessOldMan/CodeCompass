@@ -127,6 +127,42 @@ public class RoslynSemanticTests
     }
 
     [Fact]
+    public void FindCallees_ResolvesAcrossFiles()
+    {
+        using var repo = new TempRepo();
+        repo.Write("Service.cs", """
+        namespace App;
+        public class Service { public void Handle() { new Repo().Save(); } }
+        """);
+        repo.Write("Repo.cs", """
+        namespace App;
+        public class Repo { public void Save() { } }
+        """);
+
+        var callees = new RoslynCSharpAnalyzer(repo.Root).FindCallees("Handle");
+        // The callee's DEFINITION resolves to the OTHER file, so the next hop is a direct jump.
+        Assert.Contains(callees, c => c.RelativePath == "Repo.cs" && c.LineText.Contains("Save"));
+    }
+
+    [Fact]
+    public void FindCallees_HandlesRecursionAndUnknown_WithoutError()
+    {
+        using var repo = new TempRepo();
+        repo.Write("R.cs", """
+        namespace App;
+        public class R { public int Fac(int n) { return n <= 1 ? 1 : n * Fac(n - 1); } }
+        """);
+        var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+
+        // A self-recursive method lists itself once (deduped by definition), no infinite loop.
+        var self = analyzer.FindCallees("Fac");
+        Assert.Single(self.Where(c => c.LineText.Contains("Fac")));
+
+        // An unknown name is simply empty - never throws.
+        Assert.Empty(analyzer.FindCallees("NoSuchMethod"));
+    }
+
+    [Fact]
     public void FindReferences_UnknownSymbol_IsEmpty()
     {
         using var repo = new TempRepo();

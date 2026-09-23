@@ -209,13 +209,17 @@ public static class CodeCompassTools
     public static string FindCallees(
         [Description("Exact C# method name (case-sensitive).")] string name,
         [Description("Maximum number of callees.")] int maxResults = 50)
-        => ServerContext.Query((_, _) =>
+        => ServerContext.Query((_, symbols) =>
     {
         var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1);
         if (callees.Count == 0)
-            return $"No in-repo callees found for \"{name}\". It may be C#-only (callees are semantic for " +
-                   "C#), a method that calls only framework/external code, or spelled differently. " +
-                   "Use find_definition and read the body to trace calls in other languages." + CoverageCaveat();
+            // Distinguish "no such symbol" from "found, but calls no repo code" - answering a bare
+            // "nothing" to both is the silent-empty hazard that turns a typo into a false finding.
+            return (symbols.FindByName(name).Count > 0
+                ? $"\"{name}\" is defined here, but calls no in-repo methods - it may call only " +
+                  "framework/external code, or it isn't C# (callees are semantic for C# only)."
+                : $"No symbol named \"{name}\" is indexed - check the exact spelling/case, or it may be a " +
+                  "macro or an unsupported language. (find_callees resolves C# only.)") + CoverageCaveat();
 
         bool truncated = callees.Count > maxResults;
         var sb = new StringBuilder();

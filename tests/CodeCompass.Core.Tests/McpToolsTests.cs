@@ -299,6 +299,29 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void FindCallees_DistinguishesUnknownSymbolFromNoCallees()
+    {
+        // The silent-empty hazard the benchmark flagged: a bare "nothing" for both an unknown symbol and
+        // a real method that calls no repo code turns a typo into a false finding. They must read differently.
+        using var repo = new TempRepo();
+        repo.Write("src/Leaf.cs", "namespace App { public class Leaf { public void Ping() { System.Console.WriteLine(\"hi\"); } } }");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+
+            // Known method that only calls the framework -> "defined here, but calls no in-repo methods".
+            var known = CodeCompassTools.FindCallees("Ping");
+            Assert.Contains("defined here", known);
+
+            // A name that doesn't exist -> "no symbol named" (NOT the same message).
+            var unknown = CodeCompassTools.FindCallees("Nonexistent");
+            Assert.Contains("No symbol named", unknown);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
     public void FindReferences_SemanticForCpp()
     {
         using var repo = NewIndexedRepo();
