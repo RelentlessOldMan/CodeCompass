@@ -177,9 +177,12 @@ public static class ServerContext
     {
         var root = Root;
         var desired = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // de-dup a hand-edited links.json
         foreach (var raw in desiredRaw)
         {
-            try { desired.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(raw))); } catch { /* skip a bad path */ }
+            string norm;
+            try { norm = Path.TrimEndingDirectorySeparator(Path.GetFullPath(raw)); } catch { continue; } // skip a bad path
+            if (seen.Add(norm)) desired.Add(norm); // same path listed twice -> federate it once, acquire ownership once
         }
 
         var current = _linked; // mutated only under _linkedGate, which we hold
@@ -255,7 +258,7 @@ public static class ServerContext
         Rw.EnterWriteLock();
         try
         {
-            var lr = _linked.FirstOrDefault(l => PathSafety.IsUnderOrEqual(l.Root, linkedRoot) && PathSafety.IsUnderOrEqual(linkedRoot, l.Root));
+            var lr = _linked.FirstOrDefault(l => PathEq(l.Root, linkedRoot));
             if (lr is not null) { oldT = lr.Text; oldS = lr.Symbols; lr.Text = text; lr.Symbols = symbols; installed = true; }
         }
         finally { Rw.ExitWriteLock(); }

@@ -467,6 +467,66 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void Federation_DuplicateLinkEntries_FederateOnce()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class DupCheckGizmo { } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+
+        // A hand-edited / doubly-written links.json listing the same root twice must not federate it twice.
+        var cacheDir = CodeCompass.Core.Storage.IndexStore.CacheDirPath(project.Root);
+        System.IO.Directory.CreateDirectory(cacheDir);
+        System.IO.File.WriteAllText(System.IO.Path.Combine(cacheDir, "links.json"),
+            System.Text.Json.JsonSerializer.Serialize(new[] { external.Root, external.Root }));
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            var def = CodeCompassTools.FindDefinition("DupCheckGizmo");
+            Assert.Contains("DupCheckGizmo", def);
+            // Deduped => exactly one definition (a duplicate root would yield "(2 definitions)").
+            Assert.DoesNotContain("2 definitions", def);
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    [Fact]
+    public void Federation_NonOwnerLinkedRoot_ServesReadOnly()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class Gizmo { public void ReadOnlyFederatedThing() { } } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        // Simulate ANOTHER live session already owning the linked root's index: hold its write-ownership so
+        // this session's TryAcquire fails and it must serve the root read-only (still federated).
+        var otherOwner = CodeCompass.Core.Storage.WriteOwnership.TryAcquire(
+            CodeCompass.Core.Storage.IndexStore.CacheDirPath(external.Root));
+        Assert.NotNull(otherOwner);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            var res = CodeCompassTools.SearchCode("ReadOnlyFederatedThing");
+            Assert.Contains("Gizmo.cs", res);       // federated even though we don't own it
+            Assert.Contains(external.Root, res);
+        }
+        finally
+        {
+            ServerContext.Init(project.Root);
+            otherOwner!.Dispose();
+        }
+    }
+
+    [Fact]
     public void FindReferences_SemanticForCpp()
     {
         using var repo = NewIndexedRepo();
