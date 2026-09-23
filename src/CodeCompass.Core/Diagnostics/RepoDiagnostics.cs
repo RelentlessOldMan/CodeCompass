@@ -74,6 +74,30 @@ public static class RepoDiagnostics
 
         var status = IndexStatusFile.Read(root);
         if (status is not null) w.WriteLine($"status:           {status.State} - {status.Text}");
+        w.WriteLine();
+
+        // Linked external roots: each is its own independently-built index (keyed by its own path) that the
+        // server federates alongside this project's. Report indexed state, size, and how many OTHER projects
+        // share it (so it's clear a shared index outlives an unlink here).
+        w.WriteLine("== linked roots ==");
+        var links = LinkStore.Read(root);
+        if (links.Count == 0) w.WriteLine("    (none)");
+        else foreach (var raw in links)
+        {
+            string linkedRoot;
+            try { linkedRoot = Path.GetFullPath(raw); } catch { linkedRoot = raw; }
+            var lcache = IndexStore.CacheDirPath(linkedRoot);
+            bool exists = Directory.Exists(linkedRoot);
+            bool lindexed = SegmentedIndex.Exists(lcache);
+            var lmeta = IndexMetaFile.ReadFromCacheDir(lcache);
+            int alsoLinkedBy = LinkStore.ProjectsLinking(linkedRoot, excludingProjectRoot: root).Count;
+            w.WriteLine($"    {linkedRoot}");
+            w.WriteLine($"        exists: {exists}   network: {NetworkPath.IsNetwork(linkedRoot)}   " +
+                        (lindexed ? $"indexed: YES ({(lmeta is not null ? $"{lmeta.Files:N0} files, built by {lmeta.Version}" : "no meta")})"
+                                  : "indexed: NO (run: codecompass index \"" + linkedRoot + "\")"));
+            w.WriteLine($"        shared with {alsoLinkedBy} other project(s)" +
+                        (alsoLinkedBy > 0 ? " - its index is reused and survives an unlink here" : ""));
+        }
 
         // Load the index to report live counts (read-only; disposed immediately).
         try
@@ -145,6 +169,22 @@ public static class RepoDiagnostics
 
         if (NetworkPath.IsNetwork(root))
             checks.Add(new("local path (fast metadata)", false, "network share - auto-reconcile off; run 'codecompass update' after external syncs"));
+
+        // Each linked root must exist and be indexed for the server to federate it. A missing/unindexed one
+        // is silently absent from results otherwise, so surface it here.
+        foreach (var raw in LinkStore.Read(root))
+        {
+            string linkedRoot;
+            try { linkedRoot = Path.GetFullPath(raw); } catch { linkedRoot = raw; }
+            if (!Directory.Exists(linkedRoot))
+            {
+                checks.Add(new($"linked root exists: {linkedRoot}", false, "path not found - unlink it or restore it: codecompass link remove \"" + root + "\" \"" + linkedRoot + "\""));
+                continue;
+            }
+            bool lindexed = SegmentedIndex.Exists(IndexStore.CacheDirPath(linkedRoot));
+            checks.Add(new($"linked root indexed: {linkedRoot}", lindexed,
+                lindexed ? "" : "not indexed - run: codecompass index \"" + linkedRoot + "\""));
+        }
 
         return checks;
     }

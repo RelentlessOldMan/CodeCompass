@@ -66,6 +66,7 @@ static int Usage()
     Console.Error.WriteLine("usage:");
     Console.Error.WriteLine("  codecompass index   <path>               (re)build the full index");
     Console.Error.WriteLine("  codecompass update  <path>               incremental reindex of changes");
+    Console.Error.WriteLine("  codecompass link    <add|remove|list>    federate external directories into a project (link for details)");
     Console.Error.WriteLine("  codecompass watch   <path>               auto-reindex on file changes");
     Console.Error.WriteLine("  codecompass search  <path> <query> [-i]  literal text search (-i = case-insensitive)");
     Console.Error.WriteLine("  codecompass def     <path> <name>        exact symbol definition(s)");

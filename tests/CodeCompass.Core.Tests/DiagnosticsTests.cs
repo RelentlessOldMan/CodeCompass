@@ -44,4 +44,33 @@ public class DiagnosticsTests
         var checks = RepoDiagnostics.HealthChecks(repo.Root);
         Assert.Contains(checks, c => c.Name == "index built" && !c.Ok);
     }
+
+    [Fact]
+    public void Doctor_Reports_LinkedRoots_And_FlagsUnindexedOne()
+    {
+        using var project = new TempRepo();
+        using var indexedLink = new TempRepo();
+        using var unindexedLink = new TempRepo();
+        project.Write("a.cs", "class A {}");
+        indexedLink.Write("b.cs", "class B {}");
+        unindexedLink.Write("c.cs", "class C {}");
+
+        var (t, s, _) = RepositoryIndexer.Build(indexedLink.Root); // only this linked root gets an index
+        t.Dispose(); s.Dispose();
+
+        LinkStore.Add(project.Root, indexedLink.Root);
+        LinkStore.Add(project.Root, unindexedLink.Root);
+
+        var sw = new StringWriter();
+        RepoDiagnostics.WriteReport(sw, project.Root);
+        var text = sw.ToString();
+        Assert.Contains("== linked roots ==", text);
+        Assert.Contains(indexedLink.Root, text);
+        Assert.Contains(unindexedLink.Root, text);
+        Assert.Contains("indexed: YES", text);
+
+        var checks = RepoDiagnostics.HealthChecks(project.Root);
+        Assert.Contains(checks, c => c.Name == $"linked root indexed: {Path.GetFullPath(indexedLink.Root)}" && c.Ok);
+        Assert.Contains(checks, c => c.Name == $"linked root indexed: {Path.GetFullPath(unindexedLink.Root)}" && !c.Ok);
+    }
 }
