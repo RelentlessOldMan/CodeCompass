@@ -42,9 +42,9 @@ editing it keeps just the changed files in memory. This is what lets an 87 GB re
 ## Minimal token footprint
 
 A pain point with some in-house tools is that they register a pile of MCP tools/skills that eat
-context every session. CodeCompass exposes exactly **5 tools** with terse descriptions — that's the
-entire standing per-session cost: `search_code`, `find_definition`, `find_references`,
-`search_symbols`, `reindex`.
+context every session. CodeCompass exposes a deliberately small **6 tools** with terse descriptions —
+that's the entire standing per-session cost: `search_code`, `find_definition`, `find_references`,
+`find_callees`, `search_symbols`, `reindex`.
 
 ## Install
 

@@ -11,6 +11,7 @@ MCP tools (returned as precise `file:line:col` results, not whole files):
 - `search_code` — literal text search over the whole repo
 - `find_definition` — go-to-definition by exact symbol name
 - `find_references` — **semantic** for C# (Roslyn) and C/C++ (clang); lexical elsewhere
+- `find_callees` — the in-repo methods a C# method calls, resolved **semantically** (walk a call chain downward)
 - `search_symbols` — symbol-name navigation
 - `reindex` — rebuild the index after large external changes
 

@@ -88,6 +88,48 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         return result;
     }
 
+    /// <summary>The in-repository methods/types that the C# method(s) named <paramref name="name"/>
+    /// call - resolved SEMANTICALLY, so <c>x.ToString()</c> binds to the one real declaration and
+    /// framework/external calls are omitted. That resolution is exactly what a syntactic call graph
+    /// cannot do (it returns every same-named overload in the repo); here each result is the callee's
+    /// own definition, so an agent can jump straight to the next hop without reading the body.</summary>
+    public IReadOnlyList<SemanticLocation> FindCallees(string name, int max = 100)
+    {
+        var (_, project) = EnsureBuilt();
+        var result = new List<SemanticLocation>();
+        var compilation = project.GetCompilationAsync().GetAwaiter().GetResult();
+        if (compilation is null) return result;
+
+        var seen = new HashSet<(string, int, int)>();
+        foreach (var symbol in FindDeclarations(project, name))
+        {
+            if (symbol is not IMethodSymbol) continue;
+            foreach (var syntaxRef in symbol.DeclaringSyntaxReferences)
+            {
+                var body = syntaxRef.GetSyntax();
+                var model = compilation.GetSemanticModel(body.SyntaxTree);
+                foreach (var node in body.DescendantNodes())
+                {
+                    if (node is not (InvocationExpressionSyntax or ObjectCreationExpressionSyntax)) continue;
+                    if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol called) continue;
+                    // A constructor call's useful target is the type being constructed; otherwise the method.
+                    ISymbol target = called.MethodKind == MethodKind.Constructor ? called.ContainingType : called;
+                    foreach (var loc in target.Locations)
+                    {
+                        if (!loc.IsInSource) continue; // in-repo only - drops BCL/framework calls (the noise filter)
+                        var s = ToLocation(loc);
+                        if (seen.Add((s.RelativePath, s.Line, s.Column)))
+                        {
+                            result.Add(s with { LineText = string.IsNullOrEmpty(s.LineText) ? target.Name : $"{target.Name}  {s.LineText}" });
+                            if (result.Count >= max) return result;
+                        }
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
     // True if the reference sits inside a documentation comment (an XML-doc <see cref="..."/> or the
     // like). Roslyn resolves those to the real symbol, but for a "find usages" answer they are comment
     // mentions, not code that uses the symbol - so we drop them to keep the semantic result honest.

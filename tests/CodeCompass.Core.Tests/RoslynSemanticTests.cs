@@ -88,6 +88,45 @@ public class RoslynSemanticTests
     }
 
     [Fact]
+    public void FindCallees_ResolvesRealTargets_IgnoringOverloadsAndFramework()
+    {
+        // The differentiator vs a syntactic call graph: w.Run() must bind to Widget.Run only (not the
+        // same-named Other.Run), and w.ToString() (framework) must be omitted. A syntactic graph returns
+        // every same-named symbol - the ~2% precision problem the benchmark documented.
+        using var repo = new TempRepo();
+        repo.Write("Widget.cs", """
+        namespace App;
+        public class Widget
+        {
+            public void Run() { }
+        }
+        public class Other
+        {
+            public void Run() { }
+        }
+        """);
+        repo.Write("Caller.cs", """
+        namespace App;
+        public class Caller
+        {
+            public void Go()
+            {
+                var w = new Widget();
+                w.Run();       // real callee: Widget.Run
+                w.ToString();  // framework call - must be omitted
+            }
+        }
+        """);
+
+        var callees = new RoslynCSharpAnalyzer(repo.Root).FindCallees("Go");
+        Assert.Contains(callees, c => c.RelativePath == "Widget.cs" && c.LineText.Contains("Run"));
+        // Exactly one Run - the Other.Run overload is NOT returned (semantic, not syntactic).
+        Assert.Single(callees.Where(c => c.LineText.Contains("Run")));
+        // Framework/external calls (ToString) are omitted.
+        Assert.DoesNotContain(callees, c => c.LineText.Contains("ToString"));
+    }
+
+    [Fact]
     public void FindReferences_UnknownSymbol_IsEmpty()
     {
         using var repo = new TempRepo();

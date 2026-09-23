@@ -290,6 +290,15 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void FindCallees_ListsInRepoCallTargets_ForCSharp()
+    {
+        using var repo = NewIndexedRepo(); // Widget.Run() calls Helper()
+        var result = CodeCompassTools.FindCallees("Run");
+        Assert.Contains("src/Widget.cs", result); // Helper is defined there
+        Assert.Contains("Helper", result);
+    }
+
+    [Fact]
     public void FindReferences_SemanticForCpp()
     {
         using var repo = NewIndexedRepo();

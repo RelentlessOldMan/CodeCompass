@@ -11,7 +11,7 @@ namespace CodeCompass.Mcp;
 /// The tools exposed to the agent. Each returns compact, ranked file:line:col results so
 /// the agent gets exactly the lines it needs instead of reading whole files. If the index
 /// isn't ready yet, a tool returns a short status (still indexing, or how to build it) so
-/// the agent can relay progress rather than hang. Deliberately a small surface (5 tools) to
+/// the agent can relay progress rather than hang. Deliberately a small surface (6 tools) to
 /// keep the per-session token cost low.
 /// </summary>
 [McpServerToolType]
@@ -196,6 +196,31 @@ public static class CodeCompassTools
         int cs = shown.Count(h => h.Kind == 'c'), cpp = shown.Count(h => h.Kind == 'p'), lex = shown.Count(h => h.Kind == 'l');
         sb.Append($"({cs} C# + {cpp} C/C++ semantic reference(s); {lex} lexical in other files)");
         if (truncated) sb.Append(" - MORE EXIST, narrow the query or raise the limit");
+        return sb.ToString();
+    });
+
+    [McpServerTool(Name = "find_callees")]
+    [Description("List the in-repo methods a C# method CALLS (its callees), resolved SEMANTICALLY: " +
+                 "overloads bind to the real declaration and framework/external calls are omitted, so " +
+                 "you get the true call targets - not every same-named symbol a syntactic graph returns. " +
+                 "Each result is the callee's DEFINITION (file:line-endLine), so you can walk a call chain " +
+                 "downward one hop at a time without reading each body. C# only; other languages return " +
+                 "nothing - use find_definition then read.")]
+    public static string FindCallees(
+        [Description("Exact C# method name (case-sensitive).")] string name,
+        [Description("Maximum number of callees.")] int maxResults = 50)
+        => ServerContext.Query((_, _) =>
+    {
+        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1);
+        if (callees.Count == 0)
+            return $"No in-repo callees found for \"{name}\". It may be C#-only (callees are semantic for " +
+                   "C#), a method that calls only framework/external code, or spelled differently. " +
+                   "Use find_definition and read the body to trace calls in other languages." + CoverageCaveat();
+
+        bool truncated = callees.Count > maxResults;
+        var sb = new StringBuilder();
+        foreach (var c in callees.Take(maxResults)) sb.AppendLine($"{c.RelativePath}:{c.Line}:{c.Column}: {c.LineText}");
+        sb.Append(Footer(Math.Min(callees.Count, maxResults), truncated, "callee", "callees"));
         return sb.ToString();
     });
 
