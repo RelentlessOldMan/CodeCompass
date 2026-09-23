@@ -70,6 +70,18 @@ public static class CodeCompassTools
         return "";
     }
 
+    // Data/doc file types where a whole-word text match of a symbol name is NOT a code reference - a
+    // JIRA export .csv row, a tool's .json tag dump, a .md doc, a .log line. find_references' lexical
+    // fallback skips these so "references" stays about code, not every place the string appears.
+    private static readonly HashSet<string> NonCodeReferenceExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".csv", ".tsv", ".json", ".jsonl", ".ndjson", ".yaml", ".yml",
+        ".md", ".markdown", ".rst", ".txt", ".log", ".html", ".htm", ".svg", ".map", ".lock",
+    };
+
+    private static bool IsCodeReferenceFile(string path) =>
+        !NonCodeReferenceExtensions.Contains(System.IO.Path.GetExtension(path));
+
     // Result footer that distinguishes an exact count from a truncated one, so the agent knows
     // whether it has seen everything or must refine the query. `shown` is how many we actually list.
     private static string Footer(int shown, bool truncated, string singular, string plural) =>
@@ -144,9 +156,10 @@ public static class CodeCompassTools
 
     [McpServerTool(Name = "find_references")]
     [Description("Find where a symbol is used across the codebase. For C# (Roslyn) and C/C++ (clang) " +
-                 "this is SEMANTIC - it resolves the actual symbol and ignores matches in comments and " +
-                 "strings. For other languages it falls back to whole-word lexical matches. " +
-                 "Returns ranked 'file:line:col: line'.")]
+                 "this is SEMANTIC - it resolves the actual symbol and ignores matches in comments " +
+                 "(including XML-doc <see cref>) and strings. For other languages it falls back to " +
+                 "whole-word lexical matches in source files (data/doc files like .json/.csv/.md are " +
+                 "not treated as references). Returns ranked 'file:line:col: line'.")]
     public static string FindReferences(
         [Description("Symbol/identifier to find references to (case-sensitive).")] string name,
         [Description("Maximum number of results.")] int maxResults = 100)
@@ -166,6 +179,7 @@ public static class CodeCompassTools
             foreach (var m in text.Search(name, probe * 5))
             {
                 if (SemanticCoverage.IsCovered(m.Path)) continue;             // semantic files handled above
+                if (!IsCodeReferenceFile(m.Path)) continue;                  // a name in a CSV/JSON/log is not a code reference
                 if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
                 hits.Add(($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}", 'l'));
                 if (hits.Count > maxResults) break;                          // got the overflow row

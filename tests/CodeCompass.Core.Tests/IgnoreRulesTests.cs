@@ -13,6 +13,9 @@ public class IgnoreRulesTests
     [InlineData("node_modules")]
     [InlineData(".git")]
     [InlineData(".GIT")] // case-insensitive
+    [InlineData(".claude")]  // other AI tools' index/cache dirs - indexing them pollutes results
+    [InlineData(".cursor")]
+    [InlineData(".aider")]
     public void IgnoredDirectories_AreSkipped(string name)
     {
         Assert.True(new IgnoreRules().IsIgnoredDirectory(name));

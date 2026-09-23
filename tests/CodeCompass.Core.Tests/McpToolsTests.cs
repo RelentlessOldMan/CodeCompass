@@ -61,6 +61,28 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void FindReferences_ExcludesDataAndDocFileMatches()
+    {
+        // Regression for the QSPR benchmark: a symbol name appearing in a CSV export or a tool's JSON
+        // tag dump was reported as a "reference", drowning the real hits. Those data files are not code.
+        using var repo = new TempRepo();
+        repo.Write("src/Widget.cs", "namespace App { public class Widget { public void Run() { } } }");
+        repo.Write("src/Caller.cs", "namespace App { public class Caller { public void Go() { new Widget().Run(); } } }");
+        repo.Write("exports/tickets.csv", "id,summary\nQPR-1,Widget is slow on Run\n");
+        repo.Write("exports/tags.json", "[{\"name\":\"Widget\"},{\"name\":\"Widget\"}]");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            var refs = CodeCompassTools.FindReferences("Widget");
+            Assert.Contains("src/Caller.cs", refs);      // the real code usage IS a reference
+            Assert.DoesNotContain("tickets.csv", refs);  // a CSV row is NOT
+            Assert.DoesNotContain("tags.json", refs);    // a JSON tag dump is NOT
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
     public void FindDefinition_EmptyResult_DisclosesSymbolSkippedFiles()
     {
         using var repo = new TempRepo();
@@ -261,8 +283,10 @@ public class McpToolsTests
         // ...but the comment and the "Run" string in the .cs file are NOT counted.
         Assert.DoesNotContain("remember to Run", result);
         Assert.DoesNotContain("var label", result);
-        // Lexical fallback still covers non-semantic files (the markdown prose).
-        Assert.Contains("docs/notes.md", result);
+        // And a mention in prose/doc (.md) is NOT a code reference - find_references is about code
+        // usages, not every place the string appears. (Lexical fallback for non-semantic *code* files
+        // is covered by FindReferences_SignalsTruncationExactlyAtCap, which uses .py.)
+        Assert.DoesNotContain("docs/notes.md", result);
     }
 
     [Fact]

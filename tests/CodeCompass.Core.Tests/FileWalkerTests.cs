@@ -56,6 +56,7 @@ public class FileWalkerTests
         repo.Write("node_modules/dep/c.js", "x");
         repo.Write(".git/config", "x");
         repo.Write("obj/d.cs", "x");
+        repo.Write(".claude/index/tags.json", "x"); // another tool's index cache - must not be walked
 
         Assert.Equal(new[] { "src/a.cs" }, WalkRel(repo.Root));
     }

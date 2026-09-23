@@ -16,6 +16,10 @@ public sealed class IgnoreRules
         "bin", "obj", "node_modules", "packages", "dist", "build", "out", "target",
         ".gradle", "__pycache__", ".pytest_cache", ".mypy_cache", "venv", ".venv",
         "coverage", ".codecompass", ".corpus", ".next", ".nuget",
+        // Other AI/code tools' own index+cache dirs. Indexing these means searching a rival tool's
+        // dumped tag/symbol database - e.g. .claude/index/tags.json is one giant file of every
+        // identifier, so a search for any common name returns hundreds of junk hits from it.
+        ".claude", ".cursor", ".aider", ".serena", ".continue",
     };
 
     // Extensions we never index (binary / assets). Lowercase, leading dot.

@@ -62,6 +62,32 @@ public class RoslynSemanticTests
     }
 
     [Fact]
+    public void FindReferences_IgnoresXmlDocCrefMentions()
+    {
+        // The tool advertises "ignores comments." An XML-doc <see cref="..."/> resolves in Roslyn as a
+        // real reference, but it lives in a comment - so it must NOT be counted, only the real call is.
+        using var repo = new TempRepo();
+        repo.Write("Widget.cs", """
+        namespace App;
+        public class Widget { public void Run() { } }
+        """);
+        repo.Write("Caller.cs", """
+        namespace App;
+        /// <summary>Uses <see cref="Widget"/> to do work.</summary>
+        public class Caller
+        {
+            public void Go() { var w = new Widget(); w.Run(); }
+        }
+        """);
+
+        var refs = new RoslynCSharpAnalyzer(repo.Root).FindReferences("Widget");
+        // Only the real `new Widget()` usage - the <see cref="Widget"/> in the doc comment is excluded.
+        var single = Assert.Single(refs);
+        Assert.Equal("Caller.cs", single.RelativePath);
+        Assert.Contains("new Widget()", single.LineText);
+    }
+
+    [Fact]
     public void FindReferences_UnknownSymbol_IsEmpty()
     {
         using var repo = new TempRepo();

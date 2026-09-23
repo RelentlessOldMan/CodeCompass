@@ -2,6 +2,7 @@ using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Walking;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
 
@@ -72,6 +73,9 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                 {
                     var loc = rl.Location;
                     if (!loc.IsInSource) continue;
+                    if (IsInDocComment(loc)) continue; // <see cref="X"/> resolves as a real reference, but
+                                                       // it lives in a comment - excluded so the "ignores
+                                                       // comments" contract actually holds.
                     var s = ToLocation(loc);
                     if (seen.Add((s.RelativePath, s.Line, s.Column)))
                     {
@@ -82,6 +86,19 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             }
         }
         return result;
+    }
+
+    // True if the reference sits inside a documentation comment (an XML-doc <see cref="..."/> or the
+    // like). Roslyn resolves those to the real symbol, but for a "find usages" answer they are comment
+    // mentions, not code that uses the symbol - so we drop them to keep the semantic result honest.
+    private static bool IsInDocComment(Location loc)
+    {
+        var tree = loc.SourceTree;
+        if (tree is null) return false;
+        var token = tree.GetRoot().FindToken(loc.SourceSpan.Start, findInsideTrivia: true);
+        for (var n = token.Parent; n is not null; n = n.Parent)
+            if (n is DocumentationCommentTriviaSyntax) return true;
+        return false;
     }
 
     private static IEnumerable<ISymbol> FindDeclarations(Project project, string name) =>
