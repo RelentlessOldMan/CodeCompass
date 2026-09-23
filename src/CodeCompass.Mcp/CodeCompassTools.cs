@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Linq;
 using System.Text;
+using CodeCompass.Core.Indexing;
+using CodeCompass.Core.Symbols;
 using CodeCompass.Core.Text;
 using CodeCompass.Semantics;
 using ModelContextProtocol.Server;
@@ -26,22 +28,32 @@ public static class CodeCompassTools
         [Description("Literal substring to find.")] string query,
         [Description("Maximum number of results.")] int maxResults = 50,
         [Description("Whether the match is case-sensitive (default true). Set false to match any case.")] bool caseSensitive = true)
-        => ServerContext.Query((text, _) =>
+        => ServerContext.QueryAll(handles =>
     {
-        // Fetch one extra to detect truncation: if we get maxResults+1 back, there are more than we
-        // show, so tell the agent to narrow rather than trust this as the complete set.
-        var matches = text.Search(query, maxResults + 1, caseSensitive);
-        if (matches.Count == 0)
+        // Federate across the primary index + every linked root. Fetch one extra per index to detect
+        // truncation across the union; primary hits stay repo-relative, linked hits show absolute paths.
+        var hits = new List<(ServerContext.IndexHandle H, SearchMatch M)>();
+        foreach (var h in handles)
+        {
+            foreach (var m in h.Text.Search(query, maxResults + 1, caseSensitive)) hits.Add((h, m));
+            if (hits.Count > maxResults) break; // enough to know the union is truncated
+        }
+        if (hits.Count == 0)
             return (caseSensitive
                 ? $"No matches for \"{query}\". Tip: retry with caseSensitive:false for a case-insensitive match, or try a shorter/more distinctive substring."
                 : $"No matches for \"{query}\". Tip: try a shorter or more distinctive substring.") + CoverageCaveat();
 
-        bool truncated = matches.Count > maxResults;
+        bool truncated = hits.Count > maxResults;
         var sb = new StringBuilder();
-        foreach (var m in matches.Take(maxResults)) sb.AppendLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
-        sb.Append(Footer(Math.Min(matches.Count, maxResults), truncated, "match", "matches"));
+        foreach (var (h, m) in hits.Take(maxResults)) sb.AppendLine($"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}: {m.LineText}");
+        sb.Append(Footer(Math.Min(hits.Count, maxResults), truncated, "match", "matches"));
         return sb.ToString();
     });
+
+    // A federated hit's display path: primary (project) hits stay repo-relative for compactness; a hit
+    // from a linked external root is shown as its ABSOLUTE path, so it's unambiguous and directly readable.
+    private static string DisplayPath(ServerContext.IndexHandle h, string rel) =>
+        h.IsPrimary ? rel : System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
 
     // Honest zeros: a "nothing found" is only true for what's INDEXED. Files excluded by the size cap
     // aren't searched at all, so a match could be in one - disclose it rather than let the agent read a
@@ -95,17 +107,22 @@ public static class CodeCompassTools
                  "inlines the source so you don't need to open the file. Use this for go-to-definition.")]
     public static string FindDefinition(
         [Description("Exact symbol name (case-sensitive).")] string name)
-        => ServerContext.Query((_, symbols) =>
+        => ServerContext.QueryAll(handles =>
     {
-        var matches = symbols.FindByName(name);
+        // Federate go-to-definition across the primary + linked roots.
+        var matches = new List<(ServerContext.IndexHandle H, Symbol S)>();
+        foreach (var h in handles)
+            foreach (var s in h.Symbols.FindByName(name))
+                matches.Add((h, s));
         if (matches.Count == 0)
             return $"No definition found for \"{name}\". Tips: search_symbols for a partial or one-off name; " +
                    "search_code if it may be a macro/#define, a language without symbol support, or spelled differently." + CoverageCaveat(includeSymbolSkipped: true);
 
         var sb = new StringBuilder();
-        foreach (var s in matches)
+        foreach (var (h, s) in matches)
         {
-            string loc = s.EndLine > s.Line ? $"{s.RelativePath}:{s.Line}-{s.EndLine}" : $"{s.RelativePath}:{s.Line}";
+            var path = DisplayPath(h, s.RelativePath);
+            string loc = s.EndLine > s.Line ? $"{path}:{s.Line}-{s.EndLine}" : $"{path}:{s.Line}";
             sb.AppendLine($"{loc}:{s.Column}: {s.Kind} {s.Name}");
         }
 
@@ -113,8 +130,8 @@ public static class CodeCompassTools
         // definition source right here. Bounded (<= SnippetMaxLines) so the tool result stays cheap.
         if (matches.Count == 1)
         {
-            var s = matches[0];
-            var snippet = TryReadSnippet(s.RelativePath, s.Line, s.EndLine > s.Line ? s.EndLine : s.Line);
+            var (h, s) = matches[0];
+            var snippet = TryReadSnippet(h.Root, s.RelativePath, s.Line, s.EndLine > s.Line ? s.EndLine : s.Line);
             if (snippet is not null) { sb.AppendLine(); sb.Append(snippet); }
         }
         else sb.Append($"({matches.Count} definitions)");
@@ -126,16 +143,17 @@ public static class CodeCompassTools
     // Read lines [startLine..endLine] (1-based, inclusive) of a repo file for inline display, but only
     // for a small span. Returns null if too big, unreadable, or the file is huge (never materialize a
     // big/streamed file for a snippet). Best-effort - a missing snippet just means "open the file".
-    private static string? TryReadSnippet(string relPath, int startLine, int endLine)
+    private static string? TryReadSnippet(string root, string relPath, int startLine, int endLine)
     {
         try
         {
             if (endLine < startLine) return null;
             if (endLine - startLine + 1 > SnippetMaxLines) return null; // too big to inline
-            var full = System.IO.Path.Combine(ServerContext.Root, relPath.Replace('/', System.IO.Path.DirectorySeparatorChar));
+            if (!CodeCompass.Core.Storage.PathSafety.IsInsideRepo(relPath)) return null; // rel from the index; guard a tampered cache
+            var full = System.IO.Path.Combine(root, relPath.Replace('/', System.IO.Path.DirectorySeparatorChar));
             // One open instead of a stat + a separate open: read the size off the open handle (over a
             // share that's one round-trip, not two), then stream just the span we need and stop.
-            var network = CodeCompass.Core.Storage.NetworkPath.IsNetwork(ServerContext.Root);
+            var network = CodeCompass.Core.Storage.NetworkPath.IsNetwork(root);
             using var fs = CodeCompass.Core.Storage.SourceFile.OpenSequential(full, network);
             if (fs.Length > 8L * 1024 * 1024) return null; // don't crack open large files
             using var reader = new System.IO.StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
@@ -234,16 +252,21 @@ public static class CodeCompassTools
     public static string SearchSymbols(
         [Description("Substring to match against symbol names (case-insensitive).")] string query,
         [Description("Maximum number of results.")] int maxResults = 50)
-        => ServerContext.Query((_, symbols) =>
+        => ServerContext.QueryAll(handles =>
     {
-        var matches = symbols.Find(query, maxResults + 1);
+        var matches = new List<(ServerContext.IndexHandle H, Symbol S)>();
+        foreach (var h in handles)
+        {
+            foreach (var s in h.Symbols.Find(query, maxResults + 1)) matches.Add((h, s));
+            if (matches.Count > maxResults) break;
+        }
         if (matches.Count == 0)
             return $"No symbols matching \"{query}\". Tip: try search_code for a text search " +
                    "(it may not be a captured symbol - e.g. a macro, or an unsupported language)." + CoverageCaveat(includeSymbolSkipped: true);
 
         bool truncated = matches.Count > maxResults;
         var sb = new StringBuilder();
-        foreach (var s in matches.Take(maxResults)) sb.AppendLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
+        foreach (var (h, s) in matches.Take(maxResults)) sb.AppendLine($"{DisplayPath(h, s.RelativePath)}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
         sb.Append(Footer(Math.Min(matches.Count, maxResults), truncated, "symbol", "symbols"));
         return sb.ToString();
     });

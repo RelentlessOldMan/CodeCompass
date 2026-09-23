@@ -322,6 +322,40 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void Federation_SearchesLinkedRoots_WithAbsolutePaths()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { public void Run() { } } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class Gizmo { public void UniqueExternalThing() { } } }");
+
+        // Build the external root's own index, then link it to the project (as `link add` would).
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex(); // builds the project + loads the linked index
+
+            // A symbol that exists ONLY in the linked root is found, shown as an ABSOLUTE path.
+            var ext = CodeCompassTools.SearchCode("UniqueExternalThing");
+            Assert.Contains("UniqueExternalThing", ext);
+            Assert.Contains(external.Root, ext);           // absolute path into the linked root
+            var def = CodeCompassTools.FindDefinition("Gizmo");
+            Assert.Contains(external.Root, def);
+            Assert.Contains("Gizmo", def);
+
+            // A project hit stays repo-relative (compact), not absolute.
+            var proj = CodeCompassTools.SearchCode("Widget");
+            Assert.Contains("src/App.cs", proj);
+            Assert.DoesNotContain(external.Root, proj);
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    [Fact]
     public void FindReferences_SemanticForCpp()
     {
         using var repo = NewIndexedRepo();

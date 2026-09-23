@@ -45,6 +45,12 @@ public static class ServerContext
     private static long _lastSemanticUseMs;
     private static Timer? _evictTimer;
 
+    // Linked external roots (see LinkStore): each is an independently-built index opened read-only and
+    // queried alongside the primary. Loaded when the primary becomes Ready and refreshed on reindex, so
+    // a `link add` run in a terminal is picked up on the next session/reindex. Guarded by Rw.
+    internal readonly record struct IndexHandle(string Root, SegmentedIndex Text, SegmentedSymbolIndex Symbols, bool IsPrimary);
+    private static List<IndexHandle> _linked = new();
+
     private static IndexState _state = IndexState.NotStarted;
     private static int _progressFiles;
     private static long _progressBytes;
@@ -88,6 +94,8 @@ public static class ServerContext
             _snapshot = null;
             _csharp = null;
             _cpp = null;
+            foreach (var h in _linked) { h.Text.Dispose(); h.Symbols.Dispose(); }
+            _linked = new List<IndexHandle>();
             _state = IndexState.NotStarted;
             _pendingPaths.Clear();
             _pendingReconcile = false;
@@ -96,6 +104,55 @@ public static class ServerContext
         finally { Rw.ExitWriteLock(); }
         oldWatcher?.Dispose();
         oldCs?.Dispose(); oldCpp?.Dispose();
+    }
+
+    // Open (read-only) the index of each linked root for this project, so federated queries can include
+    // them. Linked indexes are built + kept fresh by their own root (`codecompass index` / `link add` /
+    // that root's own watcher); here we only read them. A not-yet-indexed linked root is skipped (its
+    // status shows in `link list`/doctor). Call under the write lock. Replaces any previously-loaded set.
+    private static void LoadLinkedIndexes()
+    {
+        foreach (var h in _linked) { h.Text.Dispose(); h.Symbols.Dispose(); }
+        var loaded = new List<IndexHandle>();
+        foreach (var linkedRoot in LinkStore.Read(Root))
+        {
+            try
+            {
+                if (RepositoryIndexer.TryLoad(linkedRoot, out var t, out var s))
+                    loaded.Add(new IndexHandle(Path.GetFullPath(linkedRoot), t, s, IsPrimary: false));
+            }
+            catch (Exception ex) { Log.For(Root).Warn($"linked root not loaded: {linkedRoot}: {ex.Message}"); }
+        }
+        _linked = loaded;
+        if (loaded.Count > 0) Log.For(Root).Info($"federating {loaded.Count} linked root index(es)");
+    }
+
+    /// <summary>
+    /// Federated read: run <paramref name="op"/> against the primary index plus every loaded linked
+    /// index, under the read lock. The op merges results itself (linked hits are shown with absolute
+    /// paths - see the tools). Returns the human-readable status if the primary index isn't ready.
+    /// </summary>
+    internal static string QueryAll(Func<IReadOnlyList<IndexHandle>, string> op)
+    {
+        EnsureStartedLocked();
+        Rw.EnterReadLock();
+        try
+        {
+            if (_state != IndexState.Ready || _text is null || _symbols is null) return StatusMessage();
+            var handles = new List<IndexHandle>(1 + _linked.Count) { new(Root, _text, _symbols, IsPrimary: true) };
+            handles.AddRange(_linked);
+            return op(handles);
+        }
+        finally { Rw.ExitReadLock(); }
+    }
+
+    /// <summary>Is an absolute path inside the primary root or any linked root? Defence for reading a
+    /// file a federated result points at. Call under the read lock (via a query op).</summary>
+    internal static bool IsUnderAnyRoot(string absPath)
+    {
+        if (PathSafety.IsUnderOrEqual(absPath, Root)) return true;
+        foreach (var h in _linked) if (PathSafety.IsUnderOrEqual(absPath, h.Root)) return true;
+        return false;
     }
 
     /// <summary>Stop live indexing and release the watcher (clean shutdown / re-point).</summary>
@@ -312,6 +369,7 @@ public static class ServerContext
             _csharp = null;
             _cpp = null;
             _state = IndexState.Ready;
+            LoadLinkedIndexes(); // refresh linked roots (picks up a `link add` done since the last load)
         }
         finally { Rw.ExitWriteLock(); }
         oldCs?.Dispose(); oldCpp?.Dispose();
@@ -345,7 +403,7 @@ public static class ServerContext
             if (RepositoryIndexer.TryLoad(Root, out var text, out var symbols))
             {
                 Rw.EnterWriteLock();
-                try { _text = text; _symbols = symbols; _state = IndexState.Ready; }
+                try { _text = text; _symbols = symbols; _state = IndexState.Ready; LoadLinkedIndexes(); }
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info($"loaded existing index ({text.DocumentCount:N0} files)");
                 PublishStatus(); // Ready
