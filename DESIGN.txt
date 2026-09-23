@@ -716,8 +716,11 @@ the features:
 - Cross-process safety of deleting memory-mapped segment/base files while a reader
   holds them relies on Windows file-locking semantics.
 - Linked roots: a link add/remove run in a terminal is picked up live (a signature
-  check on links.json per query), but a shared root edited by ANOTHER session's owner
-  is refreshed in a read-only session only eventually (on that session's next
+  check on links.json per query). A root linked while UNINDEXED (large, deferred to
+  `codecompass index`) is federated once its index exists - immediately if the CLI
+  built it inline, otherwise on the next reindex (the manual re-probe lever, since
+  building it doesn't change links.json). A shared root edited by ANOTHER session's
+  owner is refreshed in a read-only session only eventually (on that session's next
   reconcile/restart), not pushed live cross-process. A manual `codecompass index` on a
   root that already has a live owner is uncoordinated - the same as the project root's
   existing behavior.

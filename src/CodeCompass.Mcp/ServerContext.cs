@@ -535,6 +535,12 @@ public static class ServerContext
             finally { Rw.ExitWriteLock(); }
             BuildGate.Release();
             DrainPending(); // apply whatever the watcher captured during the rebuild (onto new or, on failure, old index)
+            // reindex is the manual lever to FORCE a linked-root re-probe: a root that was linked-but-unindexed
+            // (large, deferred to `codecompass index`) and has since been built isn't picked up by the signature
+            // watch (links.json didn't change), so clear the flag to re-attempt loading it. The safe-diff only
+            // retries the not-yet-loaded roots; already-federated ones are untouched.
+            lock (_linkedGate) { _linksChecked = false; }
+            Task.Run(MaybeReconcileLinks);
         }
     }
 

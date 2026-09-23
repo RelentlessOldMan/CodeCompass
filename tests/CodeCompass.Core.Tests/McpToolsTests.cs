@@ -495,6 +495,37 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void Federation_ReindexReprobes_LinkedRootIndexedMidSession()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class Gizmo { public void LateIndexedThing() { } } }");
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root); // linked but NOT yet indexed
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            // Unindexed linked root: TryLoad fails, so it isn't federated yet.
+            Assert.DoesNotContain("Gizmo.cs", CodeCompassTools.SearchCode("LateIndexedThing"));
+
+            // Build its index out-of-band (as `codecompass index "<root>"` would for a large deferred root).
+            var (t, s, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+            t.Dispose(); s.Dispose();
+            // links.json didn't change, so the signature watch alone won't pick it up.
+            Assert.DoesNotContain("Gizmo.cs", CodeCompassTools.SearchCode("LateIndexedThing"));
+
+            // reindex is the lever that forces a re-probe -> the now-built linked index gets federated.
+            CodeCompassTools.Reindex();
+            var res = CodeCompassTools.SearchCode("LateIndexedThing");
+            Assert.Contains("Gizmo.cs", res);
+            Assert.Contains(external.Root, res);
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    [Fact]
     public void Federation_NonOwnerLinkedRoot_ServesReadOnly()
     {
         using var project = new TempRepo();
