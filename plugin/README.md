@@ -21,6 +21,14 @@ Perforce/git sync with Claude closed) are picked up by a background **reconcile*
 startup — automatic for local repos, deferred to `codecompass update` on network
 shares / huge repos (`autoReconcile` config to force it).
 
+**Linked roots.** A project can federate external directories that can't be nested
+under it (a shared library elsewhere, a sibling repo, a `Z:\` drop): `codecompass
+link add "<external-path>"`. They're searched alongside the project as one result set,
+live-watched for edits like the main repo, and `find_references`/`find_callees`
+resolve **across** the boundary (C#/C++). A root shared by several projects is indexed
+once and reused. Project hits stay repo-relative; linked hits show absolute paths. See
+the main README's *Linked roots* section.
+
 ## Status line (optional)
 
 Show the index state in Claude Code's status area via `settings.json`:

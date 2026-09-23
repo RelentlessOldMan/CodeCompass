@@ -424,6 +424,73 @@ opt-in for chasing a specific issue. The CLI exposes "codecompass logs" to print
 the folder and current files.
 
 
+Linked roots (federated multi-index)
+------------------------------------
+
+A project sometimes needs to search code that can't be nested under it: a shared
+library checked out elsewhere, a sibling repo, a third-party drop on another
+drive. "Linked roots" attach such external directories to a project and serve
+them as one federated result set. The design choices, and their whys:
+
+- Federated multi-index, not one combined index. Each linked root keeps its OWN
+  independent on-disk index, keyed by its absolute path, exactly like any repo.
+  The server queries the project index plus every linked index and merges the
+  results. This reuses all the single-root machinery unchanged, and - the reason
+  it matters - a root shared by two projects is indexed ONCE and referenced by
+  both. Unlinking is just dropping it from a list; the shared index survives while
+  any project still references it (reference-counted by scanning the per-user
+  cache for other projects' links).
+
+- Links are machine-local. The linked paths are absolute and machine-specific
+  (Z:\..., another checkout), so they are stored as links.json in the PROJECT's
+  cache dir under %LOCALAPPDATA%, NOT in the committed, portable .codecompass.json.
+
+- Same freshness as the project root - this was a correction during design. The
+  primary real use is a huge repo over a network whose linked roots are actively
+  edited, so a linked root must get the SAME change-handling as the main repo:
+  live file-watching for local roots and the same startup reconcile (gated for
+  network/huge) otherwise. A linked root is not a static snapshot.
+
+- One writer per shared index, via a crash-proof lock. Two sessions that share a
+  linked root (two windows, or two projects) must not both mutate its one cache
+  dir. Ownership is an OS-held EXCLUSIVE FILE HANDLE (FileShare.None) on a
+  .writer.lock in the cache dir - NOT the file's contents. The claim exists only
+  while the process holds the handle open, so a crash / kill / shutdown / power
+  loss releases it automatically (the kernel closes handles on process death; on
+  power loss the handle table is RAM and simply gone). There is no PID, heartbeat,
+  or TTL to go stale, and a leftover lock file is inert because ownership is tested
+  by trying to open it exclusively, not by its existence. The cache is always local
+  (%LOCALAPPDATA%), so this is a single-machine NTFS lock where share-modes are
+  reliable; different machines have separate caches and never contend. The session
+  that wins ownership live-watches and reconciles the root; a session that doesn't
+  serves it read-only from the owner's kept-fresh index.
+
+- Load-once per session, off the index lock. Linked roots are loaded once when the
+  primary becomes Ready (a link add/remove done in a terminal mid-session is picked
+  up next session). All linked-root lifecycle is serialized by a dedicated gate and
+  never runs while holding the index RW lock: a RepositoryWatcher.Dispose drains an
+  in-flight callback that itself takes the RW lock, so watchers are created/disposed
+  OFF-lock and only the mmap handles are swapped under a brief write. The lock order
+  is always gate-then-RW, never the reverse, so there is no AB-BA hazard with reads.
+
+- Cross-root code intelligence. find_references and find_callees resolve ACROSS the
+  boundary: the Roslyn (C#) and clang (C/C++) analyzers span the project root AND
+  every linked root in ONE compilation / USR model, so a call in the project to a
+  type defined in a linked root binds. A per-root union would MISS this - the
+  project compilation alone has no source for the linked type - which is why one
+  spanning compilation is worth the cost. Each semantic result carries the absolute
+  root it belongs to, so a hit is addressed correctly. The analyzers are rebuilt
+  lazily when the root set changes or a linked root's content changes.
+
+- Result addressing. Project (primary) hits stay repo-relative for compactness; a
+  hit from a linked root is shown as its ABSOLUTE path, so it is unambiguous and
+  directly readable. Reads resolve through the owning root, guarded by PathSafety.
+
+- Guards. A directory inside the project (or inside/around an existing link) is
+  rejected - it's already covered. The pathological subst/drive-alias aliasing case
+  is deliberately out of scope.
+
+
 Scaling, huge files, and generated code
 ---------------------------------------
 
@@ -641,6 +708,12 @@ the features:
   to syntactic.
 - Cross-process safety of deleting memory-mapped segment/base files while a reader
   holds them relies on Windows file-locking semantics.
+- Linked roots: a link add/remove run mid-session is picked up on the NEXT session
+  (loaded once when the primary becomes Ready). A shared root edited by ANOTHER
+  session's owner is refreshed in a read-only session eventually (on that session's
+  next reconcile/restart), not pushed live cross-process. A manual `codecompass
+  index` on a root that already has a live owner is uncoordinated - the same as the
+  project root's existing behavior.
 - No embeddings / semantic-meaning search, and no multi-user server - both are
   out of scope for v1 by design, not by omission.
 

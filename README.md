@@ -32,6 +32,7 @@ editing it keeps just the changed files in memory. This is what lets an 87 GB re
 | Go-to-definition & symbol search | ✅ C#, C, C++, Python, JS, TS/TSX, Go, Rust, TRACE32 PRACTICE (.cmm) |
 | Semantic find-references (excludes comments/strings) | ✅ C# & C/C++; lexical whole-word elsewhere |
 | Auto re-index on file changes | ✅ debounced, content-hash verified, ignores build output |
+| Federate external directories (linked roots) | ✅ shared-once index, live-watched, cross-root C#/C++ references |
 | Runs fully local, no GPU, no cloud | ✅ Yes |
 | Dozens-of-GB repos without exhausting RAM | ✅ indexes are memory-mapped on disk |
 | MATLAB / other unlisted languages | Lexical only (text search works; no symbols) |
@@ -121,6 +122,7 @@ diagnostics + logs (never your source).
 ```
 codecompass index   <path>            build the index (shows progress + ETA)
 codecompass update  <path>            incremental reindex of changes
+codecompass link    <add|remove|list> <path>   federate an external directory into a project (see "Linked roots")
 codecompass watch   <path>            auto-reindex on file changes
 codecompass search  <path> <query> [-i]  literal text search (-i = case-insensitive)
 codecompass def     <path> <name>     go-to-definition (file:startLine-endLine)
@@ -266,6 +268,42 @@ the background, while the old index keeps serving, then swaps. This is automatic
 within `maxAutoMb`**; for **network shares and huge repos** it's left to a manual `codecompass update`
 (a full-tree stat-walk is slow over SMB, and the watcher is unreliable there anyway). Override with
 `autoReconcile` (config) / `CODECOMPASS_AUTO_RECONCILE` (env): `true` = always, `false` = never.
+
+## Linked roots (federating external directories)
+
+Sometimes the code you work on lives in more than one place — a wrapper project plus a shared library
+checked out elsewhere, a sibling repo, or a third-party drop on another drive (`Z:\…`) that can't be
+nested under your project. **Linked roots** let a project index and search those external directories
+alongside its own, as one federated result set:
+
+```
+codecompass link add    <path> [project-dir]   attach an external directory (indexes it, or defers if large)
+codecompass link remove <path> [project-dir]   detach it (offers to delete its index if unused)
+codecompass link list   [project-dir]          show the project's linked roots + index status
+```
+
+- **One index per root, shared across projects.** Each linked root keeps its **own** independent index
+  keyed by its absolute path, so a root two projects both link is indexed **once** and reused. `link
+  remove` only deletes that index if **no other project** still references it (it tells you who does).
+- **Same freshness as the main repo.** When the server loads a project it federates its linked roots
+  and — for each one no other live session already owns — wins a crash-proof write-ownership claim and
+  **live-watches** it, so edits to a linked root are indexed as they happen, exactly like the project
+  root (local *and* network). A root already owned by another session is served read-only from that
+  owner's fresh index. Out-of-session changes are reconciled on load (gated for network/huge roots).
+- **Cross-root code intelligence.** `find_references` and `find_callees` resolve **across** the
+  boundary: a call in your project to a type defined in a linked root binds correctly (C# via Roslyn,
+  C/C++ via clang — one compilation spanning all roots, not a per-root union that misses the seam).
+- **Result addressing.** Hits in the project stay **repo-relative** (compact); hits in a linked root
+  are shown as **absolute** paths, so they're unambiguous and directly readable.
+- **Sensible guards.** You can't link a directory that's inside your project (or inside/around an
+  existing link) — it's already covered. Links are stored **machine-local** (the paths are absolute and
+  machine-specific), in the project's cache dir, not in the committed `.codecompass.json`.
+
+`codecompass doctor "<project>"` lists every linked root, whether it exists and is indexed, and how
+many other projects share it — and warns if one is missing or unindexed (so it isn't silently absent
+from results).
+
+> A `link add`/`remove` run in a terminal while a session is open is picked up on the **next** session.
 
 ## Status line (optional)
 
