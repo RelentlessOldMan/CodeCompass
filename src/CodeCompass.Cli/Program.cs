@@ -32,6 +32,7 @@ return args.Length == 0
         "def" => CmdDef(args),
         "symbols" => CmdSymbols(args),
         "refs" => CmdRefs(args),
+        "callees" => CmdCallees(args),
         "watch" => CmdWatch(args),
         "survey" => CmdSurvey(args),
         "init" => CmdInit(args),
@@ -72,6 +73,7 @@ static int Usage()
     Console.Error.WriteLine("  codecompass def     <path> <name>        exact symbol definition(s)");
     Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
     Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#/C++, lexical elsewhere)");
+    Console.Error.WriteLine("  codecompass callees <path> <name>        in-repo methods a C# method calls (semantic; C# only)");
     Console.Error.WriteLine("  codecompass survey  <path>               report what the size caps skip + suggest config");
     Console.Error.WriteLine("  codecompass init    <path>               write a documented .codecompass.json (per-repo settings)");
     Console.Error.WriteLine("  codecompass symstats <path> [--full]     profile symbol-file sizes + parse cost per language");
@@ -1024,6 +1026,22 @@ static int CmdRefs(string[] args)
     }
 
     Console.Error.WriteLine($"-- {cs.Count} C# + {cpp.Count} C/C++ semantic + {lexical} lexical reference(s)");
+    return 0;
+}
+
+static int CmdCallees(string[] args)
+{
+    if (args.Length < 3) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    NoteLinkedRootsNotSearched(root);
+    var name = args[2];
+
+    // The in-repo methods a C# method calls, resolved semantically (C# only - the MCP find_callees twin).
+    // Cold-built each run from the CLI; the MCP server keeps the analyzer warm across calls.
+    var callees = new RoslynCSharpAnalyzer(root).FindCallees(name);
+    foreach (var c in callees)
+        Console.WriteLine($"{c.RelativePath}:{c.Line}:{c.Column}: {c.LineText}");
+    Console.Error.WriteLine($"-- {callees.Count} callee(s) (C# only)");
     return 0;
 }
 
