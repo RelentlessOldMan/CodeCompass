@@ -52,21 +52,30 @@ if ($Publish) {
     $dirty = git status --porcelain
     if ($dirty) { throw "working tree has uncommitted/untracked changes - commit them before releasing:`n$dirty" }
 
-    Write-Host "Fetching origin to check main is fast-forwardable ..."
-    git fetch origin --quiet
-    if ($LASTEXITCODE -ne 0) { throw "git fetch origin failed" }
+    # git fetch/push write their normal progress to STDERR even on success; under ErrorActionPreference=Stop
+    # (PowerShell 5.1) that stderr is turned into a terminating NativeCommandError, aborting a successful
+    # push. So run the native git calls under Continue and decide purely on $LASTEXITCODE (same guard the
+    # gh block below uses).
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        Write-Host "Fetching origin to check main is fast-forwardable ..."
+        git fetch origin --quiet
+        if ($LASTEXITCODE -ne 0) { throw "git fetch origin failed" }
 
-    # HEAD must be at or ahead of origin/main. If origin/main has commits this build doesn't, stop.
-    git merge-base --is-ancestor origin/main HEAD
-    if ($LASTEXITCODE -ne 0) { throw "origin/main has commits not in this build (diverged) - reconcile (git pull --rebase) before releasing." }
+        # HEAD must be at or ahead of origin/main. If origin/main has commits this build doesn't, stop.
+        git merge-base --is-ancestor origin/main HEAD
+        if ($LASTEXITCODE -ne 0) { throw "origin/main has commits not in this build (diverged) - reconcile (git pull --rebase) before releasing." }
 
-    Write-Host "Pushing $sha -> origin/main ..."
-    # --no-verify: we already ran check.ps1 -Big above, so skip the pre-push hook's redundant re-run.
-    # (With -SkipTests we did NOT gate here - let the hook run, so keep verification on that push.)
-    $pushArgs = @("push", "origin", "${sha}:refs/heads/main")
-    if (-not $SkipTests) { $pushArgs = @("push", "--no-verify", "origin", "${sha}:refs/heads/main") }
-    git @pushArgs
-    if ($LASTEXITCODE -ne 0) { throw "git push to origin/main failed - resolve, then re-run." }
+        Write-Host "Pushing $sha -> origin/main ..."
+        # --no-verify: we already ran check.ps1 -Big above, so skip the pre-push hook's redundant re-run.
+        # (With -SkipTests we did NOT gate here - let the hook run, so keep verification on that push.)
+        $pushArgs = @("push", "origin", "${sha}:refs/heads/main")
+        if (-not $SkipTests) { $pushArgs = @("push", "--no-verify", "origin", "${sha}:refs/heads/main") }
+        git @pushArgs
+        if ($LASTEXITCODE -ne 0) { throw "git push to origin/main failed - resolve, then re-run." }
+    }
+    finally { $ErrorActionPreference = $prevEap }
 }
 
 # 1) Build the plugin (self-contained binaries + stamped plugin.json version).
