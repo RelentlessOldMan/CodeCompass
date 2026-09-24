@@ -105,6 +105,14 @@ public static class CodeCompassTools
     private static bool IsCodeReferenceFile(string path) =>
         !NonCodeReferenceExtensions.Contains(System.IO.Path.GetExtension(path));
 
+    // C/C++ translation-unit extensions (headers are parsed via #include, not directly) - the files the
+    // clang layer parses, and thus the candidates worth handing it for a targeted find-references.
+    private static readonly HashSet<string> CppSourceExtensions = new(StringComparer.OrdinalIgnoreCase)
+    { ".c", ".cc", ".cpp", ".cxx", ".c++" };
+
+    private static bool IsCppSourceFile(string path) =>
+        CppSourceExtensions.Contains(System.IO.Path.GetExtension(path));
+
     // Result footer that distinguishes an exact count from a truncated one, so the agent knows
     // whether it has seen everything or must refine the query. `shown` is how many we actually list.
     private static string Footer(int shown, bool truncated, string singular, string plural) =>
@@ -203,8 +211,19 @@ public static class CodeCompassTools
         var hits = new List<(string Line, char Kind)>();
         foreach (var s in ServerContext.CSharp.FindReferences(name, probe))
             hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
-        foreach (var s in ServerContext.Cpp.FindReferences(name, probe))
-            hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
+
+        // C/C++ semantic is TARGETED: a reference to `name` can only be in a file whose text contains it,
+        // and the trigram index lists exactly those files. So gather the candidate C/C++ sources across all
+        // roots (absolute paths) and clang-parses ONLY those - complete, and proportional to the symbol's
+        // real footprint, never a whole-tree parse. Empty candidate set => no C/C++ work at all.
+        var cppCandidates = new List<string>();
+        foreach (var h in handles)
+            foreach (var rel in h.Text.CandidateFiles(name))
+                if (IsCppSourceFile(rel))
+                    cppCandidates.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar))));
+        if (cppCandidates.Count > 0)
+            foreach (var s in ServerContext.Cpp.FindReferences(name, cppCandidates, probe))
+                hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
 
         if (hits.Count <= maxResults)
             foreach (var h in handles)
@@ -220,26 +239,14 @@ public static class CodeCompassTools
                 if (hits.Count > maxResults) break;
             }
 
-        // Honest disclosure for the C/C++ semantic layer: if C/C++ sources were seen but not all parsed
-        // (typically no compile_commands.json, so best-effort flags leave TUs unresolved), a low or zero
-        // C/C++ count means "the semantic layer couldn't fully run here," NOT "no references exist." Same
-        // discipline as CoverageCaveat for size-capped files - a zero must not read as a confident answer.
-        // Fire whenever the C/C++ layer ran WITHOUT a compile DB (best-effort flags - includes/defines
-        // unresolved, so references are unreliable even when clang still produces error-laden TUs), or when
-        // some TUs hard-failed to parse. The no-DB case is the important one and must not hinge on the parse
-        // ratio: a missing compile DB usually still yields "parsed" TUs that resolve almost nothing.
-        var cpp2 = ServerContext.Cpp.Stats;
+        // Honest disclosure: when C/C++ candidate files were involved but there's no compile_commands.json,
+        // resolution ran on best-effort flags (includes/defines unresolved), so it may be imprecise - a
+        // thin/zero C/C++ count then means "couldn't fully resolve," not "no references exist." (Results are
+        // now COMPLETE over the candidate set - no cap - so this is about precision, not coverage.)
         string cppNote = "";
-        if (cpp2.SourceFilesSeen > 0 && !cpp2.HasCompileDb)
-            cppNote = cpp2.Capped
-                ? $" (Note: no compile_commands.json found - C/C++ semantic search stopped after {cpp2.SourceFilesSeen:N0} " +
-                  "translation units (a large tree without a compile DB), so it is INCOMPLETE. Add a compile_commands.json " +
-                  "for precise, complete C/C++ references, or raise CODECOMPASS_CPP_MAX_TU.)"
-                : $" (Note: no compile_commands.json found - C/C++ semantic search ran with best-effort flags over " +
-                  $"{cpp2.SourceFilesSeen:N0} translation unit(s) and may be incomplete; add a compile_commands.json for precise C/C++ results.)";
-        else if (cpp2.SourceFilesSeen > 0 && cpp2.SourceFilesParsed < cpp2.SourceFilesSeen)
-            cppNote = $" (Note: C/C++ semantic parsed {cpp2.SourceFilesParsed:N0}/{cpp2.SourceFilesSeen:N0} translation unit(s); " +
-                      "the rest failed to parse, so C/C++ references may be incomplete.)";
+        if (cppCandidates.Count > 0 && !ServerContext.Cpp.HasCompileDb)
+            cppNote = " (Note: no compile_commands.json found - C/C++ references were resolved with best-effort " +
+                      "flags and may be imprecise; add a compile_commands.json for precise results.)";
 
         if (hits.Count == 0)
             return $"No references found for \"{name}\". Tip: try search_code for a raw text search " +

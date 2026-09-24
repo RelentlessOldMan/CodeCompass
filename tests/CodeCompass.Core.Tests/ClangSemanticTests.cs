@@ -90,36 +90,49 @@ public class ClangSemanticTests
     }
 
     [Fact]
-    public void ParseStats_ReportNoCompileDb_WhenNonePresent()
+    public void HasCompileDb_False_WhenNonePresent()
     {
         using var repo = new TempRepo();
         repo.Write("a.c", "int add(int a, int b) { return a + b; }");
-
-        var analyzer = new ClangCppAnalyzer(repo.Root);
-        _ = analyzer.FindReferences("add"); // triggers the build
-        var stats = analyzer.Stats;
-
-        Assert.False(stats.HasCompileDb);       // no compile_commands.json in the tree
-        Assert.True(stats.SourceFilesSeen >= 1); // the .c TU was attempted
-        Assert.False(stats.Capped);             // a tiny repo is far under the no-DB TU cap - full best-effort
+        Assert.False(new ClangCppAnalyzer(repo.Root).HasCompileDb); // no compile_commands.json in the tree
     }
 
     [Fact]
-    public void NoCompileDb_SmallRepo_StillResolvesSemantically_NotCapped()
+    public void NoCompileDb_SmallRepo_StillResolvesSemantically()
     {
-        // The no-DB cap must not touch ordinary small/medium repos: they parse on default flags and resolve.
+        // No compile DB, no candidate list supplied -> the analyzer self-scans and still resolves on default flags.
         using var repo = new TempRepo();
         repo.Write("a.c", "int add(int a, int b) { return a + b; }");
         repo.Write("b.c", "int add(int a, int b);\nint use(void){ return add(1,2); }");
 
-        var analyzer = new ClangCppAnalyzer(repo.Root);
-        var refs = analyzer.FindReferences("add");
+        var refs = new ClangCppAnalyzer(repo.Root).FindReferences("add");
         Assert.Contains(refs, r => r.RelativePath == "b.c");  // real call resolved without a compile DB
-        Assert.False(analyzer.Stats.Capped);
     }
 
     [Fact]
-    public void ParseStats_ReportCompileDb_WhenPresent()
+    public void CandidateFiles_TargetOnlyReferencingFiles_ButResultIsComplete()
+    {
+        // Targeted parse: passing exactly the files that contain the name resolves the reference, and NOT
+        // passing a referencing file means its reference isn't found - proving we parse only what we're given
+        // (the trigram index supplies the complete candidate set in production).
+        using var repo = new TempRepo();
+        repo.Write("def.c", "int Widget(void) { return 0; }");
+        repo.Write("use.c", "int Widget(void);\nint go(void){ return Widget(); }");
+
+        var analyzer = new ClangCppAnalyzer(repo.Root);
+        string Full(string r) => System.IO.Path.Combine(repo.Root, r);
+
+        // Give it both files (what the trigram index would return for "Widget") -> the call resolves.
+        var complete = analyzer.FindReferences("Widget", new[] { Full("def.c"), Full("use.c") });
+        Assert.Contains(complete, r => r.RelativePath == "use.c" && r.LineText.Contains("Widget()"));
+
+        // Omit the referencing file -> its reference is not parsed (only candidates are).
+        var partial = analyzer.FindReferences("Widget", new[] { Full("def.c") });
+        Assert.DoesNotContain(partial, r => r.RelativePath == "use.c");
+    }
+
+    [Fact]
+    public void HasCompileDb_True_WhenPresent()
     {
         using var repo = new TempRepo();
         repo.Write("a.c", "int add(int a, int b) { return a + b; }");
@@ -127,10 +140,7 @@ public class ClangSemanticTests
         [ { "directory": "<DIR>", "file": "a.c", "command": "clang -c a.c" } ]
         """.Replace("<DIR>", repo.Root.Replace("\\", "\\\\")));
 
-        var analyzer = new ClangCppAnalyzer(repo.Root);
-        _ = analyzer.FindReferences("add");
-        Assert.True(analyzer.Stats.HasCompileDb);
-        Assert.False(analyzer.Stats.Capped); // a compile DB means parse everything - never capped
+        Assert.True(new ClangCppAnalyzer(repo.Root).HasCompileDb);
     }
 
     [Fact]
@@ -144,9 +154,7 @@ public class ClangSemanticTests
             .Replace("<DIR>", repo.Root.Replace("\\", "\\\\")));
         repo.Write(".codecompass.json", """{ "compileCommands": ["out"] }""");
 
-        var analyzer = new ClangCppAnalyzer(repo.Root);
-        _ = analyzer.FindReferences("add"); // triggers the build (reads the configured DB)
-        Assert.True(analyzer.Stats.HasCompileDb); // the out\ DB was located via config, not the default probe
+        Assert.True(new ClangCppAnalyzer(repo.Root).HasCompileDb); // the out\ DB was located via config, not the default probe
     }
 
     [Fact]

@@ -1008,15 +1008,29 @@ static int CmdRefs(string[] args)
     foreach (var s in cs)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
-    var cpp = new ClangCppAnalyzer(root).FindReferences(name);
+    // Load the index once: it drives the TARGETED C/C++ parse (only files that could contain the name) and
+    // the lexical fallback below. If unindexed, the clang analyzer self-scans (slower, but still correct).
+    bool haveIndex = RepositoryIndexer.TryLoad(root, out var index, out _);
+    List<string>? cppCandidates = null;
+    if (haveIndex)
+    {
+        cppCandidates = new List<string>();
+        foreach (var rel in index!.CandidateFiles(name))
+        {
+            var ext = Path.GetExtension(rel);
+            if (ext is ".c" or ".cc" or ".cpp" or ".cxx" or ".c++")
+                cppCandidates.Add(Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar))));
+        }
+    }
+    var cpp = new ClangCppAnalyzer(root).FindReferences(name, cppCandidates);
     foreach (var s in cpp)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
     // Lexical whole-word references for languages without a semantic analyzer.
     int lexical = 0;
-    if (RepositoryIndexer.TryLoad(root, out var index, out _))
+    if (haveIndex)
     {
-        foreach (var m in index.Search(name, 1000))
+        foreach (var m in index!.Search(name, 1000))
         {
             if (SemanticCoverage.IsCovered(m.Path)) continue;
             if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;

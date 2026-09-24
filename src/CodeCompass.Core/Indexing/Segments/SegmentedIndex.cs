@@ -169,6 +169,28 @@ public sealed class SegmentedIndex : IDisposable
             : VerifySerial(candidates, query, comparison, caseSensitive, maxResults);
     }
 
+    /// <summary>
+    /// The repo-relative paths of every file that MIGHT contain <paramref name="query"/> (the trigram
+    /// candidate set), de-duplicated - a complete superset with no cap and no file reads (pure mmap posting
+    /// intersection). Used to target the C/C++ semantic layer at just the files that could reference a
+    /// symbol, instead of parsing the whole tree. A query under 3 chars has no trigrams, so every file is a
+    /// candidate (correct, if broad). Over-inclusion is harmless: the semantic layer confirms real matches.
+    /// </summary>
+    public IReadOnlyList<string> CandidateFiles(string query)
+    {
+        if (string.IsNullOrEmpty(query)) return Array.Empty<string>();
+        if (_pending is { DocCount: > 0 }) FlushPending();
+
+        var groups = query.Length >= 3 ? BuildTrigramGroups(query, caseSensitive: true) : null;
+        var cands = CollectCandidates(groups);
+        if (cands.Count <= 1) return cands;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var outp = new List<string>(cands.Count);
+        foreach (var c in cands) if (seen.Add(c)) outp.Add(c);
+        return outp;
+    }
+
     // Ordered list of candidate repo-relative paths across all segments (rarest-first trigram
     // intersection per segment). Purely local work.
     private List<string> CollectCandidates(List<long[]>? groups)

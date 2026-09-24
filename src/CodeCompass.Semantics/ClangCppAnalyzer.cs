@@ -9,20 +9,23 @@ using CodeCompass.Core.Walking;
 namespace CodeCompass.Semantics;
 
 /// <summary>
-/// Precise C/C++ code intelligence via clang (libclang through ClangSharp). It parses
-/// each translation unit once, keying declarations by USR (clang's stable, cross-TU
-/// symbol identity) so references resolve to the actual symbol - matches in comments
-/// and strings are never counted. Uses compile_commands.json when present (root or
-/// root/build) for accurate include paths/defines; otherwise best-effort default flags.
+/// Precise C/C++ code intelligence via clang (libclang through ClangSharp). Declarations are keyed by USR
+/// (clang's stable, cross-TU symbol identity) so references resolve to the actual symbol - matches in
+/// comments and strings are never counted. Uses compile_commands.json when present (root, root/build, or a
+/// configured location) for accurate include paths/defines; otherwise best-effort default flags.
 ///
-/// Built once, lazily, and cached. Rebuild by creating a new instance. The keyed declaration/reference
-/// maps hold the whole C/C++ semantic model in memory, so a long-lived server disposes it when idle to
-/// reclaim that RAM (see ServerContext).
+/// TARGETED, not whole-repo. A reference to <c>Foo</c> can only live in a file whose text contains "Foo",
+/// and the trigram index already knows which files those are - so a query parses ONLY those candidate
+/// translation units, not the entire tree. That makes find-references on a 40k-file repo cost work
+/// proportional to how much the symbol is actually used (a handful of TUs), never a full-tree parse, with
+/// no arbitrary cap and nothing dropped. The heavy lifting (indexing all text) is done once at
+/// `codecompass index` time; this layer just rides that index. Each parse is per-query and disposed
+/// immediately, so memory stays bounded to a few TUs. Callers supply the candidate files (from the trigram
+/// index); with none supplied it self-scans the tree (used by unit tests).
 ///
-/// It can span several roots (a project plus its linked external roots): every root's translation units
-/// are parsed into one USR-keyed model, so a reference in one root to a symbol defined in another is
-/// captured (subject to include paths resolving across the boundary). Each result carries the absolute
-/// root it belongs to (see <see cref="SemanticLocation.Root"/>) so callers can address it correctly.
+/// It can span several roots (a project plus its linked external roots): candidate TUs from any root are
+/// parsed into one USR model, so a reference in one root to a symbol defined in another resolves. Each
+/// result carries the absolute root it belongs to (see <see cref="SemanticLocation.Root"/>).
 /// </summary>
 public sealed class ClangCppAnalyzer : IDisposable
 {
@@ -31,156 +34,164 @@ public sealed class ClangCppAnalyzer : IDisposable
 
     private readonly IReadOnlyList<string> _roots; // absolute; [0] is the primary (project) root
     private readonly object _gate = new();
-    private bool _built;
-
-    private readonly Dictionary<string, HashSet<string>> _usrsByName = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, List<Loc>> _defsByName = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, List<Loc>> _refsByUsr = new(StringComparer.Ordinal);
     private Dictionary<string, string[]>? _compileArgs;
-
-    // Parse accounting for honest reporting: how many C/C++ translation units we attempted vs. actually
-    // parsed, and whether a compile_commands.json was found. Without one, best-effort flags leave many TUs
-    // unparsed (empty USR maps), so a bare "0 references" would read as "none exist" rather than "the
-    // semantic layer couldn't run here" - the tools surface these so that zero is honest. Valid after build.
     private bool _hasCompileDb;
-    private int _tuSeen, _tuParsed;
-    private bool _tuCapped;
-
-    // Without a compile_commands.json, clang parses each TU on best-effort flags (includes/defines
-    // unresolved) - low value, and on a huge C/C++ tree it's minutes of futile work that also grows memory.
-    // So when there's no compile DB we cap how many TUs we attempt (small self-contained repos stay well
-    // under this and are unaffected; they resolve fine on default flags). Raise it, or add a compile DB,
-    // for full coverage. With a compile DB we parse everything (the user opted into a real build).
-    private static int NoCompileDbTuCap()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_MAX_TU");
-        if (int.TryParse(env, out var n) && n > 0) return n;
-        return 2000;
-    }
-
-    /// <summary>Build accounting so callers can disclose a degraded C/C++ semantic result honestly.</summary>
-    public readonly record struct ParseStats(int SourceFilesSeen, int SourceFilesParsed, bool HasCompileDb, bool Capped);
-    public ParseStats Stats { get { EnsureBuilt(); return new ParseStats(_tuSeen, _tuParsed, _hasCompileDb, _tuCapped); } }
+    private bool _dbLoaded;
 
     private readonly record struct Loc(string Full, int Line, int Column); // Full = absolute path
 
+    // The per-query semantic model: only the candidate TUs for one query are parsed into it, then it's
+    // discarded. Local (not instance) state, so concurrent queries on a shared analyzer can't race.
+    private sealed class Model
+    {
+        public readonly Dictionary<string, HashSet<string>> UsrsByName = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, List<Loc>> DefsByName = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, List<Loc>> RefsByUsr = new(StringComparer.Ordinal);
+    }
+
     public ClangCppAnalyzer(string root) : this(new[] { root }) { }
 
-    /// <summary>Span multiple roots (project + linked external roots) in one semantic model, so references
-    /// resolve across the boundary. The first root is treated as primary by callers for path display.</summary>
+    /// <summary>Span multiple roots (project + linked external roots). The first root is primary (callers
+    /// use it for path display).</summary>
     public ClangCppAnalyzer(IReadOnlyList<string> roots) =>
         _roots = roots.Select(r => Path.TrimEndingDirectorySeparator(Path.GetFullPath(r))).ToList();
 
-    /// <summary>Release the in-memory semantic model. Safe to call while the instance is being
-    /// discarded; a fresh instance rebuilds lazily on next use.</summary>
+    /// <summary>Whether a compile_commands.json was found for any root. Cheap (no parsing). Callers use it
+    /// to disclose that C/C++ resolution is best-effort without one.</summary>
+    public bool HasCompileDb { get { EnsureCompileDb(); return _hasCompileDb; } }
+
     public void Dispose()
     {
         lock (_gate)
         {
-            _usrsByName.Clear();
-            _defsByName.Clear();
-            _refsByUsr.Clear();
             _compileArgs = null;
             _hasCompileDb = false;
-            _tuSeen = 0;
-            _tuParsed = 0;
-            _built = false;
+            _dbLoaded = false;
         }
     }
 
-    public IReadOnlyList<SemanticLocation> FindDefinitions(string name)
+    /// <summary>True (semantic) references to the C/C++ symbol <paramref name="name"/>. <paramref
+    /// name="candidateFiles"/> is the set of files that might contain it (absolute paths, from the trigram
+    /// index); only those TUs are parsed. Null => self-scan the tree (unit tests / no index available).</summary>
+    public IReadOnlyList<SemanticLocation> FindReferences(string name, IReadOnlyCollection<string>? candidateFiles = null, int max = 200)
     {
-        EnsureBuilt();
+        var model = BuildModel(name, candidateFiles);
         var result = new List<SemanticLocation>();
-        if (_defsByName.TryGetValue(name, out var locs))
+        if (!model.UsrsByName.TryGetValue(name, out var usrs)) return result;
+
+        var seen = new HashSet<Loc>();
+        var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal); // per-query; freed on return
+        foreach (var usr in usrs)
+        {
+            if (!model.RefsByUsr.TryGetValue(usr, out var locs)) continue;
+            foreach (var l in locs)
+                if (seen.Add(l))
+                {
+                    result.Add(ToSemantic(l, lineCache));
+                    if (result.Count >= max) return result;
+                }
+        }
+        return result;
+    }
+
+    /// <summary>Definitions of the C/C++ symbol <paramref name="name"/>. See <see cref="FindReferences"/>
+    /// for <paramref name="candidateFiles"/>.</summary>
+    public IReadOnlyList<SemanticLocation> FindDefinitions(string name, IReadOnlyCollection<string>? candidateFiles = null)
+    {
+        var model = BuildModel(name, candidateFiles);
+        var result = new List<SemanticLocation>();
+        if (model.DefsByName.TryGetValue(name, out var locs))
         {
             var seen = new HashSet<Loc>();
-            var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal); // per-query; freed on return
+            var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal);
             foreach (var l in locs)
                 if (seen.Add(l)) result.Add(ToSemantic(l, lineCache));
         }
         return result;
     }
 
-    public IReadOnlyList<SemanticLocation> FindReferences(string name, int max = 200)
+    // Parse just the files that could contain the query into a fresh model. Bounded to the candidate set,
+    // so memory and time scale with the symbol's actual footprint, not the repo size.
+    private Model BuildModel(string name, IReadOnlyCollection<string>? candidateFiles)
     {
-        EnsureBuilt();
-        var result = new List<SemanticLocation>();
-        if (!_usrsByName.TryGetValue(name, out var usrs)) return result;
-
-        var seen = new HashSet<Loc>();
-        var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal); // per-query; freed on return
-        foreach (var usr in usrs)
+        EnsureCompileDb();
+        var model = new Model();
+        using var index = CXIndex.Create();
+        foreach (var full in ResolveFiles(name, candidateFiles))
         {
-            if (!_refsByUsr.TryGetValue(usr, out var locs)) continue;
-            foreach (var l in locs)
-            {
-                if (seen.Add(l))
-                {
-                    result.Add(ToSemantic(l, lineCache));
-                    if (result.Count >= max) return result;
-                }
-            }
+            try { ParseInto(index, full, model); }
+            catch { /* skip files clang can't handle */ }
         }
-        return result;
+        return model;
     }
 
-    private void EnsureBuilt()
+    // The absolute source files to parse for this query: the supplied candidates (filtered to C/C++ sources
+    // under one of our roots), or - when none are supplied - a self-scan that reads each source file's text
+    // and keeps those containing the name (the fallback for unit tests / callers without a trigram index).
+    private IEnumerable<string> ResolveFiles(string name, IReadOnlyCollection<string>? candidateFiles)
     {
-        lock (_gate)
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (candidateFiles is not null)
         {
-            if (_built) return;
-            _built = true;
-
-            LoadCompileCommands();
-            int cap = _hasCompileDb ? int.MaxValue : NoCompileDbTuCap();
-
-            var walker = new FileWalker(new IgnoreRules());
-            using var index = CXIndex.Create();
-            foreach (var root in _roots)
+            foreach (var f in candidateFiles)
             {
+                string full;
+                try { full = Path.GetFullPath(f); } catch { continue; }
+                if (!SourceExtensions.Contains(Path.GetExtension(full))) continue; // headers are parsed via #include
+                if (OwnerOf(full) is null) continue;                               // must be under a root
+                if (seen.Add(full) && File.Exists(full)) yield return full;
+            }
+        }
+        else
+        {
+            var walker = new FileWalker(new IgnoreRules());
+            foreach (var root in _roots)
                 foreach (var file in walker.Walk(root))
                 {
                     if (!SourceExtensions.Contains(Path.GetExtension(file.RelativePath))) continue;
-                    if (_tuSeen >= cap) { _tuCapped = true; break; } // no compile DB: stop the futile huge-tree grind
-                    _tuSeen++;
-                    try { if (ParseFile(index, file.FullPath)) _tuParsed++; }
-                    catch { /* skip files clang can't handle */ }
+                    if (seen.Add(file.FullPath) && FileContains(file.FullPath, name)) yield return file.FullPath;
                 }
-                if (_tuCapped) break;
-            }
         }
     }
 
-    // Returns true if the translation unit actually parsed (so the caller can count parse coverage - a
-    // low parsed/seen ratio with no compile DB is the "semantics couldn't run here" signal the tools show).
-    private bool ParseFile(CXIndex index, string fullPath)
+    // Cheap text pre-filter for the self-scan fallback: does the file contain the name at all? (A real
+    // reference must.) A file too large to grep cheaply is included rather than risk missing a reference.
+    private static bool FileContains(string full, string name)
+    {
+        try
+        {
+            var fi = new FileInfo(full);
+            if (!fi.Exists) return false;
+            if (fi.Length > 32L * 1024 * 1024) return true; // too big to read cheaply - include to stay complete
+            return File.ReadAllText(full).Contains(name, StringComparison.Ordinal);
+        }
+        catch { return false; }
+    }
+
+    private void ParseInto(CXIndex index, string fullPath, Model model)
     {
         var args = GetArgs(fullPath);
         var error = CXTranslationUnit.TryParse(index, fullPath, args,
             ReadOnlySpan<CXUnsavedFile>.Empty,
             CXTranslationUnit_Flags.CXTranslationUnit_DetailedPreprocessingRecord,
             out CXTranslationUnit tu);
-        if (error != CXErrorCode.CXError_Success) return false;
+        if (error != CXErrorCode.CXError_Success) return;
 
-        // Dispose the TU as soon as we've extracted its symbols/refs into our own maps. Otherwise every
-        // parsed file's libclang AST stays resident until the whole walk finishes - which on a large tree
-        // (tens of thousands of TUs) balloons memory. The line text shown later is read from the FILE, not
-        // the TU, so nothing here needs it after Walk.
+        // Dispose the TU as soon as we've copied its symbols/refs into the model - the line text shown later
+        // is read from the file, not the TU - so memory never accumulates more than one TU at a time.
         var translationUnit = TranslationUnit.GetOrCreate(tu);
-        try { Walk(translationUnit.TranslationUnitDecl); }
+        try { Walk(translationUnit.TranslationUnitDecl, model); }
         finally { translationUnit.Dispose(); }
-        return true;
     }
 
-    private void Walk(Cursor cursor)
+    private void Walk(Cursor cursor, Model model)
     {
-        Visit(cursor.Handle);
+        Visit(cursor.Handle, model);
         foreach (var child in cursor.CursorChildren)
-            Walk(child);
+            Walk(child, model);
     }
 
-    private void Visit(CXCursor h)
+    private void Visit(CXCursor h, Model model)
     {
         var spelling = h.Spelling.ToString();
 
@@ -189,15 +200,15 @@ public sealed class ClangCppAnalyzer : IDisposable
             var usr = h.Usr.ToString();
             if (!string.IsNullOrEmpty(usr))
             {
-                if (!_usrsByName.TryGetValue(spelling, out var set))
+                if (!model.UsrsByName.TryGetValue(spelling, out var set))
                 {
                     set = new HashSet<string>(StringComparer.Ordinal);
-                    _usrsByName[spelling] = set;
+                    model.UsrsByName[spelling] = set;
                 }
                 set.Add(usr);
 
                 if (h.IsDefinition && TryLoc(h.Location, out var defLoc))
-                    Add(_defsByName, spelling, defLoc);
+                    Add(model.DefsByName, spelling, defLoc);
             }
         }
 
@@ -207,7 +218,7 @@ public sealed class ClangCppAnalyzer : IDisposable
         {
             var usr = referenced.Usr.ToString();
             if (!string.IsNullOrEmpty(usr) && TryLoc(h.Location, out var refLoc))
-                Add(_refsByUsr, usr, refLoc);
+                Add(model.RefsByUsr, usr, refLoc);
         }
     }
 
@@ -254,6 +265,16 @@ public sealed class ClangCppAnalyzer : IDisposable
         var args = new List<string> { isC ? "-std=gnu11" : "-std=c++17", "-I" + dir };
         foreach (var root in _roots) args.Add("-I" + root); // let includes resolve across every root
         return args.ToArray();
+    }
+
+    private void EnsureCompileDb()
+    {
+        lock (_gate)
+        {
+            if (_dbLoaded) return;
+            _dbLoaded = true;
+            LoadCompileCommands();
+        }
     }
 
     private void LoadCompileCommands()
