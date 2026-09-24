@@ -33,21 +33,25 @@ $docs = Join-Path $root "docs/CodeCompass.html"
 if (Test-Path $docs) { Copy-Item $docs (Join-Path $root "plugin/CodeCompass.html") -Force }
 
 $size = [math]::Round(((Get-ChildItem $binDir -Recurse | Measure-Object Length -Sum).Sum / 1MB), 1)
-$version = (& $cli version) 2>$null   # e.g. "CodeCompass 1.0.64+a1b2c3d4"
+$version = (& $cli version)   # e.g. "CodeCompass 1.0.64+a1b2c3d4"
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
+    throw "could not read version from the freshly built CLI ($cli) - the plugin manifest can't be stamped."
+}
 
 # Keep the plugin manifest version in step with the binaries: the numeric part (no +sha), so a plugin
-# registry and `codecompass version` agree on the release line.
+# registry and `codecompass version` agree on the release line. Stamping is MANDATORY - a silent skip
+# would leave a stale manifest version and mislabel the release, so anything unexpected throws.
 $manifestVer = ($version -replace '^CodeCompass\s+', '') -replace '\+.*$', ''
 $pjPath = Join-Path $root "plugin/.claude-plugin/plugin.json"
-if ($manifestVer -match '^\d+\.\d+\.\d+' -and (Test-Path $pjPath)) {
-    $pj = Get-Content $pjPath -Raw
-    $pj = [regex]::Replace($pj, '("version"\s*:\s*")[^"]*(")', "`${1}$manifestVer`${2}")
-    # UTF-8 WITHOUT a BOM. Windows PowerShell 5.1's `Set-Content -Encoding utf8` prepends a BOM, which
-    # Claude Code's JSON parser rejects ("Unrecognized token") - so the plugin won't install. Write the
-    # bytes directly with a no-BOM UTF-8 encoder instead.
-    [System.IO.File]::WriteAllText($pjPath, $pj, (New-Object System.Text.UTF8Encoding($false)))
-    Write-Host "Stamped plugin.json version = $manifestVer"
-}
+if ($manifestVer -notmatch '^\d+\.\d+\.\d+') { throw "unexpected version string from CLI: '$version'" }
+if (-not (Test-Path $pjPath)) { throw "plugin manifest not found: $pjPath" }
+$pj = Get-Content $pjPath -Raw
+$pj = [regex]::Replace($pj, '("version"\s*:\s*")[^"]*(")', "`${1}$manifestVer`${2}")
+# UTF-8 WITHOUT a BOM. Windows PowerShell 5.1's `Set-Content -Encoding utf8` prepends a BOM, which
+# Claude Code's JSON parser rejects ("Unrecognized token") - so the plugin won't install. Write the
+# bytes directly with a no-BOM UTF-8 encoder instead.
+[System.IO.File]::WriteAllText($pjPath, $pj, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "Stamped plugin.json version = $manifestVer"
 
 Write-Host ""
 Write-Host "Plugin ready: $(Join-Path $root 'plugin')  ($version, bin is $size MB)"

@@ -12,16 +12,32 @@
   -Publish uploads the zip to a GitHub Release tagged v<version> via the `gh` CLI (must be installed and
   authenticated: `gh auth status`). Without -Publish it only builds the local zip.
 
-.PARAMETER Publish   Also create/update the GitHub Release v<version> and upload the zip (needs `gh`).
+.PARAMETER Publish     Also create/update the GitHub Release v<version> and upload the zip (needs `gh`).
+.PARAMETER SkipTests   Skip the pre-publish test gate (check.ps1 -Big). Use only if you JUST ran it; the
+                       push's pre-push hook (if installed) is then the only backstop.
 
 .EXAMPLE
   pwsh ./make-release.ps1              # build the local release zip
-  pwsh ./make-release.ps1 -Publish     # build + publish to GitHub Releases
+  pwsh ./make-release.ps1 -Publish     # test-gate + build + publish to GitHub Releases
 #>
-param([switch]$Publish)
+param([switch]$Publish, [switch]$SkipTests)
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
+
+# 0) A published release MUST be tested - don't rely on the pre-push hook being installed on this machine.
+#    Run the full gate here (unit + big-file/network-sim/pathological/diagnostics). We push with
+#    --no-verify later so this doesn't run a second time via the hook. -SkipTests opts out (with a warning).
+if ($Publish) {
+    if ($SkipTests) {
+        Write-Warning "SkipTests: NOT running check.ps1 -Big. Only the pre-push hook (if installed) will gate this release."
+    }
+    else {
+        Write-Host "Running the release test gate (check.ps1 -Big) ..."
+        & (Join-Path $root "check.ps1") -Big
+        if ($LASTEXITCODE -ne 0) { throw "check.ps1 -Big failed - release aborted." }
+    }
+}
 
 # 1) Build the plugin (self-contained binaries + stamped plugin.json version).
 & (Join-Path $root "build-plugin.ps1")
@@ -31,6 +47,14 @@ if ($LASTEXITCODE -ne 0) { throw "build-plugin.ps1 failed" }
 $pjPath = Join-Path $root "plugin/.claude-plugin/plugin.json"
 $version = (Get-Content $pjPath -Raw | ConvertFrom-Json).version
 if (-not $version) { throw "could not read version from $pjPath" }
+
+# Guard against a mislabeled release: the manifest version must match what the SHIPPED binary reports.
+# (If stamping ever silently failed, this catches it before we tag/name the zip after a stale version.)
+$cliExe = Join-Path $root "plugin/bin/CodeCompass.Cli.exe"
+$cliVerRaw = (& $cliExe version)
+if ($LASTEXITCODE -ne 0) { throw "could not run $cliExe to confirm the version" }
+$cliVer = ($cliVerRaw -replace '^CodeCompass\s+', '') -replace '\+.*$', ''
+if ($cliVer -ne $version) { throw "version mismatch: manifest '$version' vs binary '$cliVer' - build is inconsistent, aborting." }
 
 # 3) Drop a top-level INSTALL.txt into the plugin folder so it's the first thing a zip installer sees.
 #    (gitignored; regenerated each release.) It states the layout that trips people up: the unzipped
@@ -77,6 +101,18 @@ for ($attempt = 1; ; $attempt++) {
 $zipMb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host ("Release zip ready: {0} ({1} MB)" -f $zip, $zipMb)
 
+# Validate the artifact BEFORE anyone can install it: it must contain the plugin manifest and both exes,
+# or `/plugin install` fails on the user's machine. Cheap insurance against a silently malformed zip.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$must = @(".claude-plugin/plugin.json", "bin/CodeCompass.Cli.exe", "bin/CodeCompass.Mcp.exe")
+$zf = [System.IO.Compression.ZipFile]::OpenRead($zip)
+try {
+    $entries = $zf.Entries.FullName -replace '\\', '/'
+    foreach ($m in $must) { if ($entries -notcontains $m) { throw "release zip is missing '$m' - aborting (would not install)." } }
+}
+finally { $zf.Dispose() }
+Write-Host "Verified zip contains the manifest + both binaries."
+
 Write-Host ""
 Write-Host "Install from the zip (no .NET needed):"
 Write-Host "  1. unzip it to a folder, e.g. C:\Tools\codecompass-plugin"
@@ -89,7 +125,7 @@ if (-not $Publish) {
     exit 0
 }
 
-# 4) Sync source to origin BEFORE tagging. Releases build from the local HEAD and only upload the zip,
+# 5) Sync source to origin BEFORE tagging. Releases build from the local HEAD and only upload the zip,
 #    so if these commits aren't pushed, origin/main stays stale (a work checkout sees old source) AND the
 #    tag gh creates lands on the wrong commit. Push HEAD->main first, then tag AT this exact commit
 #    (--target below), so binary, tag, and source can never drift. (This bit us once; never again.)
@@ -109,12 +145,17 @@ git merge-base --is-ancestor origin/main HEAD
 if ($LASTEXITCODE -ne 0) { throw "origin/main has commits not in this build (diverged) - reconcile (git pull --rebase) before releasing." }
 
 Write-Host "Pushing $sha -> origin/main ..."
-git push origin "${sha}:refs/heads/main"
+# --no-verify: we already ran check.ps1 -Big above (step 0), so skip the pre-push hook's redundant re-run.
+# (If -SkipTests was passed, we did NOT gate here - let the hook run, so drop --no-verify in that case.)
+$pushArgs = @("push", "origin", "${sha}:refs/heads/main")
+if (-not $SkipTests) { $pushArgs = @("push", "--no-verify", "origin", "${sha}:refs/heads/main") }
+git @pushArgs
 if ($LASTEXITCODE -ne 0) { throw "git push to origin/main failed - resolve, then re-run." }
 
-# 5) Publish to GitHub Releases via gh (create the tag/release, or upload to an existing one).
+# 6) Publish to GitHub Releases via gh (create the tag/release, or upload to an existing one).
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "gh CLI not found; install it or upload $zip manually." }
 $tag = "v$version"
+$sha256 = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()  # published so installers can verify the download
 $notes = @"
 CodeCompass $version - prebuilt, self-contained Windows (x64) plugin.
 
@@ -131,6 +172,9 @@ OR load it for one session only:
 Then run /mcp to confirm the codecompass server is connected. (There is no ``/plugin add`` command.)
 
 The ARM64 Windows build runs via x64 emulation. See the bundled CodeCompass.html for docs.
+
+Built from commit $sha.
+SHA256 (codecompass-plugin-$version-win-x64.zip): $sha256
 "@
 
 # gh writes "release not found" to stderr for a missing tag; under ErrorActionPreference=Stop that
