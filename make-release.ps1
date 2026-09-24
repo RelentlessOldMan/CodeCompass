@@ -25,10 +25,15 @@ param([switch]$Publish, [switch]$SkipTests)
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 
-# 0) A published release MUST be tested - don't rely on the pre-push hook being installed on this machine.
-#    Run the full gate here (unit + big-file/network-sim/pathological/diagnostics). We push with
-#    --no-verify later so this doesn't run a second time via the hook. -SkipTests opts out (with a warning).
+# 0) Pre-publish gate + source sync. Done BEFORE the build on purpose: build-plugin stamps the version
+#    into plugin.json (a tracked file), which would dirty the tree - so validate cleanliness and push the
+#    COMMIT here, while the tree is still pristine. Pushing the commit (not the working tree) means the
+#    later build-time manifest stamp is irrelevant, and the tag lands on this exact, tested, pushed commit.
+$sha = $null
 if ($Publish) {
+    # a) A published release MUST be tested - don't rely on the pre-push hook being installed here. Run the
+    #    full gate (unit + big-file/network-sim/pathological/diagnostics); we push --no-verify so it doesn't
+    #    run again via the hook. -SkipTests opts out (with a warning; the hook, if installed, still guards).
     if ($SkipTests) {
         Write-Warning "SkipTests: NOT running check.ps1 -Big. Only the pre-push hook (if installed) will gate this release."
     }
@@ -37,6 +42,31 @@ if ($Publish) {
         & (Join-Path $root "check.ps1") -Big
         if ($LASTEXITCODE -ne 0) { throw "check.ps1 -Big failed - release aborted." }
     }
+
+    # b) The source that built this release must be on origin/main, or a work checkout sees stale source
+    #    and the tag drifts. Require a clean tree + clean fast-forward, then push HEAD -> main. (This bit
+    #    us once; never again.)
+    $sha = (git rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "could not resolve HEAD" }
+
+    $dirty = git status --porcelain
+    if ($dirty) { throw "working tree has uncommitted/untracked changes - commit them before releasing:`n$dirty" }
+
+    Write-Host "Fetching origin to check main is fast-forwardable ..."
+    git fetch origin --quiet
+    if ($LASTEXITCODE -ne 0) { throw "git fetch origin failed" }
+
+    # HEAD must be at or ahead of origin/main. If origin/main has commits this build doesn't, stop.
+    git merge-base --is-ancestor origin/main HEAD
+    if ($LASTEXITCODE -ne 0) { throw "origin/main has commits not in this build (diverged) - reconcile (git pull --rebase) before releasing." }
+
+    Write-Host "Pushing $sha -> origin/main ..."
+    # --no-verify: we already ran check.ps1 -Big above, so skip the pre-push hook's redundant re-run.
+    # (With -SkipTests we did NOT gate here - let the hook run, so keep verification on that push.)
+    $pushArgs = @("push", "origin", "${sha}:refs/heads/main")
+    if (-not $SkipTests) { $pushArgs = @("push", "--no-verify", "origin", "${sha}:refs/heads/main") }
+    git @pushArgs
+    if ($LASTEXITCODE -ne 0) { throw "git push to origin/main failed - resolve, then re-run." }
 }
 
 # 1) Build the plugin (self-contained binaries + stamped plugin.json version).
@@ -125,34 +155,8 @@ if (-not $Publish) {
     exit 0
 }
 
-# 5) Sync source to origin BEFORE tagging. Releases build from the local HEAD and only upload the zip,
-#    so if these commits aren't pushed, origin/main stays stale (a work checkout sees old source) AND the
-#    tag gh creates lands on the wrong commit. Push HEAD->main first, then tag AT this exact commit
-#    (--target below), so binary, tag, and source can never drift. (This bit us once; never again.)
-$sha = (git rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0) { throw "could not resolve HEAD" }
-
-$dirty = git status --porcelain
-if ($dirty) { throw "working tree has uncommitted/untracked changes - commit them before releasing:`n$dirty" }
-
-Write-Host "Fetching origin to check main is fast-forwardable ..."
-git fetch origin --quiet
-if ($LASTEXITCODE -ne 0) { throw "git fetch origin failed" }
-
-# HEAD must be at or ahead of origin/main (a clean fast-forward). If origin/main has commits this build
-# doesn't, the branch diverged - stop rather than force anything.
-git merge-base --is-ancestor origin/main HEAD
-if ($LASTEXITCODE -ne 0) { throw "origin/main has commits not in this build (diverged) - reconcile (git pull --rebase) before releasing." }
-
-Write-Host "Pushing $sha -> origin/main ..."
-# --no-verify: we already ran check.ps1 -Big above (step 0), so skip the pre-push hook's redundant re-run.
-# (If -SkipTests was passed, we did NOT gate here - let the hook run, so drop --no-verify in that case.)
-$pushArgs = @("push", "origin", "${sha}:refs/heads/main")
-if (-not $SkipTests) { $pushArgs = @("push", "--no-verify", "origin", "${sha}:refs/heads/main") }
-git @pushArgs
-if ($LASTEXITCODE -ne 0) { throw "git push to origin/main failed - resolve, then re-run." }
-
-# 6) Publish to GitHub Releases via gh (create the tag/release, or upload to an existing one).
+# 5) Publish to GitHub Releases via gh (create the tag/release, or upload to an existing one). The source
+#    was already validated and pushed in step 0, so origin/main == $sha and the tag pins to it below.
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "gh CLI not found; install it or upload $zip manually." }
 $tag = "v$version"
 $sha256 = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()  # published so installers can verify the download
