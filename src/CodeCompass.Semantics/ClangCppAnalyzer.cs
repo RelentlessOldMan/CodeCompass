@@ -173,7 +173,7 @@ public sealed class ClangCppAnalyzer : IDisposable
         var args = GetArgs(fullPath);
         var error = CXTranslationUnit.TryParse(index, fullPath, args,
             ReadOnlySpan<CXUnsavedFile>.Empty,
-            CXTranslationUnit_Flags.CXTranslationUnit_DetailedPreprocessingRecord,
+            CXTranslationUnit_Flags.CXTranslationUnit_None,
             out CXTranslationUnit tu);
         if (error != CXErrorCode.CXError_Success) return;
 
