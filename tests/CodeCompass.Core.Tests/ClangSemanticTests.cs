@@ -118,6 +118,22 @@ public class ClangSemanticTests
     }
 
     [Fact]
+    public void CompileDb_InNonDefaultDir_IsUsed_WhenConfigured()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.c", "int add(int a, int b) { return a + b; }");
+        // A compile DB in a nonstandard directory (not root, not root/build), plus config pointing at it.
+        repo.Write("out/compile_commands.json",
+            """[ { "directory": "<DIR>", "file": "a.c", "command": "clang -c a.c" } ]"""
+            .Replace("<DIR>", repo.Root.Replace("\\", "\\\\")));
+        repo.Write(".codecompass.json", """{ "compileCommands": ["out"] }""");
+
+        var analyzer = new ClangCppAnalyzer(repo.Root);
+        _ = analyzer.FindReferences("add"); // triggers the build (reads the configured DB)
+        Assert.True(analyzer.Stats.HasCompileDb); // the out\ DB was located via config, not the default probe
+    }
+
+    [Fact]
     public void Dispose_ReleasesModel_AndRebuildsLazilyOnReuse()
     {
         using var repo = new TempRepo();

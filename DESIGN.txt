@@ -331,8 +331,13 @@ contract"):
   ("no compile_commands.json found - ran best-effort over N translation units, may be
   incomplete; add one for precise results"), and `doctor` warns when C/C++ sources are
   present with no compile DB. The dialect is chosen by extension (gnu11 for .c, not
-  c++17) so valid C isn't rejected on the very repos that lack a compile DB. This is
-  the same honesty contract as the size-cap disclosure, applied to semantic availability.
+  c++17) so valid C isn't rejected on the very repos that lack a compile DB. A compile
+  DB outside the two default probe spots (root, root/build) is found via the
+  `compileCommands` config (or CODECOMPASS_COMPILE_COMMANDS) - a list of files or dirs,
+  merged per source file so a multi-target build (one DB per target) is covered; the
+  first DB to describe a file wins a collision (any valid parse binds the symbol - we
+  don't reproduce a target's object code). This is the same honesty contract as the
+  size-cap disclosure, applied to semantic availability.
 
 - Empty results also point at the next tool (case-insensitive retry, search_code
   for a macro/unsupported language, etc.) instead of dead-ending.

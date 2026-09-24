@@ -44,6 +44,38 @@ public class ConfigTests
     }
 
     [Fact]
+    public void CompileCommandsFiles_AutoLocationsOnly_WhenUnconfigured()
+    {
+        using var repo = new TempRepo();
+        repo.Write("compile_commands.json", "[]");
+        repo.Write("out/compile_commands.json", "[]"); // a nonstandard location - NOT auto-probed
+
+        var files = CodeCompassConfig.CompileCommandsFiles(repo.Root, null);
+        Assert.Single(files); // only the root-level default is found
+        Assert.EndsWith("compile_commands.json", files[0]);
+        Assert.DoesNotContain(files, f => f.Contains("out"));
+    }
+
+    [Fact]
+    public void CompileCommandsFiles_ResolvesConfiguredDirsAndFiles_ExplicitFirst()
+    {
+        using var repo = new TempRepo();
+        repo.Write("compile_commands.json", "[]");           // auto (root)
+        repo.Write("out/compile_commands.json", "[]");       // configured directory
+        repo.Write("custom/db.json", "[]");                  // configured explicit file
+
+        var cfg = new RepoConfig { CompileCommands = new[] { "out", "custom/db.json" } };
+        var files = CodeCompassConfig.CompileCommandsFiles(repo.Root, cfg);
+
+        Assert.Contains(files, f => f.Replace('\\', '/').Contains("/out/compile_commands.json"));
+        Assert.Contains(files, f => f.Replace('\\', '/').EndsWith("/custom/db.json"));
+        Assert.Contains(files, f => f.Replace('\\', '/').EndsWith(repo.Root.Replace('\\', '/') + "/compile_commands.json"));
+        // Configured entries come first (so an explicit choice wins a per-file collision over the auto spots).
+        var first = files[0].Replace('\\', '/');
+        Assert.True(first.Contains("/out/") || first.EndsWith("/custom/db.json"), $"expected a configured DB first, got {first}");
+    }
+
+    [Fact]
     public void ReadFrom_InvalidJson_ReturnsNull_NoThrow()
     {
         using var repo = new TempRepo();

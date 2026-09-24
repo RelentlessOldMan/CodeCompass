@@ -22,6 +22,11 @@ public sealed class RepoConfig
     [JsonPropertyName("statusLine")] public bool? StatusLine { get; set; }
     [JsonPropertyName("semanticIdleMinutes")] public int? SemanticIdleMinutes { get; set; }
     [JsonPropertyName("ignore")] public string[]? Ignore { get; set; }
+    // Extra places to find a C/C++ compile_commands.json (for precise find_references). Each entry is a
+    // file OR a directory (searched for compile_commands.json and build/compile_commands.json), relative
+    // to the repo root or absolute. Several are merged (per-file union), so a multi-target build that emits
+    // one DB per target is supported. Beyond the two default probe locations (root, root/build).
+    [JsonPropertyName("compileCommands")] public string[]? CompileCommands { get; set; }
 }
 
 /// <summary>
@@ -60,6 +65,13 @@ public static class CodeCompassConfig
   // "semanticIdleMinutes": 10, // evict the resident C#/C++ semantic analyzer after this many minutes
                               //   with no find_references, to free memory (rebuilds on next use).
                               //   Default 10; 0 = keep resident.
+  // "compileCommands": ["build/appA", "build/appB/compile_commands.json"],
+                              //   extra place(s) to find a C/C++ compile_commands.json for precise
+                              //   find_references. Each entry is a directory (searched for
+                              //   compile_commands.json + build/compile_commands.json) or a file, relative
+                              //   to the repo root or absolute. Several are merged per-file, so a multi-
+                              //   target build (one DB per target) is covered. root and root/build are
+                              //   always checked. (env: CODECOMPASS_COMPILE_COMMANDS, ';'-separated.)
   // "threads": 0,            // indexing parallelism; 0 / omitted = all CPU cores.
   // "walkThreads": 0,        // concurrent directory reads during the walk; 0 / omitted = min(cores, 8),
                               //   1 = serial. Raise for a high-latency network share (overlaps SMB
@@ -256,5 +268,50 @@ public static class CodeCompassConfig
         if (cfg.Ignore is not null)
             foreach (var d in cfg.Ignore)
                 if (!string.IsNullOrWhiteSpace(d)) yield return d.Trim();
+    }
+
+    /// <summary>
+    /// The compile_commands.json file(s) to feed clang for a root, in priority order: the configured
+    /// locations (CODECOMPASS_COMPILE_COMMANDS + the config's <c>compileCommands</c>) first so an explicit
+    /// choice wins a per-file collision, then the two conventional auto locations (root, root/build). Each
+    /// configured entry may be a FILE or a DIRECTORY (searched for compile_commands.json and
+    /// build/compile_commands.json), relative to <paramref name="root"/> or absolute. Only existing files
+    /// are returned, de-duplicated. Never throws.
+    /// </summary>
+    public static IReadOnlyList<string> CompileCommandsFiles(string root, RepoConfig? cfg)
+    {
+        var results = new List<string>();
+        void AddFile(string p)
+        {
+            try
+            {
+                var f = Path.GetFullPath(p);
+                if (File.Exists(f) && !results.Contains(f, StringComparer.OrdinalIgnoreCase)) results.Add(f);
+            }
+            catch { /* skip an unresolvable path */ }
+        }
+        void AddLocation(string loc)
+        {
+            string full;
+            try { full = Path.IsPathRooted(loc) ? loc : Path.Combine(root, loc); } catch { return; }
+            if (Directory.Exists(full)) { AddFile(Path.Combine(full, "compile_commands.json")); AddFile(Path.Combine(full, "build", "compile_commands.json")); }
+            else AddFile(full); // treat as a file path
+        }
+
+        foreach (var loc in CompileCommandsConfigured(cfg)) AddLocation(loc); // explicit first (wins collisions)
+        AddFile(Path.Combine(root, "compile_commands.json"));                 // then the conventional spots
+        AddFile(Path.Combine(root, "build", "compile_commands.json"));
+        return results;
+    }
+
+    private static IEnumerable<string> CompileCommandsConfigured(RepoConfig? cfg)
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_COMPILE_COMMANDS");
+        if (!string.IsNullOrWhiteSpace(env))
+            foreach (var p in env.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                yield return p;
+        if (cfg?.CompileCommands is not null)
+            foreach (var p in cfg.CompileCommands)
+                if (!string.IsNullOrWhiteSpace(p)) yield return p.Trim();
     }
 }

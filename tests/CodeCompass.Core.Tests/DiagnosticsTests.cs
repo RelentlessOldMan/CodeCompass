@@ -67,6 +67,19 @@ public class DiagnosticsTests
     }
 
     [Fact]
+    public void HealthChecks_Ok_When_ConfiguredCompileDbPresent()
+    {
+        using var repo = new TempRepo();
+        repo.Write("main.c", "int main(void){return 0;}");
+        repo.Write("out/compile_commands.json", "[]");                 // nonstandard location
+        repo.Write(".codecompass.json", """{ "compileCommands": ["out"] }""");
+
+        var checks = RepoDiagnostics.HealthChecks(repo.Root);
+        // No warning: the configured location is honored, so doctor sees a compile DB.
+        Assert.Contains(checks, c => c.Name == "C/C++ compile database" && c.Ok);
+    }
+
+    [Fact]
     public void HealthChecks_NoCppCheck_ForPureCSharpRepo()
     {
         using var repo = new TempRepo();

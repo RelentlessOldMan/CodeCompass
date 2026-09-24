@@ -241,7 +241,9 @@ slow-to-parse shapes), and **`make-megacorpus.ps1`** (a >10 GB aggregate for sca
 Every knob above also lives in an optional **`.codecompass.json`** at the repo root, so settings
 travel with the repo instead of being set on every run. Precedence is **env var → config file →
 default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names),
-`threads`, `walkThreads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`, `autoReconcile`, `statusLine`.
+`threads`, `walkThreads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`, `autoReconcile`,
+`statusLine`, `semanticIdleMinutes`, `compileCommands` (array — extra places to find a C/C++
+`compile_commands.json`; see below).
 
 Don't hand-write it — run **`codecompass init <path>`** to drop a documented starter (every setting
 commented out, so it's all defaults until you edit; `//` comments and trailing commas are allowed).
@@ -258,6 +260,30 @@ reliable signal of parse safety (a valid 5 MB file parses fast, a degenerate one
 raising a cap is a judgement only the repo owner can make. Raising the symbol cap is safe from the
 data-blob crawl — above 1 MB, overwhelmingly numeric/hex files are auto-skipped for symbols by
 content (see *Tuning* above).
+
+### Precise C/C++ references (`compile_commands.json`)
+
+`find_references` for C/C++ is precise only with a **compile database** — a `compile_commands.json` that
+tells clang each file's real include paths and defines. Without one it falls back to best-effort flags
+and may resolve little (common in vendor-toolchain firmware). CodeCompass tells you when this happens:
+`find_references` appends a note ("no compile_commands.json found — ran best-effort… add one for precise
+results") and `codecompass doctor` warns when C/C++ sources exist with no compile DB — so a thin result
+reads as "couldn't fully run," not "no references."
+
+To fix it, generate a compile DB (CMake `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, or **Bear**/`compiledb` for
+Make-based builds) and — if it's not in the repo root or `build/` — point at it:
+
+```json
+{ "compileCommands": ["out", "build/appB/compile_commands.json"] }
+```
+
+Each entry is a **directory** (searched for `compile_commands.json` and `build/compile_commands.json`) or
+a **file**, relative to the repo root or absolute; `root` and `root/build` are always checked too. A
+project that builds **multiple targets** can list several — they're **merged per source file** (their
+union), so each translation unit gets its own flags. If the same file appears in more than one DB, the
+first-listed wins (any valid parse resolves the symbol; we don't reproduce a specific target's object
+code). One thing it does *not* do: parse the same file multiple times under different configs to capture
+references inside both `#ifdef` branches. (Env: `CODECOMPASS_COMPILE_COMMANDS`, `;`-separated.)
 
 ## Staying fresh (out-of-session changes)
 

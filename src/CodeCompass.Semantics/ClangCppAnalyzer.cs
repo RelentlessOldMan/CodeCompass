@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ClangSharp;
 using ClangSharp.Interop;
+using CodeCompass.Core.Config;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Storage;
 using CodeCompass.Core.Walking;
@@ -237,43 +238,40 @@ public sealed class ClangCppAnalyzer : IDisposable
         var map = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
         foreach (var root in _roots)
         {
-            string? path = null;
-            foreach (var candidate in new[]
-                     {
-                         Path.Combine(root, "compile_commands.json"),
-                         Path.Combine(root, "build", "compile_commands.json"),
-                     })
+            // Every compile DB for this root, configured locations first (so an explicit choice wins a
+            // per-file collision), then the conventional root / root/build. Merged per source file, so a
+            // multi-target build that emits one DB per target is fully covered by their union.
+            foreach (var path in CodeCompassConfig.CompileCommandsFiles(root, CodeCompassConfig.ReadFrom(root)))
             {
-                if (File.Exists(candidate)) { path = candidate; break; }
-            }
-            if (path is null) continue;
-
-            try
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(path));
-                foreach (var entry in doc.RootElement.EnumerateArray())
+                try
                 {
-                    if (!entry.TryGetProperty("file", out var fileProp)) continue;
-                    var fileName = fileProp.GetString();
-                    if (string.IsNullOrEmpty(fileName)) continue;
+                    using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                    foreach (var entry in doc.RootElement.EnumerateArray())
+                    {
+                        if (!entry.TryGetProperty("file", out var fileProp)) continue;
+                        var fileName = fileProp.GetString();
+                        if (string.IsNullOrEmpty(fileName)) continue;
 
-                    var dir = entry.TryGetProperty("directory", out var d) ? d.GetString() : null;
-                    var full = Path.GetFullPath(dir is null ? fileName : Path.Combine(dir, fileName));
+                        var dir = entry.TryGetProperty("directory", out var d) ? d.GetString() : null;
+                        var full = Path.GetFullPath(dir is null ? fileName : Path.Combine(dir, fileName));
+                        if (map.ContainsKey(full)) continue; // first DB to describe a file wins (explicit > auto)
 
-                    List<string> tokens;
-                    if (entry.TryGetProperty("arguments", out var argsArr) && argsArr.ValueKind == JsonValueKind.Array)
-                        tokens = argsArr.EnumerateArray().Select(x => x.GetString() ?? "").ToList();
-                    else if (entry.TryGetProperty("command", out var cmd) && cmd.GetString() is string c)
-                        tokens = c.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
-                    else
-                        continue;
+                        List<string> tokens;
+                        if (entry.TryGetProperty("arguments", out var argsArr) && argsArr.ValueKind == JsonValueKind.Array)
+                            tokens = argsArr.EnumerateArray().Select(x => x.GetString() ?? "").ToList();
+                        else if (entry.TryGetProperty("command", out var cmd) && cmd.GetString() is string c)
+                            tokens = c.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
+                        else
+                            continue;
 
-                    map[full] = CleanArgs(tokens, fileName); // later roots don't clobber earlier files (distinct keys)
+                        map[full] = CleanArgs(tokens, fileName);
+                    }
+                    _hasCompileDb = true; // a DB was found and parsed (even if it listed no usable entries)
                 }
+                catch { /* malformed DB: skip it, fall back to defaults for its files */ }
             }
-            catch { /* malformed DB in this root: fall back to defaults for its files */ }
         }
-        if (map.Count > 0) { _compileArgs = map; _hasCompileDb = true; }
+        if (map.Count > 0) _compileArgs = map;
     }
 
     // Drop the compiler executable, the source file, and output/compile-step flags;

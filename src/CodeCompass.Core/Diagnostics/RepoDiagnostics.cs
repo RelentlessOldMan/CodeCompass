@@ -24,9 +24,10 @@ public static class RepoDiagnostics
     private static readonly HashSet<string> CppExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".c", ".cc", ".cpp", ".cxx", ".c++" };
 
+    // Honors the configured compileCommands locations (+ CODECOMPASS_COMPILE_COMMANDS), not just the two
+    // default probe spots, so a user who points at a DB elsewhere isn't warned as if they had none.
     private static bool HasCompileDb(string root) =>
-        File.Exists(Path.Combine(root, "compile_commands.json")) ||
-        File.Exists(Path.Combine(root, "build", "compile_commands.json"));
+        CodeCompassConfig.CompileCommandsFiles(root, CodeCompassConfig.ReadFrom(root)).Count > 0;
 
     /// <summary>Write the full text report. Never throws (best-effort; notes anything it can't read).</summary>
     public static void WriteReport(TextWriter w, string root)
@@ -196,8 +197,10 @@ public static class RepoDiagnostics
             catch { hasCpp = false; }
             if (hasCpp)
                 checks.Add(new("C/C++ compile database", false,
-                    "C/C++ sources present but no compile_commands.json (looked in root and root\\build) - " +
-                    "find_references uses best-effort flags and may miss references; generate one for precise C/C++ semantics"));
+                    "C/C++ sources present but no compile_commands.json found (looked in root, root\\build, and any " +
+                    "configured compileCommands paths) - find_references uses best-effort flags and may miss references. " +
+                    "Generate one (CMake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON, or Bear/compiledb for Make), then point at it " +
+                    "with \"compileCommands\" in .codecompass.json if it's not in a default location"));
         }
 
         // Each linked root must exist and be indexed for the server to federate it. A missing/unindexed one
