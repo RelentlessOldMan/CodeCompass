@@ -37,6 +37,17 @@ public sealed class ClangCppAnalyzer : IDisposable
     private readonly Dictionary<string, List<Loc>> _refsByUsr = new(StringComparer.Ordinal);
     private Dictionary<string, string[]>? _compileArgs;
 
+    // Parse accounting for honest reporting: how many C/C++ translation units we attempted vs. actually
+    // parsed, and whether a compile_commands.json was found. Without one, best-effort flags leave many TUs
+    // unparsed (empty USR maps), so a bare "0 references" would read as "none exist" rather than "the
+    // semantic layer couldn't run here" - the tools surface these so that zero is honest. Valid after build.
+    private bool _hasCompileDb;
+    private int _tuSeen, _tuParsed;
+
+    /// <summary>Build accounting so callers can disclose a degraded C/C++ semantic result honestly.</summary>
+    public readonly record struct ParseStats(int SourceFilesSeen, int SourceFilesParsed, bool HasCompileDb);
+    public ParseStats Stats { get { EnsureBuilt(); return new ParseStats(_tuSeen, _tuParsed, _hasCompileDb); } }
+
     private readonly record struct Loc(string Full, int Line, int Column); // Full = absolute path
 
     public ClangCppAnalyzer(string root) : this(new[] { root }) { }
@@ -56,6 +67,9 @@ public sealed class ClangCppAnalyzer : IDisposable
             _defsByName.Clear();
             _refsByUsr.Clear();
             _compileArgs = null;
+            _hasCompileDb = false;
+            _tuSeen = 0;
+            _tuParsed = 0;
             _built = false;
         }
     }
@@ -112,23 +126,27 @@ public sealed class ClangCppAnalyzer : IDisposable
             foreach (var file in walker.Walk(root))
             {
                 if (!SourceExtensions.Contains(Path.GetExtension(file.RelativePath))) continue;
-                try { ParseFile(index, file.FullPath); }
+                _tuSeen++;
+                try { if (ParseFile(index, file.FullPath)) _tuParsed++; }
                 catch { /* skip files clang can't handle */ }
             }
         }
     }
 
-    private void ParseFile(CXIndex index, string fullPath)
+    // Returns true if the translation unit actually parsed (so the caller can count parse coverage - a
+    // low parsed/seen ratio with no compile DB is the "semantics couldn't run here" signal the tools show).
+    private bool ParseFile(CXIndex index, string fullPath)
     {
         var args = GetArgs(fullPath);
         var error = CXTranslationUnit.TryParse(index, fullPath, args,
             ReadOnlySpan<CXUnsavedFile>.Empty,
             CXTranslationUnit_Flags.CXTranslationUnit_DetailedPreprocessingRecord,
             out CXTranslationUnit tu);
-        if (error != CXErrorCode.CXError_Success) return;
+        if (error != CXErrorCode.CXError_Success) return false;
 
         var translationUnit = TranslationUnit.GetOrCreate(tu);
         Walk(translationUnit.TranslationUnitDecl);
+        return true;
     }
 
     private void Walk(Cursor cursor)
@@ -204,7 +222,12 @@ public sealed class ClangCppAnalyzer : IDisposable
         if (_compileArgs is not null && _compileArgs.TryGetValue(Path.GetFullPath(fullPath), out var a))
             return a;
         var dir = Path.GetDirectoryName(fullPath) ?? _roots[0];
-        var args = new List<string> { "-std=c++17", "-I" + dir };
+        // Pick the dialect by extension: a .c file compiled as -std=c++17 fails on valid C (implicit
+        // void* conversions, C-only keywords, identifiers that are C++ reserved words), which would empty
+        // the semantic model on exactly the C firmware repos least likely to ship a compile DB. gnu11
+        // matches the GNU extensions those toolchains assume.
+        bool isC = Path.GetExtension(fullPath).Equals(".c", StringComparison.OrdinalIgnoreCase);
+        var args = new List<string> { isC ? "-std=gnu11" : "-std=c++17", "-I" + dir };
         foreach (var root in _roots) args.Add("-I" + root); // let includes resolve across every root
         return args.ToArray();
     }
@@ -250,7 +273,7 @@ public sealed class ClangCppAnalyzer : IDisposable
             }
             catch { /* malformed DB in this root: fall back to defaults for its files */ }
         }
-        if (map.Count > 0) _compileArgs = map;
+        if (map.Count > 0) { _compileArgs = map; _hasCompileDb = true; }
     }
 
     // Drop the compiler executable, the source file, and output/compile-step flags;

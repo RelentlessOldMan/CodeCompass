@@ -37,7 +37,7 @@ editing it keeps just the changed files in memory. This is what lets an 87 GB re
 | Dozens-of-GB repos without exhausting RAM | ✅ indexes are memory-mapped on disk |
 | MATLAB / other unlisted languages | Lexical only (text search works; no symbols) |
 | Very large files | Indexed up to **2 GB** (streamed above ~128 MB, bounded memory); symbols skipped above 1 MB but still text-searchable (both tunable) |
-| C/C++ find-references precision | Best-effort without a `compile_commands.json` |
+| C/C++ find-references precision | Best-effort without a `compile_commands.json` (find_references says so, and `doctor` warns) |
 | Semantic "meaning" / embedding search | ❌ No (deliberately — needs a model; weaker for real code nav) |
 
 ## Minimal token footprint

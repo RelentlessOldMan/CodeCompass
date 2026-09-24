@@ -46,6 +46,37 @@ public class DiagnosticsTests
     }
 
     [Fact]
+    public void HealthChecks_Warn_When_CppSources_ButNoCompileDb()
+    {
+        using var repo = new TempRepo();
+        repo.Write("main.c", "int main(void){return 0;}");
+
+        var checks = RepoDiagnostics.HealthChecks(repo.Root);
+        Assert.Contains(checks, c => c.Name == "C/C++ compile database" && !c.Ok);
+    }
+
+    [Fact]
+    public void HealthChecks_Ok_When_CompileDbPresent()
+    {
+        using var repo = new TempRepo();
+        repo.Write("main.c", "int main(void){return 0;}");
+        repo.Write("compile_commands.json", "[]");
+
+        var checks = RepoDiagnostics.HealthChecks(repo.Root);
+        Assert.Contains(checks, c => c.Name == "C/C++ compile database" && c.Ok);
+    }
+
+    [Fact]
+    public void HealthChecks_NoCppCheck_ForPureCSharpRepo()
+    {
+        using var repo = new TempRepo();
+        repo.Write("A.cs", "class A {}");
+
+        var checks = RepoDiagnostics.HealthChecks(repo.Root);
+        Assert.DoesNotContain(checks, c => c.Name == "C/C++ compile database"); // not relevant -> not shown
+    }
+
+    [Fact]
     public void Doctor_Reports_LinkedRoots_And_FlagsUnindexedOne()
     {
         using var project = new TempRepo();

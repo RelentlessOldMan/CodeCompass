@@ -1,8 +1,10 @@
 using System.Runtime.InteropServices;
 using CodeCompass.Core.Config;
+using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
 using CodeCompass.Core.Storage;
+using CodeCompass.Core.Walking;
 
 namespace CodeCompass.Core.Diagnostics;
 
@@ -18,6 +20,13 @@ public static class RepoDiagnostics
     public readonly record struct Check(string Name, bool Ok, string Detail);
 
     private static string Mb(long b) => $"{b / 1048576.0:N1} MB";
+
+    private static readonly HashSet<string> CppExtensions =
+        new(StringComparer.OrdinalIgnoreCase) { ".c", ".cc", ".cpp", ".cxx", ".c++" };
+
+    private static bool HasCompileDb(string root) =>
+        File.Exists(Path.Combine(root, "compile_commands.json")) ||
+        File.Exists(Path.Combine(root, "build", "compile_commands.json"));
 
     /// <summary>Write the full text report. Never throws (best-effort; notes anything it can't read).</summary>
     public static void WriteReport(TextWriter w, string root)
@@ -169,6 +178,27 @@ public static class RepoDiagnostics
 
         if (NetworkPath.IsNetwork(root))
             checks.Add(new("local path (fast metadata)", false, "network share - auto-reconcile off; run 'codecompass update' after external syncs"));
+
+        // C/C++ semantic readiness: find_references for C/C++ resolves precisely only with a compile
+        // database. Without one it falls back to best-effort flags and may under-resolve (or resolve
+        // nothing), so a repo that has C/C++ sources but no compile_commands.json gets a warning here -
+        // otherwise a later "0 C/C++ semantic" reads as "no references" rather than "couldn't run."
+        if (HasCompileDb(root))
+        {
+            checks.Add(new("C/C++ compile database", true, "compile_commands.json found (precise C/C++ semantics)"));
+        }
+        else
+        {
+            bool hasCpp;
+            // Early-exits at the first C/C++ source; only walks the whole tree when there are none (rare,
+            // and doctor is a manual diagnostic).
+            try { hasCpp = new FileWalker(new IgnoreRules()).Walk(root).Any(f => CppExtensions.Contains(Path.GetExtension(f.RelativePath))); }
+            catch { hasCpp = false; }
+            if (hasCpp)
+                checks.Add(new("C/C++ compile database", false,
+                    "C/C++ sources present but no compile_commands.json (looked in root and root\\build) - " +
+                    "find_references uses best-effort flags and may miss references; generate one for precise C/C++ semantics"));
+        }
 
         // Each linked root must exist and be indexed for the server to federate it. A missing/unindexed one
         // is silently absent from results otherwise, so surface it here.

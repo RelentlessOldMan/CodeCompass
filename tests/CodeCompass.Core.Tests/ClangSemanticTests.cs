@@ -72,6 +72,52 @@ public class ClangSemanticTests
     }
 
     [Fact]
+    public void CFile_WithC99Keyword_ParsesUnderCDialectNotCpp17()
+    {
+        // `restrict` is a C99 keyword and NOT valid C++; under the old -std=c++17 fallback a .c file using
+        // it would fail to bind. With dialect-by-extension (gnu11 for .c) the definition resolves.
+        using var repo = new TempRepo();
+        repo.Write("driver.c", """
+        void copy_block(int * restrict dst, const int * restrict src, int n)
+        {
+            for (int i = 0; i < n; i++) dst[i] = src[i];
+        }
+        """);
+
+        var defs = new ClangCppAnalyzer(repo.Root).FindDefinitions("copy_block");
+        var def = Assert.Single(defs);
+        Assert.Equal("driver.c", def.RelativePath);
+    }
+
+    [Fact]
+    public void ParseStats_ReportNoCompileDb_WhenNonePresent()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.c", "int add(int a, int b) { return a + b; }");
+
+        var analyzer = new ClangCppAnalyzer(repo.Root);
+        _ = analyzer.FindReferences("add"); // triggers the build
+        var stats = analyzer.Stats;
+
+        Assert.False(stats.HasCompileDb);       // no compile_commands.json in the tree
+        Assert.True(stats.SourceFilesSeen >= 1); // the .c TU was attempted
+    }
+
+    [Fact]
+    public void ParseStats_ReportCompileDb_WhenPresent()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.c", "int add(int a, int b) { return a + b; }");
+        repo.Write("compile_commands.json", """
+        [ { "directory": "<DIR>", "file": "a.c", "command": "clang -c a.c" } ]
+        """.Replace("<DIR>", repo.Root.Replace("\\", "\\\\")));
+
+        var analyzer = new ClangCppAnalyzer(repo.Root);
+        _ = analyzer.FindReferences("add");
+        Assert.True(analyzer.Stats.HasCompileDb);
+    }
+
+    [Fact]
     public void Dispose_ReleasesModel_AndRebuildsLazilyOnReuse()
     {
         using var repo = new TempRepo();

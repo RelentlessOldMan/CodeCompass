@@ -324,6 +324,16 @@ contract"):
   file is read), so it costs nothing on the per-symbol hot path; an incremental
   update carries the last full build's value forward (a full reindex refreshes it).
 
+- The C/C++ semantic layer discloses when it ran degraded. Precise C/C++ references
+  need a compile_commands.json; without one, clang runs on best-effort flags with
+  unresolved includes/defines and may resolve little or nothing. A bare "0 C/C++
+  semantic" would read as "no references exist," so find_references appends a note
+  ("no compile_commands.json found - ran best-effort over N translation units, may be
+  incomplete; add one for precise results"), and `doctor` warns when C/C++ sources are
+  present with no compile DB. The dialect is chosen by extension (gnu11 for .c, not
+  c++17) so valid C isn't rejected on the very repos that lack a compile DB. This is
+  the same honesty contract as the size-cap disclosure, applied to semantic availability.
+
 - Empty results also point at the next tool (case-insensitive retry, search_code
   for a macro/unsupported language, etc.) instead of dead-ending.
 

@@ -567,6 +567,23 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void FindReferences_DisclosesMissingCompileDb_ForCppRepo()
+    {
+        using var repo = new TempRepo();
+        repo.Write("main.c", "int helper(void){return 1;}\nint main(void){return helper();}");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            // Whatever the C/C++ layer resolves without a compile DB, the footer must DISCLOSE that it ran
+            // best-effort - so a thin/empty C/C++ result reads as "couldn't fully run," not "none exist."
+            var result = CodeCompassTools.FindReferences("helper");
+            Assert.Contains("no compile_commands.json", result);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
     public void FindReferences_SignalsTruncationExactlyAtCap()
     {
         using var repo = new TempRepo();

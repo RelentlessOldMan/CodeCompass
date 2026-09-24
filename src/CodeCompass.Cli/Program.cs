@@ -921,10 +921,22 @@ static int CmdWatch(string[] args)
     return 0;
 }
 
+// CLI queries operate on a SINGLE root; only the MCP server federates a project's linked roots. If this
+// project has links, say so on stderr so a CLI "0 results" isn't mistaken for "not found anywhere" - that
+// linked-root false-negative is the first thing that looks like a federation bug but isn't.
+static void NoteLinkedRootsNotSearched(string root)
+{
+    int n = LinkStore.Read(root).Count;
+    if (n > 0)
+        Console.Error.WriteLine($"note: {n} linked root(s) are NOT searched by CLI queries (project-root only); " +
+                                "use the CodeCompass MCP tools for federated search across linked roots.");
+}
+
 static int CmdSearch(string[] args)
 {
     if (args.Length < 3) return Usage();
     var root = Path.GetFullPath(args[1]);
+    NoteLinkedRootsNotSearched(root);
     bool ignoreCase = args.Any(a => a is "-i" or "--ignore-case");
     var query = string.Join(' ', args.Skip(2).Where(a => a is not ("-i" or "--ignore-case")));
 
@@ -948,6 +960,7 @@ static int CmdDef(string[] args)
 {
     if (args.Length < 3) return Usage();
     var root = Path.GetFullPath(args[1]);
+    NoteLinkedRootsNotSearched(root);
     var name = args[2];
 
     if (!RepositoryIndexer.TryLoad(root, out _, out var symbols)) return NoIndex(root);
@@ -968,6 +981,7 @@ static int CmdSymbols(string[] args)
 {
     if (args.Length < 3) return Usage();
     var root = Path.GetFullPath(args[1]);
+    NoteLinkedRootsNotSearched(root);
     var query = args[2];
 
     if (!RepositoryIndexer.TryLoad(root, out _, out var symbols)) return NoIndex(root);
@@ -983,6 +997,7 @@ static int CmdRefs(string[] args)
 {
     if (args.Length < 3) return Usage();
     var root = Path.GetFullPath(args[1]);
+    NoteLinkedRootsNotSearched(root);
     var name = args[2];
 
     // Precise semantic references (comments/strings excluded). Note: from the CLI these

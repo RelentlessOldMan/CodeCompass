@@ -97,6 +97,9 @@ public static class CodeCompassTools
     {
         ".csv", ".tsv", ".json", ".jsonl", ".ndjson", ".yaml", ".yml",
         ".md", ".markdown", ".rst", ".txt", ".log", ".html", ".htm", ".svg", ".map", ".lock",
+        // Build/toolchain artifacts (common in firmware trees committed beside sources): a name in a
+        // disassembly listing, a backup copy, or a preprocessed/object/image file is not a code reference.
+        ".lst", ".bak", ".i", ".s", ".d", ".o", ".obj", ".elf", ".hex", ".bin",
     };
 
     private static bool IsCodeReferenceFile(string path) =>
@@ -217,9 +220,26 @@ public static class CodeCompassTools
                 if (hits.Count > maxResults) break;
             }
 
+        // Honest disclosure for the C/C++ semantic layer: if C/C++ sources were seen but not all parsed
+        // (typically no compile_commands.json, so best-effort flags leave TUs unresolved), a low or zero
+        // C/C++ count means "the semantic layer couldn't fully run here," NOT "no references exist." Same
+        // discipline as CoverageCaveat for size-capped files - a zero must not read as a confident answer.
+        // Fire whenever the C/C++ layer ran WITHOUT a compile DB (best-effort flags - includes/defines
+        // unresolved, so references are unreliable even when clang still produces error-laden TUs), or when
+        // some TUs hard-failed to parse. The no-DB case is the important one and must not hinge on the parse
+        // ratio: a missing compile DB usually still yields "parsed" TUs that resolve almost nothing.
+        var cpp2 = ServerContext.Cpp.Stats;
+        string cppNote = "";
+        if (cpp2.SourceFilesSeen > 0 && !cpp2.HasCompileDb)
+            cppNote = $" (Note: no compile_commands.json found - C/C++ semantic search ran with best-effort flags over " +
+                      $"{cpp2.SourceFilesSeen:N0} translation unit(s) and may be incomplete; add a compile_commands.json for precise C/C++ results.)";
+        else if (cpp2.SourceFilesSeen > 0 && cpp2.SourceFilesParsed < cpp2.SourceFilesSeen)
+            cppNote = $" (Note: C/C++ semantic parsed {cpp2.SourceFilesParsed:N0}/{cpp2.SourceFilesSeen:N0} translation unit(s); " +
+                      "the rest failed to parse, so C/C++ references may be incomplete.)";
+
         if (hits.Count == 0)
             return $"No references found for \"{name}\". Tip: try search_code for a raw text search " +
-                   "(it may not resolve as a symbol here), or check the exact spelling/case." + CoverageCaveat();
+                   "(it may not resolve as a symbol here), or check the exact spelling/case." + cppNote + CoverageCaveat();
 
         bool truncated = hits.Count > maxResults;
         var shown = hits.Take(maxResults).ToList();
@@ -228,6 +248,7 @@ public static class CodeCompassTools
         int cs = shown.Count(h => h.Kind == 'c'), cpp = shown.Count(h => h.Kind == 'p'), lex = shown.Count(h => h.Kind == 'l');
         sb.Append($"({cs} C# + {cpp} C/C++ semantic reference(s); {lex} lexical in other files)");
         if (truncated) sb.Append(" - MORE EXIST, narrow the query or raise the limit");
+        sb.Append(cppNote);
         return sb.ToString();
     });
 
