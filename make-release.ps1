@@ -89,7 +89,30 @@ if (-not $Publish) {
     exit 0
 }
 
-# 4) Publish to GitHub Releases via gh (create the tag/release, or upload to an existing one).
+# 4) Sync source to origin BEFORE tagging. Releases build from the local HEAD and only upload the zip,
+#    so if these commits aren't pushed, origin/main stays stale (a work checkout sees old source) AND the
+#    tag gh creates lands on the wrong commit. Push HEAD->main first, then tag AT this exact commit
+#    (--target below), so binary, tag, and source can never drift. (This bit us once; never again.)
+$sha = (git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0) { throw "could not resolve HEAD" }
+
+$dirty = git status --porcelain
+if ($dirty) { throw "working tree has uncommitted/untracked changes - commit them before releasing:`n$dirty" }
+
+Write-Host "Fetching origin to check main is fast-forwardable ..."
+git fetch origin --quiet
+if ($LASTEXITCODE -ne 0) { throw "git fetch origin failed" }
+
+# HEAD must be at or ahead of origin/main (a clean fast-forward). If origin/main has commits this build
+# doesn't, the branch diverged - stop rather than force anything.
+git merge-base --is-ancestor origin/main HEAD
+if ($LASTEXITCODE -ne 0) { throw "origin/main has commits not in this build (diverged) - reconcile (git pull --rebase) before releasing." }
+
+Write-Host "Pushing $sha -> origin/main ..."
+git push origin "${sha}:refs/heads/main"
+if ($LASTEXITCODE -ne 0) { throw "git push to origin/main failed - resolve, then re-run." }
+
+# 5) Publish to GitHub Releases via gh (create the tag/release, or upload to an existing one).
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "gh CLI not found; install it or upload $zip manually." }
 $tag = "v$version"
 $notes = @"
@@ -120,8 +143,10 @@ if ($exists) {
     Write-Host "Release $tag exists - uploading asset (clobber)..."
     gh release upload $tag $zip --clobber
 } else {
-    Write-Host "Creating release $tag ..."
-    gh release create $tag $zip --title "CodeCompass $version" --notes $notes
+    Write-Host "Creating release $tag at $sha ..."
+    # --target pins the tag to the exact commit we built + just pushed (not the remote default-branch tip),
+    # so the tag, the source, and the shipped binary always agree.
+    gh release create $tag $zip --title "CodeCompass $version" --notes $notes --target $sha
 }
 $publishCode = $LASTEXITCODE
 $ErrorActionPreference = $prevEap
