@@ -715,9 +715,13 @@ static int CmdLinkAdd(string[] args)
     if (RepositoryIndexer.TryLoad(linked, out var t0, out var s0)) { t0.Dispose(); s0.Dispose(); Console.WriteLine("  index already present - reused."); return 0; }
 
     CodeCompassConfig.Load(linked); // the linked root's own .codecompass.json governs its build/size gate
-    if (RepositoryIndexer.ExceedsAutoLimit(linked, out var total))
+    if (RepositoryIndexer.ExceedsAutoLimit(linked, out _))
     {
-        Console.WriteLine($"  {linked} is large (~{total / 1048576.0:F0} MB) - build it once, then it's part of this project:");
+        // ExceedsAutoLimit is a fast gate: it stops summing the moment it crosses the limit, so its byte
+        // total is a partial floor, NOT the repo size - don't print it as one. Report the THRESHOLD it
+        // exceeded (the actual decision), which is honest and doesn't require a slow full-tree walk.
+        var limitMb = CodeCompassConfig.MaxAutoBytes(CodeCompassConfig.Current) / 1048576.0;
+        Console.WriteLine($"  {linked} is over the {limitMb:F0} MB auto-index limit - build it once, then it's part of this project:");
         Console.WriteLine($"      codecompass index \"{linked}\"");
         return 0;
     }
