@@ -26,8 +26,11 @@ under it (a shared library elsewhere, a sibling repo, a `Z:\` drop): `codecompas
 link add "<external-path>"`. They're searched alongside the project as one result set,
 live-watched for edits like the main repo, and `find_references`/`find_callees`
 resolve **across** the boundary (C#/C++). A root shared by several projects is indexed
-once and reused. Project hits stay repo-relative; linked hits show absolute paths. See
-the main README's *Linked roots* section.
+once and reused. Project hits stay repo-relative; linked hits show absolute paths.
+**Multi-repo search is an MCP-server feature only** — these tools federate across a
+project's linked roots; the `codecompass` CLI always searches the single root you give
+it (it's a stateless one-shot, and you use it to *set up* links with `link add`). See
+the main README's *Linked roots → MCP vs CLI* section.
 
 ## Status line (optional)
 

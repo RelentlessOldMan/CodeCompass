@@ -512,6 +512,18 @@ them as one federated result set. The design choices, and their whys:
   rejected - it's already covered. The pathological subst/drive-alias aliasing case
   is deliberately out of scope.
 
+- Federation is MCP-only, and that is a design boundary, not a gap. Searching across
+  linked roots needs a LONG-LIVED process: it holds each root's index open, claims
+  write-ownership, runs the watchers, and reconciles the link set - all state that
+  lives in the MCP server's ServerContext for the length of a session. The CLI is the
+  opposite by design: a stateless one-shot (open index -> answer -> exit), so it always
+  queries the SINGLE root it's given. Making the CLI federate would mean duplicating
+  that state or running an always-on background daemon, which the tool avoids. So the
+  CLI is where you CONFIGURE federation (link add/remove/list) and build/spot-check one
+  root; the MCP tools are where multi-root SEARCH happens. A CLI query on a project that
+  has links prints a one-line reminder so a single-root "0 results" isn't read as
+  "not found anywhere." (Decided; CLI query federation will not be built.)
+
 
 Scaling, huge files, and generated code
 ---------------------------------------

@@ -333,6 +333,28 @@ from results).
 > server notices `links.json` changed (a sub-millisecond check on the local cache dir, on the next
 > query) and reconciles the set, keeping the roots it already serves and only adding/removing the delta.
 
+### MCP vs CLI: which one searches more than one repo
+
+**Only the MCP server searches across linked roots. The CLI always searches exactly one root — the path
+you give it.** This is deliberate, not a gap: federation needs a *long-lived* process (it holds each
+root's index open, claims write-ownership, runs the file watchers, and reconciles changes) — which is
+exactly what the MCP server is, for the length of a Claude Code session. The CLI is the opposite by
+design: a stateless one-shot that opens an index, answers, and exits. Making it federate would mean
+running an always-on background CodeCompass service, which the tool intentionally avoids.
+
+| | MCP server (in Claude Code) | CLI (`codecompass …`) |
+|---|---|---|
+| Query scope | project **+ all its linked roots**, merged into one result | the **single root** you point it at |
+| `search_code` / `find_definition` / `find_references` / `find_callees` / `search_symbols` | federated across roots | one root only |
+| Live watching, write-ownership, cross-root C#/C++ semantics | ✅ | — (one-shot, cold) |
+| Manage links (`link add` / `remove` / `list`) | — | ✅ (this is where you *configure* federation) |
+| Build/refresh an index (`index` / `update`) | auto (per root) | ✅ per root |
+
+So: **use the CLI to set federation up** (`link add`) and to build or spot-check an individual root; **let
+the MCP tools do the actual multi-repo searching.** A CLI query on a project that has linked roots prints
+a one-line reminder to that effect (so a CLI "0 results" isn't mistaken for "not found anywhere"). You can
+still point the CLI directly at a linked root's own path to search just that one.
+
 ## Status line (optional)
 
 CodeCompass can show its index state in Claude Code's status area. The MCP server publishes state to a
