@@ -101,6 +101,21 @@ public class ClangSemanticTests
 
         Assert.False(stats.HasCompileDb);       // no compile_commands.json in the tree
         Assert.True(stats.SourceFilesSeen >= 1); // the .c TU was attempted
+        Assert.False(stats.Capped);             // a tiny repo is far under the no-DB TU cap - full best-effort
+    }
+
+    [Fact]
+    public void NoCompileDb_SmallRepo_StillResolvesSemantically_NotCapped()
+    {
+        // The no-DB cap must not touch ordinary small/medium repos: they parse on default flags and resolve.
+        using var repo = new TempRepo();
+        repo.Write("a.c", "int add(int a, int b) { return a + b; }");
+        repo.Write("b.c", "int add(int a, int b);\nint use(void){ return add(1,2); }");
+
+        var analyzer = new ClangCppAnalyzer(repo.Root);
+        var refs = analyzer.FindReferences("add");
+        Assert.Contains(refs, r => r.RelativePath == "b.c");  // real call resolved without a compile DB
+        Assert.False(analyzer.Stats.Capped);
     }
 
     [Fact]
@@ -115,6 +130,7 @@ public class ClangSemanticTests
         var analyzer = new ClangCppAnalyzer(repo.Root);
         _ = analyzer.FindReferences("add");
         Assert.True(analyzer.Stats.HasCompileDb);
+        Assert.False(analyzer.Stats.Capped); // a compile DB means parse everything - never capped
     }
 
     [Fact]

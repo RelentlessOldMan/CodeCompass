@@ -231,8 +231,12 @@ public static class CodeCompassTools
         var cpp2 = ServerContext.Cpp.Stats;
         string cppNote = "";
         if (cpp2.SourceFilesSeen > 0 && !cpp2.HasCompileDb)
-            cppNote = $" (Note: no compile_commands.json found - C/C++ semantic search ran with best-effort flags over " +
-                      $"{cpp2.SourceFilesSeen:N0} translation unit(s) and may be incomplete; add a compile_commands.json for precise C/C++ results.)";
+            cppNote = cpp2.Capped
+                ? $" (Note: no compile_commands.json found - C/C++ semantic search stopped after {cpp2.SourceFilesSeen:N0} " +
+                  "translation units (a large tree without a compile DB), so it is INCOMPLETE. Add a compile_commands.json " +
+                  "for precise, complete C/C++ references, or raise CODECOMPASS_CPP_MAX_TU.)"
+                : $" (Note: no compile_commands.json found - C/C++ semantic search ran with best-effort flags over " +
+                  $"{cpp2.SourceFilesSeen:N0} translation unit(s) and may be incomplete; add a compile_commands.json for precise C/C++ results.)";
         else if (cpp2.SourceFilesSeen > 0 && cpp2.SourceFilesParsed < cpp2.SourceFilesSeen)
             cppNote = $" (Note: C/C++ semantic parsed {cpp2.SourceFilesParsed:N0}/{cpp2.SourceFilesSeen:N0} translation unit(s); " +
                       "the rest failed to parse, so C/C++ references may be incomplete.)";

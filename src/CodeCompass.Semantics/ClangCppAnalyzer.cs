@@ -44,10 +44,23 @@ public sealed class ClangCppAnalyzer : IDisposable
     // semantic layer couldn't run here" - the tools surface these so that zero is honest. Valid after build.
     private bool _hasCompileDb;
     private int _tuSeen, _tuParsed;
+    private bool _tuCapped;
+
+    // Without a compile_commands.json, clang parses each TU on best-effort flags (includes/defines
+    // unresolved) - low value, and on a huge C/C++ tree it's minutes of futile work that also grows memory.
+    // So when there's no compile DB we cap how many TUs we attempt (small self-contained repos stay well
+    // under this and are unaffected; they resolve fine on default flags). Raise it, or add a compile DB,
+    // for full coverage. With a compile DB we parse everything (the user opted into a real build).
+    private static int NoCompileDbTuCap()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_MAX_TU");
+        if (int.TryParse(env, out var n) && n > 0) return n;
+        return 2000;
+    }
 
     /// <summary>Build accounting so callers can disclose a degraded C/C++ semantic result honestly.</summary>
-    public readonly record struct ParseStats(int SourceFilesSeen, int SourceFilesParsed, bool HasCompileDb);
-    public ParseStats Stats { get { EnsureBuilt(); return new ParseStats(_tuSeen, _tuParsed, _hasCompileDb); } }
+    public readonly record struct ParseStats(int SourceFilesSeen, int SourceFilesParsed, bool HasCompileDb, bool Capped);
+    public ParseStats Stats { get { EnsureBuilt(); return new ParseStats(_tuSeen, _tuParsed, _hasCompileDb, _tuCapped); } }
 
     private readonly record struct Loc(string Full, int Line, int Column); // Full = absolute path
 
@@ -120,16 +133,21 @@ public sealed class ClangCppAnalyzer : IDisposable
             _built = true;
 
             LoadCompileCommands();
+            int cap = _hasCompileDb ? int.MaxValue : NoCompileDbTuCap();
 
             var walker = new FileWalker(new IgnoreRules());
             using var index = CXIndex.Create();
             foreach (var root in _roots)
-            foreach (var file in walker.Walk(root))
             {
-                if (!SourceExtensions.Contains(Path.GetExtension(file.RelativePath))) continue;
-                _tuSeen++;
-                try { if (ParseFile(index, file.FullPath)) _tuParsed++; }
-                catch { /* skip files clang can't handle */ }
+                foreach (var file in walker.Walk(root))
+                {
+                    if (!SourceExtensions.Contains(Path.GetExtension(file.RelativePath))) continue;
+                    if (_tuSeen >= cap) { _tuCapped = true; break; } // no compile DB: stop the futile huge-tree grind
+                    _tuSeen++;
+                    try { if (ParseFile(index, file.FullPath)) _tuParsed++; }
+                    catch { /* skip files clang can't handle */ }
+                }
+                if (_tuCapped) break;
             }
         }
     }
@@ -145,8 +163,13 @@ public sealed class ClangCppAnalyzer : IDisposable
             out CXTranslationUnit tu);
         if (error != CXErrorCode.CXError_Success) return false;
 
+        // Dispose the TU as soon as we've extracted its symbols/refs into our own maps. Otherwise every
+        // parsed file's libclang AST stays resident until the whole walk finishes - which on a large tree
+        // (tens of thousands of TUs) balloons memory. The line text shown later is read from the FILE, not
+        // the TU, so nothing here needs it after Walk.
         var translationUnit = TranslationUnit.GetOrCreate(tu);
-        Walk(translationUnit.TranslationUnitDecl);
+        try { Walk(translationUnit.TranslationUnitDecl); }
+        finally { translationUnit.Dispose(); }
         return true;
     }
 
