@@ -90,20 +90,9 @@ public static class CodeCompassTools
         return "";
     }
 
-    // Data/doc file types where a whole-word text match of a symbol name is NOT a code reference - a
-    // JIRA export .csv row, a tool's .json tag dump, a .md doc, a .log line. find_references' lexical
-    // fallback skips these so "references" stays about code, not every place the string appears.
-    private static readonly HashSet<string> NonCodeReferenceExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".csv", ".tsv", ".json", ".jsonl", ".ndjson", ".yaml", ".yml",
-        ".md", ".markdown", ".rst", ".txt", ".log", ".html", ".htm", ".svg", ".map", ".lock",
-        // Build/toolchain artifacts (common in firmware trees committed beside sources): a name in a
-        // disassembly listing, a backup copy, or a preprocessed/object/image file is not a code reference.
-        ".lst", ".bak", ".i", ".s", ".d", ".o", ".obj", ".elf", ".hex", ".bin",
-    };
-
-    private static bool IsCodeReferenceFile(string path) =>
-        !NonCodeReferenceExtensions.Contains(System.IO.Path.GetExtension(path));
+    // A whole-word text match in a data/doc file or a build artifact isn't a code reference - shared with
+    // the CLI `refs` via CodeCompass.Core.Text.ReferenceFileFilter so both filter identically.
+    private static bool IsCodeReferenceFile(string path) => ReferenceFileFilter.IsCodeReference(path);
 
     // C/C++ translation-unit extensions (headers are parsed via #include, not directly) - the files the
     // clang layer parses, and thus the candidates worth handing it for a targeted find-references.

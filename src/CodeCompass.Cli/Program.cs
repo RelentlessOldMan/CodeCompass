@@ -1037,6 +1037,7 @@ static int CmdRefs(string[] args)
         foreach (var m in index!.Search(name, 1000))
         {
             if (SemanticCoverage.IsCovered(m.Path)) continue;
+            if (!CodeCompass.Core.Text.ReferenceFileFilter.IsCodeReference(m.Path)) continue; // skip .lst/.bak/.o/... build noise
             if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
             Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
             lexical++;
