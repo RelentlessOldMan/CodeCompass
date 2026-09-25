@@ -205,6 +205,19 @@ public static class RepositoryIndexer
                     var tg = TrigramIndex.ComputeTrigrams(content);
                     worker.Text.AddDocument(file.RelativePath, tg);
                     worker.TrigramPostings += tg.Length;
+
+                    // Mid-size files (>= sidecar threshold, but under the streaming threshold so still whole-read
+                    // here) get a positional block sidecar built from the bytes already in memory - so a search
+                    // whose trigrams land in a 10-128 MB file reads only the candidate blocks, not the whole file.
+                    if (bytes.Length >= LargeFileIndexer.SidecarThresholdBytes)
+                    {
+                        var midBlocks = LargeFileIndexer.BuildBlocks(bytes);
+                        if (midBlocks is not null)
+                        {
+                            PositionalSidecar.Write(dir, file.RelativePath, midBlocks);
+                            posSidecars.Add(PositionalSidecar.SidecarName(file.RelativePath));
+                        }
+                    }
                     if (LanguageRegistry.ForPath(file.RelativePath) is not null)
                     {
                         // A symbol-bearing file whose symbols are skipped by a cap / data-blob guard is
@@ -445,8 +458,8 @@ public static class RepositoryIndexer
                 if (seen.Contains(rel)) continue;
                 text.RemovePath(rel);
                 symbols.RemovePath(rel);
-                if (old.TryGetValue(rel, out var gone) && gone.Size >= LargeFileIndexer.StreamThresholdBytes)
-                    PositionalSidecar.Delete(dir, rel); // drop a removed large file's sidecar
+                if (old.TryGetValue(rel, out var gone) && gone.Size >= LargeFileIndexer.SidecarThresholdBytes)
+                    PositionalSidecar.Delete(dir, rel); // drop a removed large/mid-size file's sidecar
                 removed++;
             }
 
@@ -568,14 +581,13 @@ public static class RepositoryIndexer
         ref int added, ref int modified, ref int removed)
     {
         FileState? oldState = snapshot.TryGetValue(rel, out var ps) ? ps : (FileState?)null;
-        bool wasLarge = oldState is { } o && o.Size >= LargeFileIndexer.StreamThresholdBytes;
 
         // These two guards are specific to the TARGETED path: a single path can become newly-ignored or
         // grow over the file cap, and must then be dropped. Build/Update never hit them because their
         // full walk pre-filters ignored and over-cap files.
         if (IsIgnoredRelPath(rel, ignore))
         {
-            if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel, wasLarge); snapshot.Remove(rel); removed++; }
+            if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel); snapshot.Remove(rel); removed++; }
             return;
         }
 
@@ -584,7 +596,7 @@ public static class RepositoryIndexer
         catch { return; }
         if (size > ignore.MaxFileSizeBytes) // over the file cap -> not indexed (drop if we had it)
         {
-            if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel, wasLarge); snapshot.Remove(rel); removed++; }
+            if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel); snapshot.Remove(rel); removed++; }
             return;
         }
 
@@ -621,7 +633,6 @@ public static class RepositoryIndexer
         Action<string, FileState> upsert, Action<string> drop)
     {
         bool wasPresent = oldState is not null;
-        bool wasLarge = oldState is { } os0 && os0.Size >= LargeFileIndexer.StreamThresholdBytes;
 
         // Large files: stream (bounded memory), trigrams only, no symbols.
         if (size >= LargeFileIndexer.StreamThresholdBytes)
@@ -629,7 +640,7 @@ public static class RepositoryIndexer
             if (!LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out _, out var blocks))
             {
                 // Binary/unreadable: drop it if it was indexed, so we never leave stale content behind.
-                if (wasPresent) { RemoveFromIndex(text, symbols, dir, rel, wasLarge); drop(rel); return ChangeKind.Removed; }
+                if (wasPresent) { RemoveFromIndex(text, symbols, dir, rel); drop(rel); return ChangeKind.Removed; }
                 return ChangeKind.None;
             }
             if (oldState?.ContentHash == bigHash) { upsert(rel, new FileState(len, mtime, bigHash)); return ChangeKind.None; } // touched, identical
@@ -641,14 +652,12 @@ public static class RepositoryIndexer
             return wasPresent ? ChangeKind.Modified : ChangeKind.Added;
         }
 
-        if (wasLarge) PositionalSidecar.Delete(dir, rel); // shrank below the streaming threshold
-
         byte[] bytes;
         try { bytes = File.ReadAllBytes(full); }
         catch { if (oldState is { } keep) upsert(rel, keep); return ChangeKind.None; } // transient read error: keep as-was
         if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
         {
-            if (wasPresent) { RemoveFromIndex(text, symbols, dir, rel, large: false); drop(rel); return ChangeKind.Removed; }
+            if (wasPresent) { RemoveFromIndex(text, symbols, dir, rel); drop(rel); return ChangeKind.Removed; }
             return ChangeKind.None;
         }
 
@@ -661,16 +670,26 @@ public static class RepositoryIndexer
         symbols.RemovePath(rel);
         if (LanguageRegistry.ForPath(rel) is not null)
             symbols.AddForPath(rel, extractor.Extract(rel, content));
+
+        // Reconcile the mid-size positional sidecar (mirror the build path): eligible + UTF-8 -> (re)write;
+        // otherwise remove any stale one (shrank below the threshold, or became non-UTF-8). Write overwrites
+        // a prior large-file sidecar at the same name, so a shrink from >=streaming to mid-size is handled too.
+        if (bytes.Length >= LargeFileIndexer.SidecarThresholdBytes && LargeFileIndexer.BuildBlocks(bytes) is { } mid)
+            PositionalSidecar.Write(dir, rel, mid);
+        else
+            PositionalSidecar.Delete(dir, rel);
+
         upsert(rel, new FileState(bytes.Length, mtime, hash));
         return wasPresent ? ChangeKind.Modified : ChangeKind.Added;
     }
 
-    // Remove a file's doc, symbols, and (if it was a large file) its positional sidecar from a live index.
-    private static void RemoveFromIndex(SegmentedIndex text, SegmentedSymbolIndex symbols, string dir, string rel, bool large)
+    // Remove a file's doc, symbols, and any positional sidecar from a live index. Delete is idempotent
+    // (no-op when absent), so it safely covers large, mid-size, and no-sidecar files alike.
+    private static void RemoveFromIndex(SegmentedIndex text, SegmentedSymbolIndex symbols, string dir, string rel)
     {
         text.RemovePath(rel);
         symbols.RemovePath(rel);
-        if (large) PositionalSidecar.Delete(dir, rel);
+        PositionalSidecar.Delete(dir, rel);
     }
 
     private static void RemovePathAndChildren(
@@ -681,7 +700,7 @@ public static class RepositoryIndexer
         {
             text.RemovePath(rel);
             symbols.RemovePath(rel);
-            if (st.Size >= LargeFileIndexer.StreamThresholdBytes) PositionalSidecar.Delete(dir, rel);
+            if (st.Size >= LargeFileIndexer.SidecarThresholdBytes) PositionalSidecar.Delete(dir, rel);
             removed++;
         }
 
@@ -689,7 +708,7 @@ public static class RepositoryIndexer
         var children = snapshot.KeysWithPrefix(prefix).ToList();
         foreach (var k in children)
         {
-            bool big = snapshot.TryGetValue(k, out var cs) && cs.Size >= LargeFileIndexer.StreamThresholdBytes;
+            bool big = snapshot.TryGetValue(k, out var cs) && cs.Size >= LargeFileIndexer.SidecarThresholdBytes;
             snapshot.Remove(k);
             text.RemovePath(k);
             symbols.RemovePath(k);

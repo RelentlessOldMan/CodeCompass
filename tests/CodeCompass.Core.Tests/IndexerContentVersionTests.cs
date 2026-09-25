@@ -19,7 +19,7 @@ public class IndexerContentVersionTests
     {
         Assert.Equal(1, SegmentBuilder.Version);          // trigram text segment layout
         Assert.Equal(2, SymbolSegmentBuilder.Version);    // symbol segment layout (v2 added endLines)
-        Assert.Equal(0, BuildInfo.IndexerContentVersion); // baseline; bump when indexer OUTPUT changes
+        Assert.Equal(1, BuildInfo.IndexerContentVersion); // v1: mid-size positional sidecars; bump on OUTPUT change
     }
 
     [Fact]

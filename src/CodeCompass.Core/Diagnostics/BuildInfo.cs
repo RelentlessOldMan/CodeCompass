@@ -21,11 +21,15 @@ public static class BuildInfo
     /// index is stale, rebuild" on the product version would cry wolf on every upgrade. Staleness is judged
     /// on THIS number instead, so the nudge fires only when a rebuild would actually change results.
     ///
-    /// Baseline is 0 = "the index output as it has shipped": an existing index with no stamp reads back as 0
-    /// and therefore equals current, so adding this mechanism raises NO false alarm on already-built indexes.
+    /// Baseline was 0 = "the index output as it has shipped": an existing index with no stamp reads back as 0
+    /// and therefore equals baseline, so adding this mechanism raised NO false alarm on already-built indexes.
     /// BUMP THIS (and the tripwire test in IndexerContentVersionTests) the next time indexer output changes.
     /// It cannot retroactively flag pre-stamp indexes (we never recorded what built them) - it is a
     /// going-forward guarantee. Incremental-update drift is a DIFFERENT problem and is not covered here.
+    ///
+    /// History:
+    ///   1 - mid-size files (>= LargeFileIndexer.SidecarThresholdBytes, under the streaming threshold) now get
+    ///       a positional block sidecar, so a rebuild adds those sidecars and makes their search block-selective.
     /// </summary>
-    public const int IndexerContentVersion = 0;
+    public const int IndexerContentVersion = 1;
 }

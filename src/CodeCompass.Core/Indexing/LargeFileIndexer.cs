@@ -36,6 +36,13 @@ public static class LargeFileIndexer
     /// whole-file path. Below the ~1 GB single-string ceiling with wide margin.</summary>
     public const long StreamThresholdBytes = 128L * 1024 * 1024;
 
+    /// <summary>Files at or above this size (but below <see cref="StreamThresholdBytes"/>, so still whole-read
+    /// at index time) ALSO get a positional block sidecar, built from the already-in-memory bytes. Without it,
+    /// a search whose trigrams appear in a mid-size file (10-128 MB register headers/dumps are common in
+    /// firmware) reads the WHOLE file - painful over a share. 8 MB is ~8 blocks, enough for block selectivity
+    /// to matter while keeping the sidecar count sane. Lower than the stream threshold, never above it.</summary>
+    public const long SidecarThresholdBytes = 8L * 1024 * 1024;
+
     private const int ChunkBytes = 1 << 20;                 // 1 MB read granularity
     private const int BlockTargetBytes = 1 << 20;           // ~1 MB per positional block (line-aligned)
     private const int BlockHardCapBytes = 16 << 20;         // force a cut if a single line is this long
@@ -118,6 +125,39 @@ public static class LargeFileIndexer
         }
         catch { return false; }
         finally { ArrayPool<byte>.Shared.Return(buf); }
+    }
+
+    /// <summary>Build a positional block sidecar from an already-in-memory file (the whole-read path). Same
+    /// block format as <see cref="TryStreamIndex(string,out long[],out long,out string,out bool,out LargeFileBlocks?)"/>
+    /// - it feeds the identical <see cref="DrainFullBlocks"/> cutter from a MemoryStream in 1 MB chunks, so
+    /// the remainder stays bounded (O(n), not O(n^2)) and the on-disk format matches byte-for-byte. Returns
+    /// null for empty/binary/non-UTF-8 content (no line-based blocks), so the caller simply writes no sidecar
+    /// and search falls back to a whole-file scan for that file - i.e. current behavior. Never throws.</summary>
+    public static LargeFileBlocks? BuildBlocks(byte[] bytes)
+    {
+        try
+        {
+            if (bytes.Length == 0) return null;
+            if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return null;
+            var (enc, bomLen) = DetectBom(bytes);
+            bool utf8 = ReferenceEquals(enc, Encoding.UTF8) || bomLen == 3 || bomLen == 0;
+            if (!utf8) return null; // non-UTF-8: 0x0A isn't a line boundary, so no positional index (matches streaming)
+
+            var whole = new TrigramAccumulator();       // discarded; blocks carry their own Blooms
+            var blockList = new List<BlockEntry>();
+            using var blockBuf = new MemoryStream(BlockTargetBytes + ChunkBytes);
+            long blockStartByte = 0;
+            int blockStartLine = 0;
+            for (int off = 0; off < bytes.Length; off += ChunkBytes)
+            {
+                int n = Math.Min(ChunkBytes, bytes.Length - off);
+                blockBuf.Write(bytes, off, n);
+                DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, bomLen, force: false);
+            }
+            DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, bomLen, force: true);
+            return blockList.Count > 0 ? new LargeFileBlocks(BloomBytes, BloomK, bomLen, blockList) : null;
+        }
+        catch { return null; }
     }
 
     // Close every full (>= target, line-aligned) block currently buffered; on force, close whatever

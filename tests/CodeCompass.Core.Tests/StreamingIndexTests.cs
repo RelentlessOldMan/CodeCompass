@@ -177,6 +177,82 @@ public class StreamingIndexTests
         Assert.Single(ciScan);
         Assert.True(ciBytesRead < fileLen / 10, $"case-insensitive positional scan read {ciBytesRead:N0} of {fileLen:N0} B - regressed to a whole-file scan");
     }
+
+    // The in-memory block builder (used for mid-size files on the whole-read path) must produce a block table
+    // byte-identical to the streaming builder for the same content - same cuts, line numbers, and Blooms - or
+    // a mid-size sidecar would read the wrong ranges at query time.
+    [Fact]
+    public void BuildBlocks_MatchesStreaming_ByteForByte()
+    {
+        var sb = new StringBuilder(3_000_000);
+        int i = 0;
+        while (sb.Length < 2_600_000) sb.Append("REG_").Append(i++).Append(" = 0x").Append((i * 3).ToString("X")).Append('\n');
+        var bytes = Encoding.UTF8.GetBytes(sb.ToString());
+
+        using var repo = new TempRepo();
+        var full = repo.WriteBytes("m.h", bytes);
+        Assert.True(LargeFileIndexer.TryStreamIndex(full, out _, out _, out _, out _, out var streamed));
+        var built = LargeFileIndexer.BuildBlocks(bytes);
+
+        Assert.NotNull(streamed);
+        Assert.NotNull(built);
+        Assert.Equal(streamed!.BomLen, built!.BomLen);
+        Assert.Equal(streamed.Blocks.Count, built.Blocks.Count);
+        for (int b = 0; b < streamed.Blocks.Count; b++)
+        {
+            Assert.Equal(streamed.Blocks[b].StartLine, built.Blocks[b].StartLine);
+            Assert.Equal(streamed.Blocks[b].StartByte, built.Blocks[b].StartByte);
+            Assert.Equal(streamed.Blocks[b].EndByte, built.Blocks[b].EndByte);
+            Assert.Equal(streamed.Blocks[b].Bloom, built.Blocks[b].Bloom); // identical Bloom bits
+        }
+    }
+
+    [Fact]
+    public void BuildBlocks_NullForNonUtf8AndBinary()
+    {
+        Assert.Null(LargeFileIndexer.BuildBlocks(new byte[] { 1, 2, 0, 3, 0, 4 }));             // binary
+        Assert.Null(LargeFileIndexer.BuildBlocks(Encoding.Unicode.GetBytes("utf16 text\n")));  // non-UTF-8
+        Assert.Null(LargeFileIndexer.BuildBlocks(System.Array.Empty<byte>()));                  // empty
+    }
+
+    // A mid-size file (>= sidecar threshold, under the streaming threshold) now gets a positional sidecar at
+    // build time, so a search whose trigrams land in it reads only the candidate block(s), not the whole file.
+    [Fact]
+    public void MidSizeFile_GetsSidecar_AndSearchReadsOnlyBlocks()
+    {
+        using var repo = new TempRepo();
+        var path = repo.FullPath("mid.h");
+        const string marker = "ZZ_MID_MARKER_314159";
+        int markerLine = -1;
+        using (var w = new System.IO.StreamWriter(path, append: false, Encoding.UTF8))
+        {
+            long written = 0; int line = 0;
+            while (written < 10L * 1024 * 1024) // ~10 MB: above the 8 MB sidecar threshold, well under 128 MB
+            {
+                line++;
+                string t = line == 60_000 ? marker : $"REG_{line} = 0x{line:X}";
+                if (line == 60_000) markerLine = line;
+                w.Write(t); w.Write('\n'); written += t.Length + 1;
+            }
+        }
+        long fileLen = new System.IO.FileInfo(path).Length;
+        Assert.InRange(fileLen, LargeFileIndexer.SidecarThresholdBytes, LargeFileIndexer.StreamThresholdBytes - 1);
+
+        var (text, symbols, _) = RepositoryIndexer.Build(repo.Root);
+        using (text) using (symbols)
+        {
+            var hit = Assert.Single(text.Search(marker));
+            Assert.Equal("mid.h", hit.Path);
+            Assert.Equal(markerLine, hit.Line);
+        }
+
+        var dir = IndexStore.GetCacheDir(repo.Root);
+        Assert.True(PositionalSidecar.HasSidecar(dir, "mid.h"), "mid-size file should now carry a positional sidecar");
+        var scan = new List<SearchMatch>();
+        Assert.True(PositionalSidecar.TryScan(dir, repo.Root, "mid.h", marker, scan, 200, out long bytesRead));
+        Assert.Single(scan);
+        Assert.True(bytesRead < fileLen / 4, $"mid-size positional scan read {bytesRead:N0} of {fileLen:N0} B - not block-selective");
+    }
 }
 
 public class BloomFilterTests
