@@ -150,18 +150,32 @@ public class StreamingIndexTests
             Assert.Equal(markerLine, hit.Line);       // correct line via the block's start-line offset
             Assert.Equal(marker, hit.LineText);
             Assert.Equal(1, hit.Column);
+
+            // Case-INSENSITIVE for the marker in the opposite case must ALSO resolve via the block index
+            // (this is the 1.0.135 defect: -i used to skip the sidecar and read the whole file).
+            var ci = text.Search(marker.ToLowerInvariant(), 200, caseSensitive: false);
+            var ciHit = Assert.Single(ci);
+            Assert.Equal("huge.h", ciHit.Path);
+            Assert.Equal(markerLine, ciHit.Line);
+            Assert.Equal(marker, ciHit.LineText);
         }
 
         // The network-cost guarantee: finding that unique marker reads only the ~1 MB block it lives in,
         // NOT the whole ~140 MB file. This is the entire reason the positional sidecar exists - so assert
         // it directly (machine-independent; no real share needed - just count the bytes the scan pulls).
         var dir = IndexStore.GetCacheDir(repo.Root);
+        long fileLen = new System.IO.FileInfo(path).Length;
         var scan = new List<SearchMatch>();
         Assert.True(PositionalSidecar.TryScan(dir, repo.Root, "huge.h", marker, scan, 200, out long bytesRead));
         Assert.Single(scan);
-        long fileLen = new System.IO.FileInfo(path).Length;
         Assert.True(bytesRead <= 4L * 1024 * 1024, $"positional scan read {bytesRead:N0} B; expected a few 1 MB blocks");
         Assert.True(bytesRead < fileLen / 10, $"positional scan read {bytesRead:N0} of {fileLen:N0} B - not selective");
+
+        // Same guarantee for case-INSENSITIVE: it must stay block-selective, not regress to a full scan.
+        var ciScan = new List<SearchMatch>();
+        Assert.True(PositionalSidecar.TryScan(dir, repo.Root, "huge.h", marker.ToLowerInvariant(), ciScan, 200, caseSensitive: false, out long ciBytesRead));
+        Assert.Single(ciScan);
+        Assert.True(ciBytesRead < fileLen / 10, $"case-insensitive positional scan read {ciBytesRead:N0} of {fileLen:N0} B - regressed to a whole-file scan");
     }
 }
 

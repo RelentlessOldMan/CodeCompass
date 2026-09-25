@@ -145,6 +145,52 @@ public sealed class TrigramIndex
 
     internal static long TriKey(char a, char b, char c) => ((long)a << 32) | ((long)b << 16) | c;
 
+    /// <summary>The query's distinct trigrams as per-position match GROUPS, for candidate/Bloom filtering.
+    /// Case-sensitive: one exact key per position. Case-insensitive: each position expands to every case
+    /// variant of its three chars (deduped by the folded key across positions), so a position is "admitted"
+    /// when ANY variant is present and a whole-corpus rescan is never needed just because the case differs.
+    /// Shared by the segment candidate step and the large-file block-index (positional sidecar) scan so both
+    /// treat case identically. Empty for a query under 3 chars (no trigrams -> caller scans broadly).</summary>
+    public static List<long[]> QueryTrigramGroups(string query, bool caseSensitive)
+    {
+        var groups = new List<long[]>();
+        if (string.IsNullOrEmpty(query)) return groups;
+        var seen = new HashSet<long>();
+        for (int i = 0; i + 2 < query.Length; i++)
+        {
+            char a = query[i], b = query[i + 1], c = query[i + 2];
+            if (caseSensitive)
+            {
+                long key = TriKey(a, b, c);
+                if (seen.Add(key)) groups.Add(new[] { key });
+            }
+            else
+            {
+                long rep = TriKey(char.ToLowerInvariant(a), char.ToLowerInvariant(b), char.ToLowerInvariant(c));
+                if (seen.Add(rep)) groups.Add(CaseVariants(a, b, c));
+            }
+        }
+        return groups;
+    }
+
+    private static long[] CaseVariants(char a, char b, char c)
+    {
+        var keys = new HashSet<long>();
+        foreach (var x in CharVariants(a))
+            foreach (var y in CharVariants(b))
+                foreach (var z in CharVariants(c))
+                    keys.Add(TriKey(x, y, z));
+        var arr = new long[keys.Count];
+        keys.CopyTo(arr);
+        return arr;
+    }
+
+    private static char[] CharVariants(char ch)
+    {
+        char lo = char.ToLowerInvariant(ch), up = char.ToUpperInvariant(ch);
+        return lo == up ? new[] { lo } : new[] { lo, up };
+    }
+
     private static IEnumerable<long> DistinctTrigrams(string text)
     {
         if (text.Length < 3) yield break;

@@ -151,7 +151,7 @@ public sealed class SegmentedIndex : IDisposable
         // Each "group" is the set of trigram keys that satisfy one query position: a single exact key
         // when case-sensitive, or every case variant of the folded trigram when case-insensitive (so
         // the candidate step matches any-case occurrences; the OrdinalIgnoreCase verify then confirms).
-        var groups = query.Length >= 3 ? BuildTrigramGroups(query, caseSensitive) : null;
+        var groups = query.Length >= 3 ? TrigramIndex.QueryTrigramGroups(query, caseSensitive) : null;
 
         // Collect the ordered candidate paths (all local: mmap postings, no source reads). The
         // trigram index only says a file MIGHT contain the query; the verify step below reads each and
@@ -181,7 +181,7 @@ public sealed class SegmentedIndex : IDisposable
         if (string.IsNullOrEmpty(query)) return Array.Empty<string>();
         if (_pending is { DocCount: > 0 }) FlushPending();
 
-        var groups = query.Length >= 3 ? BuildTrigramGroups(query, caseSensitive: true) : null;
+        var groups = query.Length >= 3 ? TrigramIndex.QueryTrigramGroups(query, caseSensitive: true) : null;
         var cands = CollectCandidates(groups);
         if (cands.Count <= 1) return cands;
 
@@ -293,11 +293,14 @@ public sealed class SegmentedIndex : IDisposable
         var results = new List<SearchMatch>();
         var full = Path.Combine(_root, rel.Replace('/', Path.DirectorySeparatorChar));
 
-        // Large file (has a block index in the local cache): read only the candidate blocks (case-
-        // sensitive Blooms) or fall back to a bounded line scan. No network stat needed to know this.
+        // Large file (has a block index in the local cache): read only the candidate blocks, then fall back
+        // to a bounded line scan only if the sidecar couldn't handle it. The block Blooms are case-sensitive
+        // trigrams, but a case-INSENSITIVE query still uses them by probing every case variant per position
+        // (TryScan handles this) - so -i no longer degrades to reading the whole multi-GB file. No network
+        // stat needed to know a file is large.
         if (PositionalSidecar.HasSidecar(_dir, rel))
         {
-            if (!(caseSensitive && PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults)))
+            if (!PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults, caseSensitive))
                 FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network);
             return results;
         }
@@ -320,47 +323,6 @@ public sealed class SegmentedIndex : IDisposable
 
         FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network); // rare: large, no sidecar
         return results;
-    }
-
-    // Distinct query trigrams as match groups (deduped). Case-sensitive: one exact key each.
-    // Case-insensitive: dedup by the folded key, and expand each to all case variants of its 3 chars.
-    private static List<long[]> BuildTrigramGroups(string query, bool caseSensitive)
-    {
-        var groups = new List<long[]>();
-        var seen = new HashSet<long>();
-        for (int i = 0; i + 2 < query.Length; i++)
-        {
-            char a = query[i], b = query[i + 1], c = query[i + 2];
-            if (caseSensitive)
-            {
-                long key = TrigramIndex.TriKey(a, b, c);
-                if (seen.Add(key)) groups.Add(new[] { key });
-            }
-            else
-            {
-                long rep = TrigramIndex.TriKey(char.ToLowerInvariant(a), char.ToLowerInvariant(b), char.ToLowerInvariant(c));
-                if (seen.Add(rep)) groups.Add(CaseVariants(a, b, c));
-            }
-        }
-        return groups;
-    }
-
-    private static long[] CaseVariants(char a, char b, char c)
-    {
-        var keys = new HashSet<long>();
-        foreach (var x in CharVariants(a))
-            foreach (var y in CharVariants(b))
-                foreach (var z in CharVariants(c))
-                    keys.Add(TrigramIndex.TriKey(x, y, z));
-        var arr = new long[keys.Count];
-        keys.CopyTo(arr);
-        return arr;
-    }
-
-    private static char[] CharVariants(char ch)
-    {
-        char lo = char.ToLowerInvariant(ch), up = char.ToUpperInvariant(ch);
-        return lo == up ? new[] { lo } : new[] { lo, up };
     }
 
     // Merge (sorted, distinct) the posting lists of every key in a group. One key => return it directly

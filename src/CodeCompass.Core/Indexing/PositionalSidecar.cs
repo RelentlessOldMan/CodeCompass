@@ -53,25 +53,33 @@ public static class PositionalSidecar
     public static void CleanupOrphans(string dir, IReadOnlySet<string> keep) =>
         NumberedFiles.CleanupOrphans(dir, Pattern, keep);
 
-    /// <summary>Scan a large candidate file using its sidecar: read only the blocks whose Blooms admit
-    /// every query trigram. Returns true if the sidecar was present and usable (results filled up to
-    /// maxResults); false means the caller should fall back to a whole-file scan.</summary>
-    public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults)
-        => TryScan(dir, root, rel, query, results, maxResults, out _);
+    /// <summary>Scan a large candidate file using its sidecar: read only the blocks whose Blooms admit the
+    /// query's trigrams. <paramref name="caseSensitive"/> false probes every case variant of each trigram
+    /// against the (case-sensitive) block Blooms and matches the block text case-insensitively - so a -i
+    /// query still uses the block index instead of reading the whole multi-GB file. Returns true if the
+    /// sidecar was present and usable (results filled up to maxResults); false => caller whole-file scans.</summary>
+    public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults, bool caseSensitive = true)
+        => TryScan(dir, root, rel, query, results, maxResults, caseSensitive, out _);
 
-    /// <summary>As <see cref="TryScan(string,string,string,string,List{SearchMatch},int)"/>, also
+    /// <summary>As <see cref="TryScan(string,string,string,string,List{SearchMatch},int,bool)"/>, also
     /// reporting how many bytes were read from the (possibly networked) source file - the sum of the
     /// candidate blocks' sizes. This is the metric the block index exists to minimize: a selective query
     /// reads a few ~1 MB blocks, not the whole multi-GB file. Tests assert it stays tiny relative to the
     /// file (verifying the network-cost win without needing a real share).</summary>
     public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults, out long bytesRead)
+        => TryScan(dir, root, rel, query, results, maxResults, caseSensitive: true, out bytesRead);
+
+    public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults, bool caseSensitive, out long bytesRead)
     {
         bytesRead = 0;
         var scPath = Path.Combine(dir, SidecarName(rel));
         if (!File.Exists(scPath)) return false;
 
-        var qtris = TrigramIndex.ComputeTrigrams(query);
-        if (qtris.Length == 0) return false; // query < 3 chars: no trigrams to filter on -> whole-file scan
+        // Per-position trigram groups: one exact key each (case-sensitive) or all case variants (case-
+        // insensitive). A block is admitted only if EVERY position has some variant in its Bloom.
+        var groups = TrigramIndex.QueryTrigramGroups(query, caseSensitive);
+        if (groups.Count == 0) return false; // query < 3 chars: no trigrams to filter on -> whole-file scan
+        var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
 
         int bloomK, bomLen, count;
         int[] startLine;
@@ -104,7 +112,12 @@ public static class PositionalSidecar
             {
                 var bloom = new BloomFilter(blooms[i], bloomK);
                 bool all = true;
-                foreach (var t in qtris) if (!bloom.MayContain(t)) { all = false; break; }
+                foreach (var group in groups)
+                {
+                    bool any = false;
+                    foreach (var t in group) if (bloom.MayContain(t)) { any = true; break; }
+                    if (!any) { all = false; break; } // this position has no admitted variant -> skip block
+                }
                 if (!all) continue;
 
                 long blockLen = endByte[i] - startByte[i];
@@ -116,7 +129,7 @@ public static class PositionalSidecar
                 bytesRead += blockLen; // bytes pulled from the (possibly networked) source
                 int skip = startByte[i] == 0 ? bomLen : 0;
                 var text = Encoding.UTF8.GetString(bytes, skip, bytes.Length - skip);
-                FileScanner.ScanText(rel, text, query, results, maxResults, lineOffset: startLine[i] - 1);
+                FileScanner.ScanText(rel, text, query, results, maxResults, lineOffset: startLine[i] - 1, comparison);
             }
         }
         catch { /* partial results are acceptable; we still "handled" the file */ }
