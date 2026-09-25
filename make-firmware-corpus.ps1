@@ -127,27 +127,37 @@ function PickDir { return $dirList[$rng.Next(0, $dirList.Count)] }
 # preprocessor macro table (the actual bug axis) without the bytes.
 function New-RegHeader([string]$path, [int]$defines, [long]$maxBytes, [int]$fam) {
     $guard = "REGMAP_" + [System.IO.Path]::GetFileNameWithoutExtension($path).ToUpper() + "_H"
-    $sw = [System.IO.StreamWriter]::new($path)
+    # A 1 MB StreamWriter buffer + BATCHED StringBuilder chunks (~5 MB) written in one call each. Per-line
+    # WriteLine is the bottleneck at scale (~1M calls per 110 MB header); batching cuts write calls ~20,000x,
+    # so even the 1.44 GB max header generates in seconds instead of minutes.
+    $sw = [System.IO.StreamWriter]::new($path, $false, [System.Text.Encoding]::ASCII, 1 * 1024 * 1024)
     try {
-        $sw.WriteLine("#ifndef $guard"); $sw.WriteLine("#define $guard")
-        $sw.WriteLine("/* generated hardware register map - block $fam (synthetic) */")
+        $sw.Write("#ifndef $guard`n#define $guard`n/* generated hardware register map - block $fam (synthetic) */`n")
         $reg = 0; $emitted = 0
+        $sb = [System.Text.StringBuilder]::new(6 * 1024 * 1024)
+        $batchRegs = 16384  # registers per flush (~48k lines, ~5 MB)
         while ($emitted -lt $defines -and $sw.BaseStream.Length -lt $maxBytes) {
-            $addr = ($reg * 4).ToString("x8")
-            $sw.WriteLine("#define HWIO_BLK${fam}_REG${reg}_ADDR (BASE_BLOCK$fam + 0x$addr)")
-            $sw.WriteLine("#define HWIO_BLK${fam}_REG${reg}_RMSK 0x000000ff")
-            $sw.WriteLine("#define HWIO_BLK${fam}_REG${reg}_IN in_dword(HWIO_BLK${fam}_REG${reg}_ADDR)")
-            $reg++; $emitted += 3
+            [void]$sb.Clear()
+            for ($k = 0; $k -lt $batchRegs -and $emitted -lt $defines; $k++) {
+                $addr = ($reg * 4).ToString("x8")
+                [void]$sb.Append("#define HWIO_BLK${fam}_REG${reg}_ADDR (BASE_BLOCK$fam + 0x$addr)`n#define HWIO_BLK${fam}_REG${reg}_RMSK 0x000000ff`n#define HWIO_BLK${fam}_REG${reg}_IN in_dword(HWIO_BLK${fam}_REG${reg}_ADDR)`n")
+                $reg++; $emitted += 3
+            }
+            $sw.Write($sb.ToString())
         }
-        $sw.WriteLine("#endif")
+        $sw.Write("#endif`n")
     } finally { $sw.Close() }
 }
 
-Write-Host "  register headers: $nGiant giant (density $MacroDensity, <=${MaxHeaderMB}MB) + $nBig big + $nMed medium ..."
+# Giants fill to -MaxHeaderMB by default (byte shape drives "bigger repos"); -MacroDensity, when explicitly
+# set, caps the define count instead - the pure "many macros, few bytes" memory-axis test (pair with a small
+# -MaxHeaderMB). Either way a giant carries ~1M+ #defines, which is the preprocessor stressor.
+$giantDefineCap = if ($PSBoundParameters.ContainsKey('MacroDensity')) { $MacroDensity } else { [int]::MaxValue }
+Write-Host "  register headers: $nGiant giant (<=${MaxHeaderMB}MB, densityCap $giantDefineCap) + $nBig big + $nMed medium ..."
 $giantPaths = New-Object System.Collections.Generic.List[string]
 for ($i = 0; $i -lt $nGiant; $i++) {
     $p = Join-Path (PickDir) "regmap_block$i.h"
-    New-RegHeader $p $MacroDensity ([long]$MaxHeaderMB * 1MB) $i
+    New-RegHeader $p $giantDefineCap ([long]$MaxHeaderMB * 1MB) $i
     $giantPaths.Add($p)
 }
 for ($i = 0; $i -lt $nBig; $i++) { New-RegHeader (Join-Path (PickDir) "regbig_$i.h") 2000000 ([long]$rng.Next(10, 100) * 1MB) (100 + $i) }
