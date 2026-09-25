@@ -265,10 +265,14 @@ content (see *Tuning* above).
 
 `find_references` for C/C++ is precise only with a **compile database** — a `compile_commands.json` that
 tells clang each file's real include paths and defines. Without one it falls back to best-effort flags
-and may resolve little (common in vendor-toolchain firmware). CodeCompass tells you when this happens:
-`find_references` appends a note ("no compile_commands.json found — ran best-effort… add one for precise
-results") and `codecompass doctor` warns when C/C++ sources exist with no compile DB — so a thin result
-reads as "couldn't fully run," not "no references."
+and may resolve little (common in vendor-toolchain firmware). CodeCompass tells you when this happens,
+keyed on what the query actually did — not merely on whether a DB file exists. If a lookup's candidate
+files fail to parse or reference headers that aren't in the tree, `find_references` says so and **names the
+missing headers** (e.g. `C/C++ coverage INCOMPLETE: 5 unresolved #include(s): VENDOR_a.h, …`) — because a
+missing header can't be fixed by any `-I` or compile DB, only by adding it to the tree. `codecompass doctor`
+scans proactively too: it reports both when C/C++ sources exist with no compile DB **and** when translation
+units reference unresolvable includes (`N of M … reference at least one #include not found in the tree`). So
+a thin result reads as "couldn't fully run," not "no references."
 
 To fix it, generate a compile DB (CMake `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, or **Bear**/`compiledb` for
 Make-based builds) and — if it's not in the repo root or `build/` — point at it:

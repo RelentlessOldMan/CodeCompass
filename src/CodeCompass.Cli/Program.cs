@@ -1026,8 +1026,8 @@ static int CmdRefs(string[] args)
                 cppCandidates.Add(Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar))));
         }
     }
-    var cpp = new ClangCppAnalyzer(root).FindReferences(name, cppCandidates);
-    foreach (var s in cpp)
+    var cppRes = new ClangCppAnalyzer(root).FindReferencesDetailed(name, cppCandidates);
+    foreach (var s in cppRes.Locations)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
     // Lexical whole-word references for languages without a semantic analyzer.
@@ -1042,6 +1042,24 @@ static int CmdRefs(string[] args)
             Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
             lexical++;
         }
+    }
+    var cpp = cppRes.Locations;
+
+    // Honest disclosure (same as MCP): if candidate C/C++ TUs failed to parse or had unresolved #includes,
+    // a low/zero C/C++ count means "couldn't look," not "no references." Name the missing headers.
+    if ((cppCandidates?.Count ?? 0) > 0)
+    {
+        var bits = new List<string>();
+        if (cppRes.ParsedTus < cppRes.CandidateTus) bits.Add($"{cppRes.ParsedTus}/{cppRes.CandidateTus} candidate C/C++ file(s) parsed");
+        if (cppRes.UnresolvedIncludes.Count > 0)
+        {
+            var shownH = string.Join(", ", cppRes.UnresolvedIncludes.Take(5));
+            if (cppRes.UnresolvedIncludes.Count > 5) shownH += $", +{cppRes.UnresolvedIncludes.Count - 5} more";
+            bits.Add($"{cppRes.UnresolvedIncludes.Count} unresolved #include(s): {shownH}");
+        }
+        if (bits.Count > 0)
+            Console.Error.WriteLine("-- C/C++ coverage INCOMPLETE: " + string.Join("; ", bits) +
+                " (missing headers aren't in the tree - a low/zero C/C++ count may mean 'couldn't parse', not 'no references').");
     }
 
     Console.Error.WriteLine($"-- {cs.Count} C# + {cpp.Count} C/C++ semantic + {lexical} lexical reference(s)");

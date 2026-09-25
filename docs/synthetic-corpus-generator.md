@@ -49,6 +49,7 @@ bisect names the subsystem, instead of "something broke in a 90 GB blob."
 | `-Dirs` / `-Depth` | wide, deep trees — path handling / long paths |
 | `-CrossRefs` (built-in) | cross-file cross-directory call edges — reference correctness |
 | `-LinkedRoots` | output split across N trees — multi-root / federation |
+| `-UnresolvedIncludes` | N TUs `#include` a vendor header absent from the tree, holding a reference gated behind a macro only that header defines — the honest **negative** case (references that *should not* resolve) |
 | `-Scale`, `-Seed` | overall count multiplier; deterministic replay |
 
 ## The correctness oracle
@@ -58,6 +59,12 @@ records the exact definition line of each `func_i` and the exact line where it i
 to `<out>-manifest.json`. With `-Verify`, it indexes the corpus, runs `find_references` for a sample of
 symbols, and asserts the tool's results match the manifest. This is the piece worth stealing for any tool
 that needs *ground-truth* correctness testing.
+
+With `-UnresolvedIncludes N`, the manifest also carries a **negative** oracle: `vendor_gated`'s references
+live behind a macro only a missing header defines, so `refs` is empty and `unreachableRefs` lists sites that
+must *not* resolve. `-Verify` then asserts (a) those sites are never returned, (b) `find_references` discloses
+the unresolved `#include`, and (c) `doctor` reports the unresolved-include scan. A tool that "resolves" a
+reference it has no way to see is failing honesty, not passing recall — this catches that.
 
 ## Usage
 

@@ -35,6 +35,10 @@
 .PARAMETER Dirs          Approximate directory count (full-repo 5700).
 .PARAMETER Depth         Approximate max path depth (full-repo 18).
 .PARAMETER LinkedRoots   Split the .c files across N sibling trees (federation). Default 1.
+.PARAMETER UnresolvedIncludes  Emit N .c TUs that #include a vendor header absent from the tree, each with a
+                         reference to vendor_gated() guarded by a macro that only the missing header defines
+                         (so the reference is genuinely UNREACHABLE). Exercises doctor's unresolved-include
+                         scan and find_references' per-query "includes unresolved" disclosure. Default 0 (off).
 .PARAMETER Manifest      Emit _corpus-manifest.json of ground-truth def/ref sites (default $true).
 .PARAMETER Run           Index it and measure a find_references (time + peak RSS).
 .PARAMETER Verify        Run the correctness oracle: for a sample of symbols, assert find_references matches
@@ -69,6 +73,7 @@ param(
     [int]$Dirs = 5700,
     [int]$Depth = 8,
     [int]$LinkedRoots = 1,
+    [int]$UnresolvedIncludes = 0,
     [bool]$Manifest = $true,
     [switch]$Run,
     [switch]$Verify
@@ -247,6 +252,34 @@ foreach ($ci in $cInfo) {
 if ($nGiantInc -gt 0) { $groundTruth["hot_shared"] = @{ def = "${hotPath}:1"; refs = @($hotRefs) } }
 Write-Host "  giant-include stress: $nGiantInc .c co-located with + including a giant header, all calling hot_shared()"
 
+# UNRESOLVED-INCLUDE STRESS: N .c TUs each #include a vendor header that exists NOWHERE in the tree. Each holds
+# a reference to vendor_gated() inside #ifdef VENDOR_OK - and VENDOR_OK is defined ONLY by that missing header -
+# so the reference is preprocessed out and is genuinely UNREACHABLE without the header. This is the honest
+# negative case: doctor's unresolved-include scan must count these TUs, find_references' per-query disclosure
+# must name the missing headers, and the oracle asserts the gated refs are NOT (and should not be) resolved.
+$nUnres = if ($UnresolvedIncludes -gt 0) { [Math]::Min($UnresolvedIncludes, [Math]::Max(1, $nC)) } else { 0 }
+if ($nUnres -gt 0) {
+    $vgPath = Join-Path (PickDir) "vendor_gated.c"
+    Set-Content $vgPath "int vendor_gated(int x) { return x + 2; }" -Encoding utf8
+    $unreach = New-Object System.Collections.Generic.List[string]
+    for ($k = 0; $k -lt $nUnres; $k++) {
+        $up = Join-Path (PickDir) "unres_$k.c"
+        $ul = New-Object System.Collections.Generic.List[string]
+        $ul.Add("#include ""VENDOR_missing_$k.h""")   # never created anywhere -> unresolvable
+        $ul.Add("int vendor_gated(int x);")
+        $ul.Add("#ifdef VENDOR_OK")                    # VENDOR_OK is defined only by the missing header
+        $ul.Add("int use_vendor_$k(int x) {")
+        $ul.Add("    return vendor_gated(x + $k);")     # UNREACHABLE ref (macro undefined -> block dropped)
+        $unreach.Add("${up}:$($ul.Count)")
+        $ul.Add("}")
+        $ul.Add("#endif")
+        Set-Content $up ($ul -join "`n") -Encoding utf8
+    }
+    # vendor_gated: defined once; every listed ref is expected UNREACHABLE (empty reachable set).
+    $groundTruth["vendor_gated"] = @{ def = "${vgPath}:1"; refs = @(); unreachableRefs = @($unreach) }
+    Write-Host "  unresolved-include stress: $nUnres .c #include a missing vendor header; $($unreach.Count) UNREACHABLE ref(s) to vendor_gated()"
+}
+
 Write-Host "  $nCsv csv (tiny-file pressure) ..."
 for ($i = 0; $i -lt $nCsv; $i++) {
     $sb = [System.Text.StringBuilder]::new(); [void]$sb.AppendLine("id,name,value,ts")
@@ -316,5 +349,39 @@ if ($Verify) {
     }
     $color = if ($fail -eq 0) { 'Green' } else { 'Red' }
     Write-Host ("Oracle: {0}/{1} symbols resolved their expected cross-file reference." -f $pass, ($pass + $fail)) -ForegroundColor $color
+
+    # Negative + disclosure oracle: symbols whose refs are all UNREACHABLE (behind a macro only a missing
+    # header defines). find_references must NOT resolve them, and must DISCLOSE the unresolved include.
+    $gated = @($groundTruth.Keys | Where-Object { $groundTruth[$_].unreachableRefs -and $groundTruth[$_].unreachableRefs.Count -gt 0 })
+    if ($gated.Count -gt 0) {
+        Write-Host "--- unresolved-include oracle: unreachable refs stay unresolved + disclosure fires ---"
+        foreach ($sym in $gated) {
+            $unrefs = $groundTruth[$sym].unreachableRefs
+            $o = [System.IO.Path]::GetTempFileName(); $e = [System.IO.Path]::GetTempFileName()
+            $p = Start-Process $exe -ArgumentList @("refs", $outFull, $sym) -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+            $null = $p.WaitForExit(60000)
+            $out = Get-Content $o -Raw; $err = Get-Content $e -Raw
+            $leaked = $false
+            foreach ($u in $unrefs) {
+                $parts = $u -split ':'; $line = $parts[-1]; $file = [System.IO.Path]::GetFileName(($parts[0..($parts.Count-2)] -join ':'))
+                if ($out -match [regex]::Escape("$file") -and $out -match ":${line}:") { $leaked = $true }
+            }
+            $disclosed = ($err -match 'unresolved' -or $out -match 'unresolved' -or $err -match 'VENDOR_missing' -or $out -match 'VENDOR_missing')
+            if (-not $leaked) { Write-Host "  OK  $sym : $($unrefs.Count) gated ref(s) correctly NOT resolved" -ForegroundColor Green }
+            else { $fail++; Write-Host "  LEAK $sym : a gated (unreachable) ref was resolved" -ForegroundColor Red }
+            if ($disclosed) { Write-Host "  OK  $sym : find_references disclosed the unresolved include" -ForegroundColor Green }
+            else { $fail++; Write-Host "  MISS $sym : no unresolved-include disclosure emitted" -ForegroundColor Red }
+            Remove-Item $o, $e -Force -ErrorAction SilentlyContinue
+        }
+        # doctor should proactively report the unresolved-include gap.
+        $do = [System.IO.Path]::GetTempFileName()
+        $dp = Start-Process $exe -ArgumentList @("doctor", $outFull) -NoNewWindow -PassThru -RedirectStandardOutput $do -RedirectStandardError ([System.IO.Path]::GetTempFileName())
+        $null = $dp.WaitForExit(120000)
+        $dout = Get-Content $do -Raw
+        if ($dout -match 'translation unit\(s\) reference at least one') { Write-Host "  OK  doctor reported the unresolved-include scan" -ForegroundColor Green }
+        else { $fail++; Write-Host "  MISS doctor did not report the unresolved-include scan" -ForegroundColor Red }
+        Remove-Item $do -Force -ErrorAction SilentlyContinue
+    }
+
     if ($fail -ne 0) { exit 1 }
 }

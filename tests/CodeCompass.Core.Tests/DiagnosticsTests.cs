@@ -90,6 +90,35 @@ public class DiagnosticsTests
     }
 
     [Fact]
+    public void HealthChecks_Flag_UnresolvableInclude_AndNameIt()
+    {
+        using var repo = new TempRepo();
+        // Two TUs: one includes a header that lives nowhere in the tree (a vendor/system header), one is clean.
+        repo.Write("dev.c", "#include \"VENDOR_missing.h\"\nint dev(void){return 0;}");
+        repo.Write("ok.c", "#include \"local.h\"\nint ok(void){return 1;}");
+        repo.Write("local.h", "int ok(void);");
+
+        var checks = RepoDiagnostics.HealthChecks(repo.Root);
+        var scan = checks.Single(c => c.Name == "C/C++ includes resolvable");
+        Assert.False(scan.Ok);
+        Assert.Contains("1 of 2", scan.Detail);
+        Assert.Contains("VENDOR_missing.h", scan.Detail);
+    }
+
+    [Fact]
+    public void HealthChecks_StdAndTreeIncludes_DoNotFalseFlag()
+    {
+        using var repo = new TempRepo();
+        // Angle stdlib (stdio.h), extensionless C++ header (<vector>), and a quote include resolved in-tree.
+        repo.Write("main.c", "#include <stdio.h>\n#include <vector>\n#include \"util.h\"\nint main(void){return 0;}");
+        repo.Write("util.h", "void util(void);");
+
+        var checks = RepoDiagnostics.HealthChecks(repo.Root);
+        var scan = checks.Single(c => c.Name == "C/C++ includes resolvable");
+        Assert.True(scan.Ok, scan.Detail);
+    }
+
+    [Fact]
     public void Doctor_Reports_LinkedRoots_And_FlagsUnindexedOne()
     {
         using var project = new TempRepo();

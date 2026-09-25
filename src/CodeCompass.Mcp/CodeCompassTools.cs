@@ -210,9 +210,15 @@ public static class CodeCompassTools
             foreach (var rel in h.Text.CandidateFiles(name))
                 if (IsCppSourceFile(rel))
                     cppCandidates.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar))));
+        int cppCand = 0, cppParsed = 0;
+        IReadOnlyList<string> cppUnresolved = System.Array.Empty<string>();
         if (cppCandidates.Count > 0)
-            foreach (var s in ServerContext.Cpp.FindReferences(name, cppCandidates, probe))
+        {
+            var r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe);
+            foreach (var s in r.Locations)
                 hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
+            cppCand = r.CandidateTus; cppParsed = r.ParsedTus; cppUnresolved = r.UnresolvedIncludes;
+        }
 
         if (hits.Count <= maxResults)
             foreach (var h in handles)
@@ -228,14 +234,30 @@ public static class CodeCompassTools
                 if (hits.Count > maxResults) break;
             }
 
-        // Honest disclosure: when C/C++ candidate files were involved but there's no compile_commands.json,
-        // resolution ran on best-effort flags (includes/defines unresolved), so it may be imprecise - a
-        // thin/zero C/C++ count then means "couldn't fully resolve," not "no references exist." (Results are
-        // now COMPLETE over the candidate set - no cap - so this is about precision, not coverage.)
+        // Honest disclosure keyed on what THIS QUERY actually did (not merely whether a compile DB file
+        // exists): if some candidate C/C++ TUs failed to parse or had unresolved #includes, a low/zero C/C++
+        // count means "couldn't look," not "no references." Names the missing headers - those can't be fixed
+        // by any -I/compile DB, only by adding them to the tree. Fires WITH or WITHOUT a compile DB (a present
+        // DB must never silence a caveat a failed parse earned).
         string cppNote = "";
-        if (cppCandidates.Count > 0 && !ServerContext.Cpp.HasCompileDb)
-            cppNote = " (Note: no compile_commands.json found - C/C++ references were resolved with best-effort " +
-                      "flags and may be imprecise; add a compile_commands.json for precise results.)";
+        if (cppCandidates.Count > 0)
+        {
+            var bits = new List<string>();
+            if (cppParsed < cppCand) bits.Add($"{cppParsed:N0}/{cppCand:N0} candidate C/C++ file(s) parsed");
+            if (cppUnresolved.Count > 0)
+            {
+                var shownH = string.Join(", ", cppUnresolved.Take(5));
+                if (cppUnresolved.Count > 5) shownH += $", +{cppUnresolved.Count - 5} more";
+                bits.Add($"{cppUnresolved.Count} unresolved #include(s): {shownH}");
+            }
+            if (bits.Count > 0)
+                cppNote = " (Note: C/C++ coverage INCOMPLETE - " + string.Join("; ", bits) +
+                          ". Missing headers aren't in the tree (no -I/compile DB can fix that), so a low or zero " +
+                          "C/C++ count may mean 'couldn't parse', not 'no references' - add the headers for full coverage.)";
+            else if (!ServerContext.Cpp.HasCompileDb)
+                cppNote = " (Note: no compile_commands.json found - C/C++ references resolved with best-effort " +
+                          "flags and may be imprecise; add one for precise results.)";
+        }
 
         if (hits.Count == 0)
             return $"No references found for \"{name}\". Tip: try search_code for a raw text search " +

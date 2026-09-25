@@ -24,6 +24,35 @@ public static class RepoDiagnostics
     private static readonly HashSet<string> CppExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".c", ".cc", ".cpp", ".cxx", ".c++" };
 
+    // Source translation units to scan for #includes (headers are pulled in transitively; we count TUs).
+    private static readonly HashSet<string> CppSourceExtensions =
+        new(StringComparer.OrdinalIgnoreCase) { ".c", ".cc", ".cpp", ".cxx", ".c++" };
+
+    // Header extensions that count as "resolvable from the tree" when an #include names one of these.
+    private static readonly HashSet<string> CppHeaderExtensions =
+        new(StringComparer.OrdinalIgnoreCase) { ".h", ".hh", ".hpp", ".hxx", ".h++", ".inc", ".ipp", ".tcc" };
+
+    // #include "path" (group 2, quote form) or #include <path> (group 3, angle form). One per line.
+    private static readonly System.Text.RegularExpressions.Regex IncludeLine = new(
+        "^[ \\t]*#[ \\t]*include[ \\t]*(?:\"([^\"]+)\"|<([^>]+)>)",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.Multiline);
+
+    // Common C and C++ standard-library headers. An angle-include of one of these resolves via the toolchain
+    // (clang ships/knows them), so it must NOT be flagged missing - otherwise every TU would look broken. Quote
+    // includes are resolved against the tree only (they express project-local intent). This list is a heuristic
+    // safety net, not exhaustive; the precise per-query find_references disclosure is the authority.
+    private static readonly HashSet<string> StdHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // C
+        "assert.h","complex.h","ctype.h","errno.h","fenv.h","float.h","inttypes.h","iso646.h","limits.h",
+        "locale.h","math.h","setjmp.h","signal.h","stdalign.h","stdarg.h","stdatomic.h","stdbit.h","stdbool.h",
+        "stddef.h","stdint.h","stdio.h","stdlib.h","stdnoreturn.h","string.h","tgmath.h","threads.h","time.h",
+        "uchar.h","wchar.h","wctype.h",
+        // POSIX / common toolchain headers that live outside the repo tree
+        "unistd.h","fcntl.h","sys/types.h","sys/stat.h","sys/time.h","pthread.h","dlfcn.h","sched.h","semaphore.h",
+        "arpa/inet.h","netinet/in.h","sys/socket.h","poll.h","dirent.h","malloc.h","alloca.h","endian.h",
+    };
+
     // Honors the configured compileCommands locations (+ CODECOMPASS_COMPILE_COMMANDS), not just the two
     // default probe spots, so a user who points at a DB elsewhere isn't warned as if they had none.
     private static bool HasCompileDb(string root) =>
@@ -145,6 +174,60 @@ public static class RepoDiagnostics
         catch (Exception ex) { w.WriteLine($"    (could not list: {ex.Message})"); }
     }
 
+    /// <summary>Outcome of the lexical unresolved-#include scan.</summary>
+    public readonly record struct IncludeScan(int TusScanned, int TusWithUnresolved, IReadOnlyList<string> MissingHeaders);
+
+    // Lexical (pre-parse) scan: for each C/C++ source TU, extract its direct #include directives and try to
+    // resolve each against the indexed tree (by basename) - quote includes tree-only, angle includes tree +
+    // a standard-header/extensionless allowlist. Counts TUs with >=1 unresolvable include and the distinct
+    // missing header names. This approximates what clang would fail to find; it does not follow the transitive
+    // include graph, so it is a heuristic floor, not the precise per-query truth. Never throws.
+    private static IncludeScan ScanUnresolvedIncludes(string root)
+    {
+        var treeBasenames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var tus = new List<string>();
+        try
+        {
+            foreach (var f in new FileWalker(new IgnoreRules()).Walk(root))
+            {
+                treeBasenames.Add(Path.GetFileName(f.RelativePath));
+                var ext = Path.GetExtension(f.RelativePath);
+                if (CppSourceExtensions.Contains(ext) || CppHeaderExtensions.Contains(ext)) tus.Add(f.FullPath);
+            }
+        }
+        catch { return new IncludeScan(0, 0, Array.Empty<string>()); }
+
+        // Scan the source TUs (the compilation units). Header-only files are pulled in transitively.
+        var sources = tus.Where(p => CppSourceExtensions.Contains(Path.GetExtension(p))).ToList();
+        int scanned = 0, withUnresolved = 0;
+        var missing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in sources)
+        {
+            string text;
+            try { text = File.ReadAllText(path); } catch { continue; }
+            scanned++;
+            bool tuHasUnresolved = false;
+            foreach (System.Text.RegularExpressions.Match m in IncludeLine.Matches(text))
+            {
+                bool quote = m.Groups[1].Success;
+                string inc = (quote ? m.Groups[1].Value : m.Groups[2].Value).Trim();
+                if (inc.Length == 0) continue;
+                string norm = inc.Replace('\\', '/');
+                string baseName = Path.GetFileName(norm);
+                if (treeBasenames.Contains(baseName)) continue;              // resolvable within the tree
+                if (!quote)                                                  // angle include: allow toolchain headers
+                {
+                    if (!baseName.Contains('.')) continue;                   // <vector>, <cstdint> - extensionless stdlib
+                    if (StdHeaders.Contains(baseName) || StdHeaders.Contains(norm)) continue;
+                }
+                tuHasUnresolved = true;
+                missing.Add(baseName);
+            }
+            if (tuHasUnresolved) withUnresolved++;
+        }
+        return new IncludeScan(scanned, withUnresolved, missing.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList());
+    }
+
     /// <summary>Run explicit pass/warn health checks for <c>doctor</c>. Never throws.</summary>
     public static IReadOnlyList<Check> HealthChecks(string root)
     {
@@ -184,23 +267,43 @@ public static class RepoDiagnostics
         // database. Without one it falls back to best-effort flags and may under-resolve (or resolve
         // nothing), so a repo that has C/C++ sources but no compile_commands.json gets a warning here -
         // otherwise a later "0 C/C++ semantic" reads as "no references" rather than "couldn't run."
+        // Single walk of the tree: collects TU count, missing-include stats, and whether any C/C++ exists.
+        var incScan = ScanUnresolvedIncludes(root);
+        bool hasCpp = incScan.TusScanned > 0;
+
         if (HasCompileDb(root))
         {
             checks.Add(new("C/C++ compile database", true, "compile_commands.json found (precise C/C++ semantics)"));
         }
-        else
+        else if (hasCpp)
         {
-            bool hasCpp;
-            // Early-exits at the first C/C++ source; only walks the whole tree when there are none (rare,
-            // and doctor is a manual diagnostic).
-            try { hasCpp = new FileWalker(new IgnoreRules()).Walk(root).Any(f => CppExtensions.Contains(Path.GetExtension(f.RelativePath))); }
-            catch { hasCpp = false; }
-            if (hasCpp)
-                checks.Add(new("C/C++ compile database", false,
-                    "C/C++ sources present but no compile_commands.json found (looked in root, root\\build, and any " +
-                    "configured compileCommands paths) - find_references uses best-effort flags and may miss references. " +
-                    "Generate one (CMake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON, or Bear/compiledb for Make), then point at it " +
-                    "with \"compileCommands\" in .codecompass.json if it's not in a default location"));
+            checks.Add(new("C/C++ compile database", false,
+                "C/C++ sources present but no compile_commands.json found (looked in root, root\\build, and any " +
+                "configured compileCommands paths) - find_references uses best-effort flags and may miss references. " +
+                "Generate one (CMake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON, or Bear/compiledb for Make), then point at it " +
+                "with \"compileCommands\" in .codecompass.json if it's not in a default location"));
+        }
+
+        // Unresolvable #includes: a TU that can't find a header often fails to parse, so its references go
+        // unresolved. Surface this proactively (find_references also discloses it per-query at lookup time).
+        if (hasCpp)
+        {
+            bool ok = incScan.TusWithUnresolved == 0;
+            string detail;
+            if (ok)
+                detail = $"{incScan.TusScanned:N0} C/C++ translation unit(s) scanned; all direct #includes resolve within the tree";
+            else
+            {
+                var examples = incScan.MissingHeaders.Take(5);
+                string tail = incScan.MissingHeaders.Count > 5 ? $", +{incScan.MissingHeaders.Count - 5} more" : "";
+                detail = $"{incScan.TusWithUnresolved:N0} of {incScan.TusScanned:N0} C/C++ translation unit(s) reference at least one " +
+                         $"#include not found in the tree ({incScan.MissingHeaders.Count:N0} distinct header(s): " +
+                         $"{string.Join(", ", examples)}{tail}). These are likely system/vendor headers outside the repo; " +
+                         "such TUs may fail to parse, so find_references can under-resolve. Add the missing headers to the tree " +
+                         "or point find_references at a compile_commands.json that supplies their include paths. (Heuristic lexical " +
+                         "scan of direct includes; the precise gap is disclosed per-query by find_references.)";
+            }
+            checks.Add(new("C/C++ includes resolvable", ok, detail));
         }
 
         // Each linked root must exist and be indexed for the server to federate it. A missing/unindexed one

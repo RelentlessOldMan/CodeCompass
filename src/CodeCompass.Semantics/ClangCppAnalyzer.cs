@@ -66,7 +66,19 @@ public sealed class ClangCppAnalyzer : IDisposable
         public readonly Dictionary<string, HashSet<string>> UsrsByName = new(StringComparer.Ordinal);
         public readonly Dictionary<string, List<Loc>> DefsByName = new(StringComparer.Ordinal);
         public readonly Dictionary<string, List<Loc>> RefsByUsr = new(StringComparer.Ordinal);
+        // Per-query coverage accounting, so callers can DISCLOSE why a result is partial/empty: how many
+        // candidate TUs we tried, how many parsed, and which #includes clang couldn't find (missing headers
+        // - the case where a bare "0 references" is really "couldn't look," not "no callers").
+        public int Candidates;
+        public int Parsed;
+        public readonly HashSet<string> UnresolvedIncludes = new(StringComparer.OrdinalIgnoreCase);
     }
+
+    /// <summary>A C/C++ reference result plus the coverage the query actually achieved. UnresolvedIncludes
+    /// names headers clang couldn't find (missing from the tree - unfixable by any -I/compile DB), so a
+    /// partial or empty result can be disclosed honestly instead of read as a confident zero.</summary>
+    public readonly record struct CppRefResult(
+        IReadOnlyList<SemanticLocation> Locations, int CandidateTus, int ParsedTus, IReadOnlyList<string> UnresolvedIncludes);
 
     public ClangCppAnalyzer(string root) : this(new[] { root }) { }
 
@@ -93,25 +105,34 @@ public sealed class ClangCppAnalyzer : IDisposable
     /// name="candidateFiles"/> is the set of files that might contain it (absolute paths, from the trigram
     /// index); only those TUs are parsed. Null => self-scan the tree (unit tests / no index available).</summary>
     public IReadOnlyList<SemanticLocation> FindReferences(string name, IReadOnlyCollection<string>? candidateFiles = null, int max = 200)
+        => FindReferencesDetailed(name, candidateFiles, max).Locations;
+
+    /// <summary>As <see cref="FindReferences"/> but also returns the coverage the query achieved (candidate
+    /// TUs, how many parsed, unresolved includes) so callers can disclose a partial/empty result honestly.</summary>
+    public CppRefResult FindReferencesDetailed(string name, IReadOnlyCollection<string>? candidateFiles = null, int max = 200)
     {
         var model = BuildModel(name, candidateFiles);
         var result = new List<SemanticLocation>();
-        if (!model.UsrsByName.TryGetValue(name, out var usrs)) return result;
-
-        var seen = new HashSet<Loc>();
-        var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal); // per-query; freed on return
-        foreach (var usr in usrs)
+        if (model.UsrsByName.TryGetValue(name, out var usrs))
         {
-            if (!model.RefsByUsr.TryGetValue(usr, out var locs)) continue;
-            foreach (var l in locs)
-                if (seen.Add(l))
-                {
-                    result.Add(ToSemantic(l, lineCache));
-                    if (result.Count >= max) return result;
-                }
+            var seen = new HashSet<Loc>();
+            var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal); // per-query; freed on return
+            foreach (var usr in usrs)
+            {
+                if (!model.RefsByUsr.TryGetValue(usr, out var locs)) continue;
+                foreach (var l in locs)
+                    if (seen.Add(l))
+                    {
+                        result.Add(ToSemantic(l, lineCache));
+                        if (result.Count >= max) { return Cover(model, result); }
+                    }
+            }
         }
-        return result;
+        return Cover(model, result);
     }
+
+    private static CppRefResult Cover(Model m, List<SemanticLocation> locs) =>
+        new(locs, m.Candidates, m.Parsed, m.UnresolvedIncludes.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList());
 
     /// <summary>Definitions of the C/C++ symbol <paramref name="name"/>. See <see cref="FindReferences"/>
     /// for <paramref name="candidateFiles"/>.</summary>
@@ -137,7 +158,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     {
         EnsureCompileDb();
         var files = ResolveFiles(name, candidateFiles).ToList();
-        var model = new Model();
+        var model = new Model { Candidates = files.Count };
         if (files.Count == 0) return model;
         if (files.Count == 1) { try { ParseInto(files[0], model); } catch { } return model; }
 
@@ -167,6 +188,8 @@ public sealed class ClangCppAnalyzer : IDisposable
             if (!dst.RefsByUsr.TryGetValue(kv.Key, out var list)) { list = new List<Loc>(); dst.RefsByUsr[kv.Key] = list; }
             list.AddRange(kv.Value);
         }
+        dst.Parsed += src.Parsed;
+        dst.UnresolvedIncludes.UnionWith(src.UnresolvedIncludes);
     }
 
     // The absolute source files to parse for this query: the supplied candidates (filtered to C/C++ sources
@@ -224,12 +247,39 @@ public sealed class ClangCppAnalyzer : IDisposable
             ReadOnlySpan<CXUnsavedFile>.Empty,
             CXTranslationUnit_Flags.CXTranslationUnit_None,
             out CXTranslationUnit tu);
-        if (error != CXErrorCode.CXError_Success) return;
+        if (error != CXErrorCode.CXError_Success) return; // TU couldn't be produced at all - not counted as parsed
+
+        model.Parsed++;
+        CollectUnresolvedIncludes(tu, model); // names of #includes clang couldn't find (missing from the tree)
 
         TranslationUnit translationUnit;
         lock (_clangGate) { translationUnit = TranslationUnit.GetOrCreate(tu); }
         try { Walk(translationUnit.TranslationUnitDecl, model); }
         finally { lock (_clangGate) { translationUnit.Dispose(); } }
+    }
+
+    // Scan this TU's diagnostics for "'X.h' file not found" and record X - the headers absent from the tree,
+    // which no -I set or compile DB can fix and which are the usual reason a C/C++ reference query comes back
+    // empty. Per-TU handle, so safe to call concurrently.
+    private static readonly System.Text.RegularExpressions.Regex FileNotFound =
+        new("'([^']+)' file not found", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static unsafe void CollectUnresolvedIncludes(CXTranslationUnit tu, Model model)
+    {
+        try
+        {
+            uint n = clang.getNumDiagnostics(tu);
+            for (uint i = 0; i < n; i++)
+            {
+                var d = clang.getDiagnostic(tu, i);
+                try
+                {
+                    var m = FileNotFound.Match(clang.getDiagnosticSpelling(d).ToString());
+                    if (m.Success) model.UnresolvedIncludes.Add(Path.GetFileName(m.Groups[1].Value));
+                }
+                finally { clang.disposeDiagnostic(d); }
+            }
+        }
+        catch { /* diagnostics are best-effort; a failure just omits the disclosure */ }
     }
 
     private void Walk(Cursor cursor, Model model)
