@@ -366,7 +366,9 @@ if ($Verify) {
                 $parts = $u -split ':'; $line = $parts[-1]; $file = [System.IO.Path]::GetFileName(($parts[0..($parts.Count-2)] -join ':'))
                 if ($out -match [regex]::Escape("$file") -and $out -match ":${line}:") { $leaked = $true }
             }
-            $disclosed = ($err -match 'unresolved' -or $out -match 'unresolved' -or $err -match 'VENDOR_missing' -or $out -match 'VENDOR_missing')
+            # The coverage caveat is a correctness qualifier on the answer, so it must land on STDOUT (so a
+            # `refs > out.txt` keeps it), not just stderr - assert stdout specifically.
+            $disclosed = ($out -match 'coverage INCOMPLETE' -and ($out -match 'unresolved' -or $out -match 'VENDOR_missing'))
             if (-not $leaked) { Write-Host "  OK  $sym : $($unrefs.Count) gated ref(s) correctly NOT resolved" -ForegroundColor Green }
             else { $fail++; Write-Host "  LEAK $sym : a gated (unreachable) ref was resolved" -ForegroundColor Red }
             if ($disclosed) { Write-Host "  OK  $sym : find_references disclosed the unresolved include" -ForegroundColor Green }

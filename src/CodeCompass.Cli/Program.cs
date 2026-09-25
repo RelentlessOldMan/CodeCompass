@@ -84,6 +84,10 @@ static int Usage()
     Console.Error.WriteLine("  codecompass report  <path> [--no-logs]   zip diagnostics + logs for a bug report (never source)");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
     Console.Error.WriteLine("  codecompass version                      print the build version");
+    Console.Error.WriteLine();
+    Console.Error.WriteLine("output: query hits go to STDOUT; progress/status/counts go to STDERR. The C/C++ coverage");
+    Console.Error.WriteLine("        caveat is a correctness qualifier on the answer, so it also goes to STDOUT (a");
+    Console.Error.WriteLine("        `refs ... > out.txt` keeps the disclosure).");
     return 1;
 }
 
@@ -1046,7 +1050,10 @@ static int CmdRefs(string[] args)
     var cpp = cppRes.Locations;
 
     // Honest disclosure (same as MCP): if candidate C/C++ TUs failed to parse or had unresolved #includes,
-    // a low/zero C/C++ count means "couldn't look," not "no references." Name the missing headers.
+    // a low/zero C/C++ count means "couldn't look," not "no references." Name the missing headers. This is a
+    // correctness QUALIFIER on the answer (not a progress diagnostic), so it goes to STDOUT alongside the hits
+    // - a caller doing `refs ... > out.txt` must not silently lose the disclosure. Matches MCP, which embeds
+    // the same note in its returned result.
     if ((cppCandidates?.Count ?? 0) > 0)
     {
         var bits = new List<string>();
@@ -1058,7 +1065,7 @@ static int CmdRefs(string[] args)
             bits.Add($"{cppRes.UnresolvedIncludes.Count} unresolved #include(s): {shownH}");
         }
         if (bits.Count > 0)
-            Console.Error.WriteLine("-- C/C++ coverage INCOMPLETE: " + string.Join("; ", bits) +
+            Console.Out.WriteLine("-- C/C++ coverage INCOMPLETE: " + string.Join("; ", bits) +
                 " (missing headers aren't in the tree - a low/zero C/C++ count may mean 'couldn't parse', not 'no references').");
     }
 
