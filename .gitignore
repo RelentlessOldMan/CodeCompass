@@ -501,3 +501,8 @@ plugin/INSTALL.txt
 
 # Local Claude Code session state (plugin enablement, etc.)
 .claude/
+
+# Local MCP server config at the repo root (e.g. the Discordinator relay) - machine-specific and may
+# hold tokens/channel ids; never commit it. Root-anchored so it does NOT ignore plugin/.mcp.json, which
+# is CodeCompass's own plugin server registration and IS tracked.
+/.mcp.json
