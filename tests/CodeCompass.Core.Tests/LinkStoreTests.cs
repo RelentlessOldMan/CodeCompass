@@ -100,4 +100,23 @@ public class LinkStoreTests
         Assert.False(RepositoryIndexer.ExceedsAutoLimit(repo.Root, out var total));
         Assert.True(total >= 0);
     }
+
+    [Fact]
+    public void ExceedsAutoLimit_OverCap_Defers_ForFreshLinkedTree()
+    {
+        // The decision `link add` makes on a fresh, UNINDEXED external tree: with the linked root's own
+        // .codecompass.json setting a maxAutoMb of 0 (a valid "force CLI build" value), any non-empty tree
+        // is over the cap, so link add must DEFER (print the threshold + build nothing) rather than index
+        // inline. This guards the branch behind the size-gate message that was previously misreported.
+        using var linked = new TempRepo();
+        linked.Write("code.c", "int f(void){return 0;}");
+        linked.Write(".codecompass.json", """{ "maxAutoMb": 0 }""");
+
+        var cfg = CodeCompassConfig.ReadFrom(linked.Root)!;
+        Assert.True(RepositoryIndexer.ExceedsAutoLimit(linked.Root, cfg, out var total));
+        Assert.True(total > 0); // it crossed the (zero) cap on a real file
+
+        // And the honest reported number is the THRESHOLD, not this partial floor.
+        Assert.Equal(0, CodeCompassConfig.MaxAutoBytes(cfg));
+    }
 }

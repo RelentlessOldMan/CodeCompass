@@ -147,6 +147,33 @@ if ($Big -and (Test-Path $cli)) {
         Remove-Item $reportZip -Force -ErrorAction SilentlyContinue
     }
     Check "report writes a bundle with diagnostics and no source" ($zipOk -and $noSource)
+
+    Section "linked roots: link add size gate (defer large fresh tree, index small one)"
+    # Guards the `link add` decision on a FRESH, unindexed external tree: a root over the auto-index cap must
+    # DEFER (report the threshold, build nothing) - not misreport a size or index inline; a small one indexes.
+    $linkBase = Join-Path $root ".corpus/_linktest"
+    Remove-Item $linkBase -Recurse -Force -ErrorAction SilentlyContinue
+    $proj  = Join-Path $linkBase "project"
+    $bigL  = Join-Path $linkBase "biglink"
+    $smallL = Join-Path $linkBase "smalllink"
+    New-Item -ItemType Directory -Force -Path $proj, $bigL, $smallL | Out-Null
+    Set-Content (Join-Path $proj  "app.c")  "int app(void){return 0;}" -Encoding utf8
+    Set-Content (Join-Path $bigL  "code.c") "int f(void){return 0;}"   -Encoding utf8
+    Set-Content (Join-Path $bigL ".codecompass.json") '{ "maxAutoMb": 0 }' -Encoding utf8  # zero cap -> over limit
+    Set-Content (Join-Path $smallL "util.c") "int util(void){return 1;}" -Encoding utf8
+    # Defensive: drop any stale links from a prior run (project path is stable across runs).
+    Invoke-Cli @("link", "remove", $bigL,  $proj, "--keep") | Out-Null
+    Invoke-Cli @("link", "remove", $smallL, $proj, "--keep") | Out-Null
+
+    $laBig = Invoke-Cli @("link", "add", $bigL, $proj)
+    Check "link add defers an over-cap fresh tree (reports the limit)" ($laBig.Out -match "auto-index limit")
+    $docL = Invoke-Cli @("doctor", $proj)
+    Check "deferred link is present but NOT indexed" ($docL.Out -match "indexed: NO")
+
+    $laSmall = Invoke-Cli @("link", "add", $smallL, $proj)
+    Check "link add indexes a small fresh tree inline" ($laSmall.Out -match "indexed \d")
+    Invoke-Cli @("link", "remove", $bigL,  $proj, "--keep") | Out-Null
+    Invoke-Cli @("link", "remove", $smallL, $proj, "--purge") | Out-Null
 }
 
 # ---- Tier 3: real-repo correctness bench --------------------------------------------------------
