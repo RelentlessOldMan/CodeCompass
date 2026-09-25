@@ -1,4 +1,6 @@
+using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
 using ClangSharp;
 using ClangSharp.Interop;
 using CodeCompass.Core.Config;
@@ -34,9 +36,26 @@ public sealed class ClangCppAnalyzer : IDisposable
 
     private readonly IReadOnlyList<string> _roots; // absolute; [0] is the primary (project) root
     private readonly object _gate = new();
+    private readonly object _mergeLock = new();  // guards merging a thread-local model into the shared one
+    private readonly object _clangGate = new();  // serializes ClangSharp's static TU cache (GetOrCreate/Dispose)
     private Dictionary<string, string[]>? _compileArgs;
     private bool _hasCompileDb;
     private bool _dbLoaded;
+
+    // How many candidate translation units to parse concurrently. Each giant-include TU can hold ~1 GB while
+    // parsing, so bound the degree so peak stays sane: ~half of available RAM divided by a ~1.2 GB per-TU
+    // reserve, capped at the core count and a modest ceiling. Env CODECOMPASS_CPP_PARSE_THREADS overrides.
+    private static int ParseDegree()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_PARSE_THREADS");
+        if (int.TryParse(env, out var n) && n > 0) return n;
+        long avail;
+        try { avail = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { avail = 8L * 1024 * 1024 * 1024; }
+        int byMem = (int)Math.Max(1, (avail / 2) / (1200L * 1024 * 1024));
+        // Cap at 4 by default: memory was the reported bug, so keep worst-case peak modest (~4 giant TUs ~4 GB)
+        // while still giving a big speedup on many-includer queries. Raise via CODECOMPASS_CPP_PARSE_THREADS.
+        return Math.Clamp(Math.Min(Environment.ProcessorCount, byMem), 1, 4);
+    }
 
     private readonly record struct Loc(string Full, int Line, int Column); // Full = absolute path
 
@@ -111,18 +130,43 @@ public sealed class ClangCppAnalyzer : IDisposable
     }
 
     // Parse just the files that could contain the query into a fresh model. Bounded to the candidate set,
-    // so memory and time scale with the symbol's actual footprint, not the repo size.
+    // so memory and time scale with the symbol's actual footprint, not the repo size. Candidate TUs are
+    // parsed CONCURRENTLY (each is an independent parse - the dominant cost on register-heavy files), into
+    // thread-local models merged at the end; degree is RAM-bounded so peak stays in check.
     private Model BuildModel(string name, IReadOnlyCollection<string>? candidateFiles)
     {
         EnsureCompileDb();
+        var files = ResolveFiles(name, candidateFiles).ToList();
         var model = new Model();
-        using var index = CXIndex.Create();
-        foreach (var full in ResolveFiles(name, candidateFiles))
-        {
-            try { ParseInto(index, full, model); }
-            catch { /* skip files clang can't handle */ }
-        }
+        if (files.Count == 0) return model;
+        if (files.Count == 1) { try { ParseInto(files[0], model); } catch { } return model; }
+
+        var opts = new ParallelOptions { MaxDegreeOfParallelism = ParseDegree() };
+        Parallel.ForEach(files, opts,
+            () => new Model(),                                         // thread-local model
+            (full, _, local) => { try { ParseInto(full, local); } catch { } return local; },
+            local => { lock (_mergeLock) { MergeInto(model, local); } });
         return model;
+    }
+
+    // Merge a thread-local model into the shared one (caller holds _mergeLock).
+    private static void MergeInto(Model dst, Model src)
+    {
+        foreach (var kv in src.UsrsByName)
+        {
+            if (!dst.UsrsByName.TryGetValue(kv.Key, out var set)) { set = new HashSet<string>(StringComparer.Ordinal); dst.UsrsByName[kv.Key] = set; }
+            set.UnionWith(kv.Value);
+        }
+        foreach (var kv in src.DefsByName)
+        {
+            if (!dst.DefsByName.TryGetValue(kv.Key, out var list)) { list = new List<Loc>(); dst.DefsByName[kv.Key] = list; }
+            list.AddRange(kv.Value);
+        }
+        foreach (var kv in src.RefsByUsr)
+        {
+            if (!dst.RefsByUsr.TryGetValue(kv.Key, out var list)) { list = new List<Loc>(); dst.RefsByUsr[kv.Key] = list; }
+            list.AddRange(kv.Value);
+        }
     }
 
     // The absolute source files to parse for this query: the supplied candidates (filtered to C/C++ sources
@@ -168,8 +212,13 @@ public sealed class ClangCppAnalyzer : IDisposable
         catch { return false; }
     }
 
-    private void ParseInto(CXIndex index, string fullPath, Model model)
+    // Parses one TU on its OWN CXIndex (so concurrent parses are independent) into the given model, then
+    // disposes the TU immediately so memory never holds more than the in-flight TUs. ClangSharp's static
+    // TU cache (GetOrCreate/Dispose) is the only cross-thread shared state, so it's serialized by _clangGate;
+    // the parse itself and the per-instance cursor walk run concurrently.
+    private void ParseInto(string fullPath, Model model)
     {
+        using var index = CXIndex.Create();
         var args = GetArgs(fullPath);
         var error = CXTranslationUnit.TryParse(index, fullPath, args,
             ReadOnlySpan<CXUnsavedFile>.Empty,
@@ -177,11 +226,10 @@ public sealed class ClangCppAnalyzer : IDisposable
             out CXTranslationUnit tu);
         if (error != CXErrorCode.CXError_Success) return;
 
-        // Dispose the TU as soon as we've copied its symbols/refs into the model - the line text shown later
-        // is read from the file, not the TU - so memory never accumulates more than one TU at a time.
-        var translationUnit = TranslationUnit.GetOrCreate(tu);
+        TranslationUnit translationUnit;
+        lock (_clangGate) { translationUnit = TranslationUnit.GetOrCreate(tu); }
         try { Walk(translationUnit.TranslationUnitDecl, model); }
-        finally { translationUnit.Dispose(); }
+        finally { lock (_clangGate) { translationUnit.Dispose(); } }
     }
 
     private void Walk(Cursor cursor, Model model)
