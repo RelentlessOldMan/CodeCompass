@@ -60,6 +60,7 @@ param(
     [int]$MedHeaders = 1957,
     [int]$OrdinaryHeaders = 7400,
     [int]$CFiles = 5123,
+    [int]$GiantIncluders = 3,
     [int]$TinyFiles = 20586,
     [int]$BlobFiles = 50,
     [int]$MaxHeaderMB = 110,
@@ -76,12 +77,16 @@ param(
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $rng = [System.Random]::new($Seed)
+$bound = $PSBoundParameters   # which knobs the caller set explicitly
 
-# Scaled count: round(knob * Scale). A "pathology" population (keepOne) never drops below 1 while enabled,
-# so even --scale 0.001 keeps a giant header; a knob set to 0 disables that population entirely.
-function ScaledCount([int]$knob, [bool]$keepOne = $false) {
-    if ($knob -le 0) { return 0 }
-    $n = [int][Math]::Round($knob * $Scale)
+# Effective count for a knob: if the caller passed it EXPLICITLY, use it literally (a one-off run means what
+# it says - not silently multiplied by -Scale); otherwise treat the default as a full-repo target and
+# multiply by -Scale. A "pathology" knob (keepOne) never rounds to 0 while enabled, so even -Scale 0.001
+# keeps one giant header; setting a knob to 0 disables that population.
+function Eff([string]$name, [int]$val, [bool]$keepOne = $false) {
+    if ($val -le 0) { return 0 }
+    if ($bound.ContainsKey($name)) { return $val }
+    $n = [int][Math]::Round($val * $Scale)
     if ($keepOne -and $n -lt 1) { $n = 1 }
     return $n
 }
@@ -90,13 +95,13 @@ if (Test-Path $Out) { Remove-Item $Out -Recurse -Force }
 $outFull = (New-Item -ItemType Directory -Force -Path $Out).FullName
 Write-Host "Fabricating firmware corpus at $outFull (scale $Scale, seed $Seed, compileDb=$CompileDb) ..."
 
-$nGiant  = ScaledCount $GiantHeaders  $true
-$nBig    = ScaledCount $BigHeaders    $false
-$nMed    = ScaledCount $MedHeaders    $false
-$nSmallH = ScaledCount $OrdinaryHeaders $false
-$nC      = [Math]::Max(2, (ScaledCount $CFiles $false))   # need >=2 for a cross-file reference edge
-$nCsv    = ScaledCount $TinyFiles     $false
-$nBlob   = ScaledCount $BlobFiles     $false
+$nGiant  = Eff 'GiantHeaders'    $GiantHeaders    $true
+$nBig    = Eff 'BigHeaders'      $BigHeaders      $false
+$nMed    = Eff 'MedHeaders'      $MedHeaders      $false
+$nSmallH = Eff 'OrdinaryHeaders' $OrdinaryHeaders $false
+$nC      = [Math]::Max(2, (Eff 'CFiles' $CFiles $false))   # need >=2 for a cross-file reference edge
+$nCsv    = Eff 'TinyFiles'       $TinyFiles       $false
+$nBlob   = Eff 'BlobFiles'       $BlobFiles       $false
 
 # Directory tree: root plus LinkedRoots-1 sibling trees, each block/sub/mod, up to ~Depth deep.
 $rootsList = New-Object System.Collections.Generic.List[string]
@@ -105,7 +110,7 @@ for ($r = 1; $r -lt [Math]::Max(1, $LinkedRoots); $r++) {
     $rootsList.Add((New-Item -ItemType Directory -Force -Path (Join-Path (Split-Path $outFull) ((Split-Path $outFull -Leaf) + "_root$r"))).FullName)
 }
 $dirList = New-Object System.Collections.Generic.List[string]
-$perRoot = [Math]::Max(1, [int][Math]::Round((ScaledCount $Dirs $false) / $rootsList.Count / 9))
+$perRoot = [Math]::Max(1, [int][Math]::Round((Eff 'Dirs' $Dirs $false) / $rootsList.Count / 9))
 foreach ($rt in $rootsList) {
     for ($b = 0; $b -lt ([Math]::Max(1, $perRoot)); $b++) {
         for ($s = 0; $s -lt 3; $s++) {
@@ -184,28 +189,42 @@ for ($i = 0; $i -lt $nBlob; $i++) {
 }
 
 # .c files with CROSS-FILE CROSS-DIRECTORY call edges: func_i defined in src_i.c CALLS func_{i-1} (in
-# another dir). We record the ground-truth def + ref sites as we emit, for the correctness oracle. The
-# first few .c include a giant header (the per-TU macro-blob stressor).
-Write-Host "  $nC .c files (cross-ref edges) ..."
-$groundTruth = @{}   # symbol -> @{ def = "path:line"; refs = @() }
+# another dir). Ground-truth def/ref sites are recorded as we emit, for the correctness oracle.
+#
+# GIANT-INCLUDE STRESS: the first $GiantIncluders .c files are CO-LOCATED with a giant header and #include
+# it (co-location guarantees the include resolves via -I<dir>, so clang actually ingests the ~1M macros -
+# random dirs would silently fail to resolve and test nothing). Each also calls a shared HOT SYMBOL
+# (hot_shared), so find_references(hot_shared) must parse EVERY giant-including TU in one query - the
+# aggregate-memory test: does per-TU dispose keep peak flat across N giant TUs, or does it creep?
+$groundTruth = @{}
 $cInfo = New-Object System.Collections.Generic.List[object]
+$nGiantInc = if ($giantPaths.Count -gt 0) { [Math]::Min($GiantIncluders, $nC) } else { 0 }
+
+# hot_shared: defined once (cheap file, no giant), called from every giant-including .c.
+$hotPath = Join-Path (PickDir) "hot_shared.c"
+Set-Content $hotPath "int hot_shared(int x) { return x + 1; }" -Encoding utf8
+$hotRefs = New-Object System.Collections.Generic.List[string]
+
 for ($i = 0; $i -lt $nC; $i++) {
-    $dir = PickDir
+    $isInc = $i -lt $nGiantInc
+    if ($isInc) { $giant = $giantPaths[$i % $giantPaths.Count]; $dir = Split-Path $giant } else { $dir = PickDir }
     $p = Join-Path $dir "src_$i.c"
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("#include <stddef.h>")
     for ($inc = 0; $inc -lt 6; $inc++) { if ($nSmallH -gt 0) { $lines.Add("#include ""hdr_$($rng.Next(0,$nSmallH)).h""") } }
-    if ($i -lt 3 -and $giantPaths.Count -gt 0) { $lines.Add("#include ""$([System.IO.Path]::GetFileName($giantPaths[$i % $giantPaths.Count]))""") }
+    if ($isInc) { $lines.Add("#include ""$([System.IO.Path]::GetFileName($giant))""") } # co-located -> resolves
     $lines.Add("int func_$i(int x);")
-    $callLine = 0
+    if ($isInc) { $lines.Add("int hot_shared(int x);") }
     if ($i -gt 0) { $lines.Add("int func_$($i-1)(int x);") }
     $lines.Add("int func_$i(int x) {")
     $defLine = $lines.Count            # 1-based line of the definition opener
     $lines.Add("    int acc = x;")
+    $callLine = 0
     if ($i -gt 0) {
         $lines.Add("    acc += func_$($i-1)(x - 1);")   # the cross-file reference to func_{i-1}
         $callLine = $lines.Count
     }
+    if ($isInc) { $lines.Add("    acc += hot_shared(x);"); $hotRefs.Add("${p}:$($lines.Count)") } # aggregate ref
     for ($l = 0; $l -lt 600; $l++) { $lines.Add("    acc = (acc * 1664525 + 1013904223) ^ (acc >> 3);") }
     $lines.Add("    return acc;"); $lines.Add("}")
     Set-Content $p ($lines -join "`n") -Encoding utf8
@@ -216,7 +235,8 @@ for ($i = 0; $i -lt $nC; $i++) {
         Set-Content ($p -replace '\.c$', '.bak') ($lines -join "`n") -Encoding utf8
     }
 }
-# Build the ground-truth manifest: func_i is defined in src_i.c:DefLine and referenced in src_{i+1}.c:CallLine.
+# Ground-truth manifest: func_i defined in src_i.c:DefLine, referenced in src_{i+1}.c:CallLine; hot_shared
+# defined in hot_shared.c and referenced from every giant-including .c (the aggregate query's expected set).
 foreach ($ci in $cInfo) {
     $sym = "func_$($ci.Index)"
     $refs = @()
@@ -224,6 +244,8 @@ foreach ($ci in $cInfo) {
     if ($next -and $next.CallLine -gt 0) { $refs += "$($next.Path):$($next.CallLine)" }
     $groundTruth[$sym] = @{ def = "$($ci.Path):$($ci.DefLine)"; refs = $refs }
 }
+if ($nGiantInc -gt 0) { $groundTruth["hot_shared"] = @{ def = "${hotPath}:1"; refs = @($hotRefs) } }
+Write-Host "  giant-include stress: $nGiantInc .c co-located with + including a giant header, all calling hot_shared()"
 
 Write-Host "  $nCsv csv (tiny-file pressure) ..."
 for ($i = 0; $i -lt $nCsv; $i++) {
@@ -258,7 +280,11 @@ if (($Run -or $Verify) -and -not (Test-Path $exe)) { Write-Host "build the Relea
 $ErrorActionPreference = 'Continue' # native CLI writes progress to stderr; don't let it fault a good run
 
 if ($Run) {
-    Write-Host "--- indexing ---"; & $exe index $outFull
+    Write-Host "--- indexing ---"
+    $idxlog = [System.IO.Path]::GetTempFileName()
+    & $exe index $outFull 2>&1 | Out-File $idxlog
+    Get-Content $idxlog | Select-String 'Indexed |Throughput|Trigram' | ForEach-Object { $_.Line }
+    Remove-Item $idxlog -Force -ErrorAction SilentlyContinue
     $sym = "func_1"
     Write-Host "--- find_references $sym (bounded RSS expected) ---"
     $o = [System.IO.Path]::GetTempFileName()
