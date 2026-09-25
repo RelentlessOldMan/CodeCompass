@@ -99,6 +99,27 @@ To allow `grep` again, set the environment variable `CODECOMPASS_ENFORCE=0`.
 
 3. In a session, run `/mcp` to confirm the `codecompass` server is connected.
 
+### Codex (OpenAI)
+
+The same MCP server works in Codex — the tools are identical; only the registration differs. From the
+unzipped plugin folder:
+
+```powershell
+./install-codecompass.ps1 -TargetHost Codex
+```
+
+That runs `codex mcp add codecompass -- "<folder>\bin\CodeCompass.Mcp.exe"` with the **absolute** exe path
+resolved at install time (no copy step, no hardcoded location). Or register it by hand:
+
+```
+codex mcp add codecompass -- "C:\path\to\codecompass-plugin-<version>-win-x64\bin\CodeCompass.Mcp.exe"
+```
+
+No workspace argument is passed: the server indexes **Codex's working directory** (its cwd), so open Codex
+in your project root. It prints the resolved root to stderr at startup, visible in Codex's MCP log, so a
+wrong-directory launch is obvious. Verify with `codex mcp get codecompass`. Codex has no `PreToolUse`
+equivalent, so there's no grep-enforcement hook there — the tools are available for the agent to choose.
+
 ## First use
 
 Just work normally — ask Claude to find code, jump to definitions, or trace usages, and the hook

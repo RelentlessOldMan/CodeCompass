@@ -18,6 +18,11 @@ var root = !string.IsNullOrEmpty(argRoot) && Directory.Exists(argRoot)
 
 Log.Global.Info($"mcp server v{BuildInfo.Version} starting, root={root}");
 Log.For(root).Info("mcp server attached to this repo");
+// Also to stderr (stdout is the JSON-RPC transport): hosts like Codex that pass no workspace arg rely on
+// the cwd fallback, so surfacing the RESOLVED root here makes a wrong-directory launch diagnosable at a
+// glance in the host's MCP server log, instead of looking like a CodeCompass "wrong/empty index" bug.
+Console.Error.WriteLine($"CodeCompass MCP {BuildInfo.Version}: serving root = {root}"
+    + (argRoot is null ? " (from current directory; no workspace argument was passed)" : ""));
 
 ServerContext.Init(root);
 ServerContext.EnableLiveIndex(); // keep the index fresh as files change

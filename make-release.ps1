@@ -121,6 +121,19 @@ ONE SESSION ONLY (no install) - launch Claude Code with:
 
 Then run  /mcp  to confirm the "codecompass" server is connected.
 
+--------------------------------------------------------------
+CODEX (OpenAI) - register the same MCP server:
+
+    ./install-codecompass.ps1 -TargetHost Codex
+
+That runs `codex mcp add codecompass -- "<this folder>\bin\CodeCompass.Mcp.exe"`
+(absolute path resolved at install time; no copy step). Or do it by hand:
+
+    codex mcp add codecompass -- "<full path>\bin\CodeCompass.Mcp.exe"
+
+The server serves Codex's working directory, so open Codex in your project root.
+Verify with:  codex mcp get codecompass
+
 Docs: open CodeCompass.html in this folder, or see
 https://github.com/RelentlessOldMan/CodeCompass
 "@
@@ -143,7 +156,7 @@ Write-Host ("Release zip ready: {0} ({1} MB)" -f $zip, $zipMb)
 # Validate the artifact BEFORE anyone can install it: it must contain the plugin manifest and both exes,
 # or `/plugin install` fails on the user's machine. Cheap insurance against a silently malformed zip.
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$must = @(".claude-plugin/plugin.json", "bin/CodeCompass.Cli.exe", "bin/CodeCompass.Mcp.exe")
+$must = @(".claude-plugin/plugin.json", "bin/CodeCompass.Cli.exe", "bin/CodeCompass.Mcp.exe", "install-codecompass.ps1")
 $zf = [System.IO.Compression.ZipFile]::OpenRead($zip)
 try {
     $entries = $zf.Entries.FullName -replace '\\', '/'
