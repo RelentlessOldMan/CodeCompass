@@ -37,6 +37,22 @@ public class DiagnosticsTests
     }
 
     [Fact]
+    public void HealthChecks_FreshIndex_IsUpToDate_AndProvenanceIsNotAWarning()
+    {
+        using var repo = new TempRepo();
+        repo.Write("x.cs", "class A {}");
+        var (t, s, _) = RepositoryIndexer.Build(repo.Root);
+        t.Dispose(); s.Dispose();
+        IndexMetaFile.Write(repo.Root, 1);
+
+        var checks = RepoDiagnostics.HealthChecks(repo.Root);
+        // A just-built index is not behind the current indexer.
+        Assert.Contains(checks, c => c.Name == "indexer up to date" && c.Ok);
+        // Provenance is informational, never a warning (product version bumps every commit; not a fault).
+        Assert.Contains(checks, c => c.Name == "index provenance" && c.Ok);
+    }
+
+    [Fact]
     public void HealthChecks_FlagUnbuiltIndex()
     {
         using var repo = new TempRepo();

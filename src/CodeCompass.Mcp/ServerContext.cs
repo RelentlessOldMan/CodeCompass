@@ -600,6 +600,12 @@ public static class ServerContext
                 try { _text = text; _symbols = symbols; _state = IndexState.Ready; }
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info($"loaded existing index ({text.DocumentCount:N0} files)");
+                // Once per session: if this index was built by an indexer whose output logic is behind this
+                // binary, a rebuild would materially change results (the "quietly degrading old index" trap).
+                // Judged on content version, not product version, so this stays silent across normal upgrades.
+                if (IndexMetaFile.IndexerBehind(IndexMetaFile.Read(Root), out int builtCv, out int curCv))
+                    Log.For(Root).Warn($"index built by an older indexer (content v{builtCv} < v{curCv}); a rebuild " +
+                                       $"would change results (recall/symbols may be under-reported) - run: codecompass index \"{Root}\"");
                 PublishStatus(); // Ready
                 // Catch changes made while we weren't watching (a source-control sync, branch switch)
                 // by reconciling in the background - the gate/decision runs off-lock in MaybeReconcile.

@@ -11,6 +11,13 @@
     <PackageReference Include="System.IO.Hashing" Version="8.0.0" />
   </ItemGroup>
 
+  <!-- Let the test assembly read internal on-disk format-version constants (SegmentBuilder.Version,
+       SymbolSegmentBuilder.Version) so the content-version tripwire test can tie a format bump to a
+       required IndexerContentVersion bump. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="CodeCompass.Core.Tests" />
+  </ItemGroup>
+
   <!-- The TRACE32 PRACTICE (.cmm) grammar isn't in TreeSitter.DotNet, so ship the vendored, pre-built
        win-x64 DLL next to the package's grammar DLLs in every build/publish output. Rebuild it from the
        vendored MIT sources with grammars/build-t32.ps1 (needs MSVC). Missing/other-arch -> .cmm quietly

@@ -255,9 +255,21 @@ public static class RepoDiagnostics
             checks.Add(new("index loads cleanly", loads, detail));
 
             var meta = IndexMetaFile.ReadFromCacheDir(cacheDir);
-            bool current = meta is not null && meta.Version == BuildInfo.Version;
-            checks.Add(new("built by current version", current,
-                meta is null ? "no meta.json (older index)" : $"built by {meta.Version}, running {BuildInfo.Version}"));
+            // Product-version difference is NOT a fault: the version is git-derived and bumps every commit,
+            // so almost every upgrade leaves an index "built by an older version" while its CONTENT is
+            // byte-identical. Report it as info (Ok), never a warning - warning here is the cry-wolf trap.
+            checks.Add(new("index provenance", true,
+                meta is null ? "no meta.json (older index - predates version stamping)"
+                             : $"built by {meta.Version}, running {BuildInfo.Version}"));
+
+            // The ACTIONABLE staleness signal: was the index built by an indexer whose output logic is behind
+            // this binary (so a rebuild would materially change results)? Judged on the content version, which
+            // moves only when indexing output changes - so this stays silent across ordinary release upgrades.
+            bool behind = IndexMetaFile.IndexerBehind(meta, out int builtCv, out int curCv);
+            checks.Add(new("indexer up to date", !behind,
+                behind ? $"index built by an older indexer (content v{builtCv} < v{curCv}) - a rebuild would change " +
+                         $"results (recall/symbols may be under-reported). Run: codecompass index \"{root}\""
+                       : $"content v{curCv} - a rebuild would not change results"));
         }
 
         if (NetworkPath.IsNetwork(root))
