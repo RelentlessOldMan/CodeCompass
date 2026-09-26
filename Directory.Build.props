@@ -18,6 +18,13 @@
     <!-- We already put the short SHA into InformationalVersion ourselves; stop the SDK from also
          appending the full commit SHA (yields an ugly "1.0.52+short.full" double-SHA). -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+
+    <!-- Pin the full transitive dependency graph in a committed packages.lock.json per project. Without it,
+         floating (>=) transitive versions can drift on any restore with no code change and no diff - exactly
+         how a net10-only System.Text.Json silently replaced the net8-compatible one and broke the published
+         MCP server between releases. With lockfiles, every restore uses the locked versions and any real graph
+         change is a reviewable diff. The release gate restores in locked mode so drift is a hard failure. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <Target Name="CCStampVersion"

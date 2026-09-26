@@ -79,6 +79,19 @@ function Invoke-Cli([string[]]$CliArgs, [int]$TimeoutSec = 600) {
     return $res
 }
 
+# ---- Tier 0: dependency lock (drift guard) ------------------------------------------------------
+# Restore in LOCKED mode: fails if the resolved package graph no longer matches the committed
+# packages.lock.json. This is the guard that would have caught the silent transitive drift that broke
+# the MCP server (a floating System.Text.Json floated from a net8 to a net10 version between releases).
+# A legitimate dependency change must regenerate the lockfile (dotnet restore --force-evaluate) - which
+# shows up as a reviewable diff - before this passes.
+Section "dependency lock (restore --locked-mode)"
+dotnet restore --locked-mode --nologo
+Check "package graph matches packages.lock.json" ($LASTEXITCODE -eq 0)
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  Dependencies drifted from the lockfile. If intentional, run: dotnet restore --force-evaluate, then review + commit the packages.lock.json diff." -ForegroundColor Yellow
+}
+
 # ---- Tier 1: fast unit tests --------------------------------------------------------------------
 Section "unit tests (dotnet test)"
 dotnet test -c Release --nologo
