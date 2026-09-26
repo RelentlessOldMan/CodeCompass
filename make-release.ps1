@@ -82,6 +82,12 @@ if ($Publish) {
 & (Join-Path $root "build-plugin.ps1")
 if ($LASTEXITCODE -ne 0) { throw "build-plugin.ps1 failed" }
 
+# The `-r win-x64` publish rewrites each packages.lock.json to add win-x64 runtime-host packages. Our
+# committed lockfiles are deliberately RID-less (they pin our DEPENDENCY versions, which is the drift we
+# guard; the publish still uses those locked versions). Discard that RID churn so the release tree stays
+# clean and the committed lockfiles remain the single RID-less source of truth the gate checks.
+git checkout -- ':(glob)**/packages.lock.json' 2>$null
+
 # 1a) Smoke the PUBLISHED MCP server exe: do a real MCP stdio handshake and require it to list its tools.
 # This is the gap that let a broken self-contained server ship (1.0.140-1.0.145 crashed on startup because a
 # net8 build couldn't carry the MCP SDK's .NET 10 base libraries) - the -Big gate only exercises the CLI and

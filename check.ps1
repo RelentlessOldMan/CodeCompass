@@ -86,12 +86,15 @@ function Invoke-Cli([string[]]$CliArgs, [int]$TimeoutSec = 600) {
 # A legitimate dependency change must regenerate the lockfile (dotnet restore --force-evaluate) - which
 # shows up as a reviewable diff - before this passes.
 Section "dependency lock (restore --locked-mode)"
-# Restore with the SAME RID the plugin ships with (win-x64): the lockfiles include the win-x64 runtime
-# assets, so a RID-less restore here would spuriously "drift". This matches build-plugin's publish.
-dotnet restore -r win-x64 --locked-mode --nologo
+# Locked-mode restore fails if the resolved package graph no longer matches the committed
+# packages.lock.json - the guard for silent transitive drift (a floating System.Text.Json floated from a
+# net8 to a net10 version between releases and broke the server). The lockfiles are RID-less and pin our
+# DEPENDENCY versions, which is what we protect; the win-x64 PUBLISH additionally pulls runtime-host
+# packages (discarded post-publish in make-release) but still uses these locked dependency versions.
+dotnet restore --locked-mode --nologo
 Check "package graph matches packages.lock.json" ($LASTEXITCODE -eq 0)
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "  Dependencies drifted from the lockfile. If intentional, run: dotnet restore -r win-x64 --force-evaluate, then review + commit the packages.lock.json diff." -ForegroundColor Yellow
+    Write-Host "  Dependencies drifted from the lockfile. If intentional, run: dotnet restore --force-evaluate, then review + commit the packages.lock.json diff." -ForegroundColor Yellow
 }
 
 # ---- Tier 1: fast unit tests --------------------------------------------------------------------
