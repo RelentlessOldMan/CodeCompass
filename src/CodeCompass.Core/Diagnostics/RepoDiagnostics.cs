@@ -21,6 +21,14 @@ public static class RepoDiagnostics
 
     private static string Mb(long b) => $"{b / 1048576.0:N1} MB";
 
+    // An env-var name that hints its value is a secret, so the shareable report masks the value.
+    private static bool LooksSecret(string name)
+    {
+        foreach (var marker in new[] { "TOKEN", "SECRET", "KEY", "PASS", "PWD", "CRED" })
+            if (name.Contains(marker, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
     private static readonly HashSet<string> CppExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".c", ".cc", ".cpp", ".cxx", ".c++" };
 
@@ -78,7 +86,12 @@ public static class RepoDiagnostics
         foreach (System.Collections.DictionaryEntry e in Environment.GetEnvironmentVariables())
         {
             var k = e.Key?.ToString() ?? "";
-            if (k.StartsWith("CODECOMPASS_", StringComparison.OrdinalIgnoreCase)) { w.WriteLine($"    {k}={e.Value}"); anyEnv = true; }
+            if (!k.StartsWith("CODECOMPASS_", StringComparison.OrdinalIgnoreCase)) continue;
+            // The report bundle is meant to be shared. Print names always, but MASK the value of any var whose
+            // name hints at a secret (a blind prefix dump would ship a token pasted into a CODECOMPASS_*_TOKEN
+            // etc. straight into diagnostics.txt). Known knobs are numeric/path values and print verbatim.
+            w.WriteLine($"    {k}={(LooksSecret(k) ? "<redacted>" : e.Value)}");
+            anyEnv = true;
         }
         if (!anyEnv) w.WriteLine("    (none set)");
         w.WriteLine();

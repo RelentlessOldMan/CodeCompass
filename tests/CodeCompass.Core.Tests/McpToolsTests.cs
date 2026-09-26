@@ -192,6 +192,35 @@ public class McpToolsTests
     }
 
     [Fact]
+    public void Tools_EmptyOrWhitespaceInput_ReturnGuidance_NotCrash()
+    {
+        using var repo = NewIndexedRepo();
+        // An agent can pass an empty/blank argument; every tool must return a short "provide ..." hint
+        // rather than throw or run a degenerate query.
+        Assert.Contains("non-empty", CodeCompassTools.SearchCode(""));
+        Assert.Contains("Provide", CodeCompassTools.FindDefinition("   "));
+        Assert.Contains("Provide", CodeCompassTools.SearchSymbols(""));
+        Assert.Contains("Provide", CodeCompassTools.FindReferences("  "));
+        Assert.Contains("Provide", CodeCompassTools.FindCallees(""));
+    }
+
+    [Fact]
+    public void Tools_NonPositiveMaxResults_AreClamped_NotCrash()
+    {
+        using var repo = NewIndexedRepo();
+        // A 0 / negative maxResults (agent-supplied) must be clamped to a sane floor (1), not throw or
+        // silently return "nothing" or a "provide ..." guidance string. "Run" really exists, so a clamped
+        // query still returns a hit (and, since more exist, flags truncation rather than dropping them).
+        var zero = CodeCompassTools.SearchCode("Run", maxResults: 0);
+        Assert.Contains("Run", zero);
+        Assert.Contains("MORE EXIST", zero);            // clamped to 1 of several -> truncation signalled
+        Assert.DoesNotContain("Provide", zero);
+        Assert.Contains("Run", CodeCompassTools.SearchCode("Run", maxResults: -5));
+        Assert.Contains("Run", CodeCompassTools.FindReferences("Run", maxResults: -1));
+        Assert.Contains("Widget", CodeCompassTools.SearchSymbols("Widget", maxResults: 0));
+    }
+
+    [Fact]
     public void FindDefinition_ReturnsSymbolLocation()
     {
         using var repo = NewIndexedRepo();

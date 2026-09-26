@@ -862,10 +862,21 @@ public static class ServerContext
             if (reconcile)
             {
                 Log.For(Root).Info("draining a full-reconcile request captured during build");
+                // Divert the watcher to the pending queue during this off-lock Build, exactly as
+                // BackgroundReconcile does - otherwise an OnChanges arriving mid-Build sees _state==Ready &&
+                // !_rebuilding and runs a targeted ApplyIncremental against the same cache dir the Build is
+                // rewriting (racing writers -> corrupt cache / lost edit). Anything captured is drained next round.
+                Rw.EnterWriteLock();
+                try { _rebuilding = true; } finally { Rw.ExitWriteLock(); }
                 BuildGate.Wait(); // serialize with any other rebuild
                 try { var b = RepositoryIndexer.Build(Root); Swap(b.Text, b.Symbols); }
                 catch (Exception ex) { Log.For(Root).Error("drained reconcile failed", ex); return; }
-                finally { BuildGate.Release(); }
+                finally
+                {
+                    BuildGate.Release();
+                    Rw.EnterWriteLock();
+                    try { _rebuilding = false; } finally { Rw.ExitWriteLock(); }
+                }
             }
         }
     }

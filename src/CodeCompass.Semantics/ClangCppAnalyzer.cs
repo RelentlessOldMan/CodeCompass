@@ -249,13 +249,27 @@ public sealed class ClangCppAnalyzer : IDisposable
             out CXTranslationUnit tu);
         if (error != CXErrorCode.CXError_Success) return; // TU couldn't be produced at all - not counted as parsed
 
+        // From here the raw native `tu` (the single largest allocation in this system - up to ~1 GB) is owned
+        // by nobody until TranslationUnit.GetOrCreate wraps it. If the wrap (or CollectUnresolvedIncludes)
+        // throws - e.g. GetOrCreate's allocation under memory pressure, exactly the giant-TU case - the raw
+        // handle would leak. Track whether the managed wrapper took ownership: dispose the wrapper if it did
+        // (which disposes the handle), else dispose the raw handle directly. Never both -> no double-free.
         model.Parsed++;
-        CollectUnresolvedIncludes(tu, model); // names of #includes clang couldn't find (missing from the tree)
-
-        TranslationUnit translationUnit;
-        lock (_clangGate) { translationUnit = TranslationUnit.GetOrCreate(tu); }
-        try { Walk(translationUnit.TranslationUnitDecl, model); }
-        finally { lock (_clangGate) { translationUnit.Dispose(); } }
+        TranslationUnit? translationUnit = null;
+        try
+        {
+            CollectUnresolvedIncludes(tu, model); // names of #includes clang couldn't find (missing from the tree)
+            lock (_clangGate) { translationUnit = TranslationUnit.GetOrCreate(tu); }
+            Walk(translationUnit.TranslationUnitDecl, model);
+        }
+        finally
+        {
+            lock (_clangGate)
+            {
+                if (translationUnit is not null) translationUnit.Dispose(); // disposes the underlying handle
+                else { try { tu.Dispose(); } catch { } }                    // wrap never happened - free the raw TU
+            }
+        }
     }
 
     // Scan this TU's diagnostics for "'X.h' file not found" and record X - the headers absent from the tree,

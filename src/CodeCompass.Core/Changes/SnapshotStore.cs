@@ -27,7 +27,11 @@ public static class SnapshotStore
         if (r.ReadUInt32() != Magic) throw new InvalidDataException("not a CodeCompass snapshot file");
 
         int count = r.ReadInt32();
-        var result = new Dictionary<string, FileState>(count, StringComparer.Ordinal);
+        if (count < 0) throw new InvalidDataException($"corrupt snapshot: negative entry count ({count})");
+        // Don't trust `count` as a pre-size: a corrupt header could demand a multi-GB allocation before a
+        // single entry is read. Cap the initial capacity; the dictionary still grows to hold real entries,
+        // and a count that overruns the actual data throws EndOfStream (caught by the migration caller).
+        var result = new Dictionary<string, FileState>(Math.Min(count, 4096), StringComparer.Ordinal);
         for (int i = 0; i < count; i++)
         {
             var path = r.ReadString();

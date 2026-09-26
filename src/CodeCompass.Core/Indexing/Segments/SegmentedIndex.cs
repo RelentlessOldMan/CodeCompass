@@ -288,8 +288,11 @@ public sealed class SegmentedIndex : IDisposable
         return Cap(results, maxResults);
     }
 
-    private static List<SearchMatch> Cap(List<SearchMatch> results, int maxResults) =>
-        results.Count > maxResults ? results.GetRange(0, maxResults) : results;
+    private static List<SearchMatch> Cap(List<SearchMatch> results, int maxResults)
+    {
+        if (maxResults < 0) maxResults = 0; // defensive: a negative cap must never reach GetRange(0, negative)
+        return results.Count > maxResults ? results.GetRange(0, maxResults) : results;
+    }
 
     // Verify ONE candidate file: confirm and locate the query in it, returning that file's matches
     // (up to maxResults). Reads are network-aware and avoid a per-candidate stat: a file is known to be
@@ -505,11 +508,15 @@ public sealed class SegmentedIndex : IDisposable
             using var fs = File.OpenRead(tombPath);
             using var r = new BinaryReader(fs);
             int count = r.ReadInt32();
+            if (count < 0) throw new InvalidDataException($"corrupt tombstone file: negative segment count ({count})");
             for (int i = 0; i < count; i++)
             {
                 int seg = r.ReadInt32();
                 int n = r.ReadInt32();
-                var set = new HashSet<int>(n);
+                if (n < 0) throw new InvalidDataException($"corrupt tombstone file: negative entry count ({n})");
+                // Cap the pre-size: an untrusted `n` must not force a huge allocation before any id is read.
+                // The set still grows to fit; an `n` that overruns the file throws EndOfStream.
+                var set = new HashSet<int>(Math.Min(n, 4096));
                 for (int j = 0; j < n; j++) set.Add(r.ReadInt32());
                 _tombstones[seg] = set;
             }

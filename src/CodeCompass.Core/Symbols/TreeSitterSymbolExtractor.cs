@@ -98,7 +98,11 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
         if (tree is null) return Array.Empty<Symbol>();
 
         var results = new List<Symbol>();
-        foreach (var capture in query.Execute(tree.RootNode).Captures)
+        // Query.Execute allocates a native QueryCursor (ts_query_cursor_new) per call; it is IDisposable and
+        // must be released, or every parsed file leaks one native cursor onto the finalizer/native heap - a
+        // steady leak on the indexing hot path (once per symbol-bearing file). Dispose it deterministically.
+        using var cursor = query.Execute(tree.RootNode);
+        foreach (var capture in cursor.Captures)
         {
             var node = capture.Node;
             int startRow = node.StartPosition.Row + 1;

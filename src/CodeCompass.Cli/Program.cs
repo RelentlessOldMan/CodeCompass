@@ -831,8 +831,20 @@ static int CmdUpdate(string[] args)
     var scanSw = Stopwatch.StartNew();
     void OnScan(int n) { if (scanSw.ElapsedMilliseconds >= 500) { Console.Error.Write($"\rscanning for changes... {n:N0} files   "); scanSw.Restart(); } }
 
-    var (idx, _, s) = RepositoryIndexer.Update(root, OnScan);
-    idx.Dispose();
+    UpdateStats s;
+    try
+    {
+        var (idx, _, st) = RepositoryIndexer.Update(root, OnScan);
+        idx.Dispose();
+        s = st;
+    }
+    catch (Exception ex)
+    {
+        Log.For(root).Error("cli update failed", ex);
+        Console.Error.Write("\r" + new string(' ', 40) + "\r");
+        Console.Error.WriteLine($"update failed: {ex.Message}");
+        return 1;
+    }
     Console.Error.Write("\r" + new string(' ', 40) + "\r");
     if (s.FullRebuild)
     {

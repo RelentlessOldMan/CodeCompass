@@ -30,6 +30,8 @@ public static class CodeCompassTools
         [Description("Whether the match is case-sensitive (default true). Set false to match any case.")] bool caseSensitive = true)
         => ServerContext.QueryAll(handles =>
     {
+        if (string.IsNullOrEmpty(query)) return "Provide a non-empty search string.";
+        maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
         // Federate across the primary index + every linked root. Fetch one extra per index to detect
         // truncation across the union; primary hits stay repo-relative, linked hits show absolute paths.
         var hits = new List<(ServerContext.IndexHandle H, SearchMatch M)>();
@@ -117,6 +119,7 @@ public static class CodeCompassTools
         [Description("Exact symbol name (case-sensitive).")] string name)
         => ServerContext.QueryAll(handles =>
     {
+        if (string.IsNullOrWhiteSpace(name)) return "Provide a symbol name.";
         // Federate go-to-definition across the primary + linked roots.
         var matches = new List<(ServerContext.IndexHandle H, Symbol S)>();
         foreach (var h in handles)
@@ -191,6 +194,8 @@ public static class CodeCompassTools
         [Description("Maximum number of results.")] int maxResults = 100)
         => ServerContext.QueryAll(handles =>
     {
+        if (string.IsNullOrWhiteSpace(name)) return "Provide a symbol/identifier to find references to.";
+        maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
         // Collect one past the cap across all sources (C# semantic, C/C++ semantic, then lexical in
         // other files) so truncation is detected by the same overflow probe the other tools use -
         // exact, not a fuzzy threshold. Kind tags let the footer report the shown breakdown. The
@@ -286,6 +291,8 @@ public static class CodeCompassTools
         [Description("Maximum number of callees.")] int maxResults = 50)
         => ServerContext.QueryAll(handles =>
     {
+        if (string.IsNullOrWhiteSpace(name)) return "Provide a C# method name.";
+        maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
         // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
         // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
         var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1);
@@ -313,6 +320,8 @@ public static class CodeCompassTools
         [Description("Maximum number of results.")] int maxResults = 50)
         => ServerContext.QueryAll(handles =>
     {
+        if (string.IsNullOrWhiteSpace(query)) return "Provide a symbol-name substring to search for.";
+        maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
         var matches = new List<(ServerContext.IndexHandle H, Symbol S)>();
         foreach (var h in handles)
         {

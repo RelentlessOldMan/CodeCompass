@@ -309,4 +309,46 @@ public class DiskSnapshotTests
             Directory.Delete(dir, true);
         }
     }
+
+    [Fact]
+    public void LegacySnapshotStore_RoundTrips()
+    {
+        var model = new Dictionary<string, FileState>(StringComparer.Ordinal) { ["a.cs"] = St(1), ["b/c.py"] = St(2) };
+        using var ms = new MemoryStream();
+        SnapshotStore.Save(ms, model);
+        ms.Position = 0;
+        var loaded = SnapshotStore.Load(ms);
+        Assert.Equal(model.Count, loaded.Count);
+        foreach (var (k, v) in model) { Assert.True(loaded.TryGetValue(k, out var g)); Assert.Equal(v, g); }
+    }
+
+    [Fact]
+    public void LegacySnapshotStore_CorruptCount_FailsFast_NoHugeAllocation()
+    {
+        // A hostile/corrupt header must not drive a giant pre-allocation or an unchecked negative size.
+        // Negative count -> rejected outright.
+        using (var ms = new MemoryStream())
+        {
+            using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8, leaveOpen: true))
+            {
+                w.Write((uint)0x50414E53); // "SNAP" magic
+                w.Write(-1);               // corrupt entry count
+            }
+            ms.Position = 0;
+            Assert.Throws<InvalidDataException>(() => SnapshotStore.Load(ms));
+        }
+
+        // Absurd positive count with no entries behind it -> must throw (EOF) promptly, not attempt to
+        // pre-size a 2-billion-slot dictionary (the pre-size is clamped; the dictionary grows only to fit).
+        using (var ms = new MemoryStream())
+        {
+            using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8, leaveOpen: true))
+            {
+                w.Write((uint)0x50414E53);
+                w.Write(int.MaxValue);
+            }
+            ms.Position = 0;
+            Assert.ThrowsAny<Exception>(() => SnapshotStore.Load(ms));
+        }
+    }
 }

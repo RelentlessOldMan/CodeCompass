@@ -9,22 +9,39 @@ namespace CodeCompass.Core.Storage;
 /// </summary>
 public static class AtomicFile
 {
-    /// <summary>Write via a temp file + atomic replace, so a crash never leaves a truncated file.</summary>
+    /// <summary>Write via a temp file + atomic replace, so a crash never leaves a truncated file. The temp is
+    /// flushed to disk before the rename (so the rename can't be persisted ahead of the contents on power
+    /// loss) and is deleted if the write or rename fails (so a full disk / still-locked target doesn't leave
+    /// an orphan <c>.tmp</c>).</summary>
     public static void Write(string path, Action<Stream> writeBody)
     {
         var tmp = path + ".tmp";
-        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
-            writeBody(fs);
-        File.Move(tmp, path, overwrite: true);
+        try
+        {
+            using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                writeBody(fs);
+                fs.Flush(flushToDisk: true);
+            }
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch { TryDelete(tmp); throw; }
     }
 
-    /// <summary>Atomic write for text content (manifests).</summary>
+    /// <summary>Atomic write for text content (manifests). Same crash/leak guarantees as <see cref="Write"/>.</summary>
     public static void WriteText(string path, Action<TextWriter> writeBody)
     {
         var tmp = path + ".tmp";
-        using (var w = new StreamWriter(tmp, append: false))
-            writeBody(w);
-        File.Move(tmp, path, overwrite: true);
+        try
+        {
+            using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                using (var w = new StreamWriter(fs, leaveOpen: true)) writeBody(w);
+                fs.Flush(flushToDisk: true);
+            }
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch { TryDelete(tmp); throw; }
     }
 
     /// <summary>Delete if present, tolerating a file that's still memory-mapped or already gone.</summary>

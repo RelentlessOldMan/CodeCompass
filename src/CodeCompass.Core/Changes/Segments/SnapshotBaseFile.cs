@@ -122,12 +122,18 @@ public sealed class SnapshotBaseReader : IDisposable
 
     public string GetPath(int i)
     {
+        if ((uint)i >= (uint)Count) throw new InvalidDataException("snapshot base: path index out of range");
         long o0 = _view.ReadInt64(_pathOffsetsOff + (long)i * 8);
         long o1 = _view.ReadInt64(_pathOffsetsOff + (long)(i + 1) * 8);
-        int len = (int)(o1 - o0);
+        long len = o1 - o0;
         if (len == 0) return "";
+        // The two offsets are read from the (untrusted) path-offsets column, which the open-time header
+        // check does not cover: reject a non-monotonic or out-of-blob span rather than let a negative/
+        // truncated length hit new byte[]/ReadArray. The path blob is [_pathBlobOff, _sizesOff).
+        if (o0 < 0 || len < 0 || len > int.MaxValue || _pathBlobOff + o1 > _sizesOff)
+            throw new InvalidDataException("corrupt CodeCompass snapshot base (bad path offsets)");
         var buf = new byte[len];
-        _view.ReadArray(_pathBlobOff + o0, buf, 0, len);
+        _view.ReadArray(_pathBlobOff + o0, buf, 0, (int)len);
         return Encoding.UTF8.GetString(buf);
     }
 

@@ -62,4 +62,39 @@ public class SegmentTests
         }
         finally { File.Delete(path); }
     }
+
+    [Fact]
+    public void Varint_RoundTrips()
+    {
+        foreach (uint v in new uint[] { 0, 1, 127, 128, 300, 16384, uint.MaxValue })
+        {
+            using var ms = new MemoryStream();
+            Varint.Write(ms, v);
+            int offset = 0;
+            Assert.Equal(v, Varint.Read(ms.ToArray(), ref offset));
+            Assert.Equal((int)ms.Length, offset); // consumed exactly the bytes written
+        }
+    }
+
+    [Fact]
+    public void Varint_Read_Truncated_ThrowsInvalidData_NotOOB()
+    {
+        // A continuation-bit byte with no successor (truncated posting blob): must be a caught
+        // InvalidDataException, never an IndexOutOfRangeException that could crash a query.
+        int offset = 0;
+        Assert.Throws<InvalidDataException>(() => Varint.Read(new byte[] { 0x80 }, ref offset));
+
+        offset = 0;
+        Assert.Throws<InvalidDataException>(() => Varint.Read(System.Array.Empty<byte>(), ref offset));
+    }
+
+    [Fact]
+    public void Varint_Read_NonTerminating_ThrowsInvalidData_NotOverflow()
+    {
+        // Six continuation bytes (>5) is not a valid 32-bit varint: reject rather than silently
+        // shift-overflow into a wrong value.
+        int offset = 0;
+        Assert.Throws<InvalidDataException>(
+            () => Varint.Read(new byte[] { 0x80, 0x80, 0x80, 0x80, 0x80, 0x80 }, ref offset));
+    }
 }

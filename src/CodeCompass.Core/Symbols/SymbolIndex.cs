@@ -10,7 +10,7 @@ namespace CodeCompass.Core.Symbols;
 public sealed class SymbolIndex
 {
     private const uint Magic = 0x584D5343; // "CSMX"
-    private const int Version = 2;
+    private const int Version = 3; // v3 persists EndLine (v2 dropped it, losing definition line-ranges on reload)
 
     private readonly List<Symbol> _symbols = new();
     private readonly Dictionary<string, List<int>> _byName = new(StringComparer.Ordinal);
@@ -117,6 +117,7 @@ public sealed class SymbolIndex
             w.Write(pathIds[s.RelativePath]);
             w.Write(s.Line);
             w.Write(s.Column);
+            w.Write(s.EndLine);
         }
 
         w.Write(_removed.Count);
@@ -143,7 +144,8 @@ public sealed class SymbolIndex
             var path = paths[r.ReadInt32()];
             var line = r.ReadInt32();
             var col = r.ReadInt32();
-            idx.Add(new Symbol(name, kind, path, line, col));
+            var endLine = r.ReadInt32();
+            idx.Add(new Symbol(name, kind, path, line, col) { EndLine = endLine });
         }
 
         int removedCount = r.ReadInt32();

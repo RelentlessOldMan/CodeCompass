@@ -94,7 +94,11 @@ public static class PositionalSidecar
             bloomK = r.ReadInt32();
             bomLen = r.ReadInt32();
             count = r.ReadInt32();
-            if (count < 0 || bloomBytes <= 0 || bloomBytes > (16 << 20)) return false;
+            // Validate every trusted header field before use: a corrupt bloomK would make MayContain loop
+            // billions of times (effective hang), and a bad bomLen would make GetString throw. The sidecar
+            // is a pure optimization, so on any bad header just bail to the whole-file fallback.
+            if (count < 0 || bloomBytes <= 0 || bloomBytes > (16 << 20) || bloomK < 1 || bloomK > 64 || bomLen < 0 || bomLen > 4)
+                return false;
             startLine = new int[count];
             startByte = new long[count];
             endByte = new long[count];

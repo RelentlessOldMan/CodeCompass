@@ -39,14 +39,25 @@ public sealed class SegmentReader : IDisposable
         if (DocCount < 0 || TermCount < 0 || _termKeysOff < 0 || _termInfoOff < _termKeysOff ||
             _postingsOff < _termInfoOff || _docTableOff < _postingsOff || _docTableOff > cap)
             throw new InvalidDataException("corrupt CodeCompass segment (bad section offsets)");
+        // Each fixed-width region must be large enough for its declared count, else a later read of a term/doc
+        // index would run into the next section or off the end. (long math: counts can't overflow the offsets.)
+        if (_termInfoOff - _termKeysOff < (long)TermCount * 8 ||     // term keys: 8 bytes each
+            _postingsOff - _termInfoOff < (long)TermCount * 12 ||    // term info: (rel:8, len:4) each
+            cap - _docTableOff < (long)(DocCount + 1) * 4)           // doc offset table: (DocCount+1) ints
+            throw new InvalidDataException("corrupt CodeCompass segment (section too small for its counts)");
     }
 
     /// <summary>The i-th trigram key (keys are stored sorted). For enumerating a segment during a merge.</summary>
-    public long GetTermKey(int i) => _view.ReadInt64(_termKeysOff + (long)i * 8);
+    public long GetTermKey(int i)
+    {
+        if ((uint)i >= (uint)TermCount) throw new InvalidDataException("segment term index out of range");
+        return _view.ReadInt64(_termKeysOff + (long)i * 8);
+    }
 
     /// <summary>Postings (local docIds) for the i-th term, by index (no binary search).</summary>
     public int[] GetPostingsAt(int i)
     {
+        if ((uint)i >= (uint)TermCount) throw new InvalidDataException("segment term index out of range");
         long rel = _view.ReadInt64(_termInfoOff + (long)i * 12);
         int len = _view.ReadInt32(_termInfoOff + (long)i * 12 + 8);
         return DecodePostings(_postingsOff + rel, len);
@@ -73,6 +84,11 @@ public sealed class SegmentReader : IDisposable
 
     private int[] DecodePostings(long offset, int len)
     {
+        // Trust nothing from the file: the postings blob must lie wholly within the postings region
+        // [_postingsOff, _docTableOff). A corrupt (rel,len) would otherwise huge-alloc, over-read, or
+        // (negative len) throw an opaque OverflowException; convert it to a clean corruption signal.
+        if (len < 0 || offset < _postingsOff || offset + len > _docTableOff)
+            throw new InvalidDataException("corrupt CodeCompass segment (postings out of range)");
         var bytes = new byte[len];
         _view.ReadArray(offset, bytes, 0, len);
 
@@ -89,9 +105,14 @@ public sealed class SegmentReader : IDisposable
 
     public string GetPath(int localDocId)
     {
+        if ((uint)localDocId >= (uint)DocCount) throw new InvalidDataException("segment doc id out of range");
         int o0 = _view.ReadInt32(_docTableOff + (long)localDocId * 4);
         int o1 = _view.ReadInt32(_docTableOff + (long)(localDocId + 1) * 4);
         long blobStart = _docTableOff + (long)(DocCount + 1) * 4;
+        // Guard corrupt offsets: monotonic (0 <= o0 <= o1) and the slice within the mapped file, so a bad
+        // entry can't produce a negative length (throwing OverflowException) or an out-of-bounds read.
+        if (o0 < 0 || o1 < o0 || blobStart + o1 > _view.Capacity)
+            throw new InvalidDataException("corrupt CodeCompass segment (path offsets out of range)");
         int len = o1 - o0;
         if (len == 0) return "";
         var buf = new byte[len];
