@@ -215,7 +215,7 @@ public static class RepositoryIndexer
                     var content = TextDecoder.FromBytes(bytes);
                     var hash = ContentHasher.Hash(bytes);
 
-                    var tg = TrigramIndex.ComputeTrigrams(content);
+                    var tg = TrigramIndex.ComputeTrigrams(content, worker.TrigramScratch);
                     worker.Text.AddDocument(file.RelativePath, tg);
                     worker.TrigramPostings += tg.Length;
 
@@ -414,6 +414,7 @@ public static class RepositoryIndexer
         public SymbolSegmentBuilder Symbols = new();
         public Dictionary<string, FileState> Snapshot { get; } = new(StringComparer.Ordinal);
         public TreeSitterSymbolExtractor Extractor { get; } = new();
+        public readonly HashSet<long> TrigramScratch = new(); // reused per file (this worker's thread only) to avoid a per-file HashSet alloc
         public long Bytes;
         public long TrigramPostings; // sum of per-doc distinct-trigram counts (deterministic total)
         public int SymbolSkipped;    // symbol-language files indexed for text but with NO symbols extracted

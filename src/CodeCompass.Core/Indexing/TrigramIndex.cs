@@ -54,14 +54,23 @@ public sealed class TrigramIndex
     /// (<see cref="AddDocument(string, long[])"/>) is then serialized by the caller.
     /// </summary>
     public static long[] ComputeTrigrams(string text)
+        => text.Length < 3 ? Array.Empty<long>() : ComputeTrigrams(text, new HashSet<long>());
+
+    /// <summary>
+    /// As <see cref="ComputeTrigrams(string)"/>, but reuses a caller-owned <paramref name="scratch"/> set
+    /// (cleared on entry) to avoid allocating a fresh <see cref="HashSet{T}"/> per file - the single most
+    /// executed allocation on the parallel build hot path. Each worker thread MUST pass its own set (the
+    /// set is not thread-safe); a fresh compact array is still returned for storage.
+    /// </summary>
+    public static long[] ComputeTrigrams(string text, HashSet<long> scratch)
     {
         if (text.Length < 3) return Array.Empty<long>();
-        var seen = new HashSet<long>();
+        scratch.Clear();
         for (int i = 0; i + 3 <= text.Length; i++)
-            seen.Add(TriKey(text[i], text[i + 1], text[i + 2]));
+            scratch.Add(TriKey(text[i], text[i + 1], text[i + 2]));
 
-        var result = new long[seen.Count];
-        seen.CopyTo(result);
+        var result = new long[scratch.Count];
+        scratch.CopyTo(result);
         return result;
     }
 

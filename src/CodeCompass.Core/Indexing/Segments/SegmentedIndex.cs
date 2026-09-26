@@ -26,6 +26,7 @@ public sealed class SegmentedIndex : IDisposable
     private const string SegmentPattern = "seg-*.ccseg";
 
     private readonly string _root;
+    private readonly bool _rootIsNetwork; // fixed for the life of the index; computed once, not per query
     private readonly string _dir;
     private readonly long _budget;
     private readonly List<SegmentReader> _segments = new();
@@ -42,6 +43,7 @@ public sealed class SegmentedIndex : IDisposable
     private SegmentedIndex(string root, string dir, long budget)
     {
         _root = Path.GetFullPath(root);
+        _rootIsNetwork = NetworkPath.IsNetwork(_root);
         _dir = dir;
         _budget = budget;
         System.IO.Directory.CreateDirectory(dir);
@@ -171,7 +173,7 @@ public sealed class SegmentedIndex : IDisposable
         // round-trip latency; reading candidates one at a time stacks that latency linearly. Overlap it
         // with a bounded-parallel verify (SMB2 credits let many reads share one connection). Locally,
         // reads are fast and the serial early-exit is already optimal, so keep the simple path.
-        return NetworkPath.IsNetwork(_root)
+        return _rootIsNetwork
             ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults, trace)
             : VerifySerial(candidates, query, comparison, caseSensitive, maxResults, trace);
     }
@@ -377,7 +379,10 @@ public sealed class SegmentedIndex : IDisposable
         FlushPending();
         SaveManifest();
         SaveTombstones();
-        CleanupOrphans();
+        // No CleanupOrphans() here: Flush only APPENDS a new monotonically-numbered segment, so it never
+        // orphans a file. Orphans are created only by Compact (merges drop old segments) and full rebuild,
+        // which each clean up themselves; enumerating the whole cache dir on every incremental save was
+        // pure O(files-in-cache) I/O per edit in a long watch session.
     }
 
     /// <summary>

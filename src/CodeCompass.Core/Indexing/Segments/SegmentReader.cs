@@ -91,16 +91,20 @@ public sealed class SegmentReader : IDisposable
             throw new InvalidDataException("corrupt CodeCompass segment (postings out of range)");
         var bytes = new byte[len];
         _view.ReadArray(offset, bytes, 0, len);
-
-        var result = new List<int>();
-        int pos = 0, prev = 0;
         var span = (ReadOnlySpan<byte>)bytes;
-        while (pos < len)
-        {
-            prev += (int)Varint.Read(span, ref pos);
-            result.Add(prev);
-        }
-        return result.ToArray();
+
+        // Count varints first, then fill an exact-size array. Avoids a growing List<int> (repeated
+        // reallocation as a long posting list grows) plus its ToArray() copy - two allocations become one,
+        // with no copy. This runs once per query-trigram-group per segment, so it is squarely on the query
+        // hot path; the two passes are over a small in-memory buffer (cache-resident), not the mmap.
+        int count = 0, pos = 0;
+        while (pos < len) { Varint.Read(span, ref pos); count++; }
+
+        var result = new int[count];
+        pos = 0;
+        int prev = 0;
+        for (int i = 0; i < count; i++) { prev += (int)Varint.Read(span, ref pos); result[i] = prev; }
+        return result;
     }
 
     public string GetPath(int localDocId)

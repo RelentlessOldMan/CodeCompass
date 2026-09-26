@@ -142,7 +142,9 @@ public sealed class SegmentedSymbolIndex : IDisposable
         FlushPending();
         SaveManifest();
         SaveTombstones();
-        CleanupOrphans();
+        // No CleanupOrphans() here (see SegmentedIndex.Flush): Flush only appends a new numbered segment and
+        // never orphans a file; orphan cleanup happens in Compact and full rebuild, which are the only paths
+        // that drop segments. Avoids an O(files-in-cache) directory scan on every incremental save.
     }
 
     /// <summary>

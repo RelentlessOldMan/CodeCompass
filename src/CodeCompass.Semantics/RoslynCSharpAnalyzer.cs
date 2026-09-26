@@ -204,7 +204,16 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         }
     }
 
-    private static IEnumerable<MetadataReference> FrameworkReferences()
+    // The framework reference set (the running runtime's ~150 TPA assemblies) never changes for the life of
+    // the process, but reading each one's metadata via CreateFromFile is not free. A live-watched C# repo
+    // disposes+rebuilds this analyzer on every incremental edit, so building the set per rebuild re-read the
+    // whole framework on every keystroke-save. Build it ONCE, process-wide: PortableExecutableReference is
+    // immutable and safe to share across compilations/workspaces.
+    private static readonly Lazy<IReadOnlyList<MetadataReference>> CachedFrameworkRefs = new(BuildFrameworkReferences);
+
+    private static IReadOnlyList<MetadataReference> FrameworkReferences() => CachedFrameworkRefs.Value;
+
+    private static IReadOnlyList<MetadataReference> BuildFrameworkReferences()
     {
         // Reference the whole running framework so binding is as accurate as possible.
         var tpa = AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") as string;
