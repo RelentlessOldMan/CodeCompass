@@ -279,9 +279,24 @@ public static class RepoDiagnostics
         // database. Without one it falls back to best-effort flags and may under-resolve (or resolve
         // nothing), so a repo that has C/C++ sources but no compile_commands.json gets a warning here -
         // otherwise a later "0 C/C++ semantic" reads as "no references" rather than "couldn't run."
-        // Single walk of the tree: collects TU count, missing-include stats, and whether any C/C++ exists.
-        var incScan = ScanUnresolvedIncludes(root);
-        bool hasCpp = incScan.TusScanned > 0;
+        // The unresolved-#include scan READS every C/C++ source; over a network share that's one round-trip
+        // per file (~3 min on a 90 GB tree), so skip it there and only detect C/C++ presence cheaply
+        // (metadata-only, early-exit walk). Locally, do the full scan (one walk, TU count + missing headers).
+        bool onNetwork = NetworkPath.IsNetwork(root);
+        IncludeScan incScan = default;
+        bool includeScanRan = false;
+        bool hasCpp;
+        if (onNetwork)
+        {
+            try { hasCpp = new FileWalker(new IgnoreRules()).Walk(root).Any(f => CppExtensions.Contains(Path.GetExtension(f.RelativePath))); }
+            catch { hasCpp = false; }
+        }
+        else
+        {
+            incScan = ScanUnresolvedIncludes(root);
+            includeScanRan = true;
+            hasCpp = incScan.TusScanned > 0;
+        }
 
         if (HasCompileDb(root))
         {
@@ -298,7 +313,14 @@ public static class RepoDiagnostics
 
         // Unresolvable #includes: a TU that can't find a header often fails to parse, so its references go
         // unresolved. Surface this proactively (find_references also discloses it per-query at lookup time).
-        if (hasCpp)
+        // Over a network share the content scan is skipped (too many round-trips) - say so, don't warn.
+        if (hasCpp && !includeScanRan)
+        {
+            checks.Add(new("C/C++ includes resolvable", true,
+                "skipped over a network path (reads every C/C++ source). find_references still discloses " +
+                "unresolved includes per query; for the full tree scan, run doctor against a local copy."));
+        }
+        else if (hasCpp)
         {
             bool ok = incScan.TusWithUnresolved == 0;
             string detail;

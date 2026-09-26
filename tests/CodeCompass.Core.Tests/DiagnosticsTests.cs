@@ -122,6 +122,23 @@ public class DiagnosticsTests
     }
 
     [Fact]
+    public void HealthChecks_SkipsIncludeScan_OverNetworkPath()
+    {
+        using var repo = new TempRepo();
+        repo.Write("dev.c", "#include \"VENDOR_missing.h\"\nint dev(void){return 0;}");
+        var old = System.Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        try
+        {
+            System.Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1"); // fake a share
+            var checks = RepoDiagnostics.HealthChecks(repo.Root);
+            var scan = checks.Single(c => c.Name == "C/C++ includes resolvable");
+            Assert.True(scan.Ok, scan.Detail);                       // not a warning over the wire
+            Assert.Contains("skipped over a network path", scan.Detail);
+        }
+        finally { System.Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", old); }
+    }
+
+    [Fact]
     public void HealthChecks_StdAndTreeIncludes_DoNotFalseFlag()
     {
         using var repo = new TempRepo();
