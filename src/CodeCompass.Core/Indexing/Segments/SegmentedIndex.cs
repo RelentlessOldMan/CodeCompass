@@ -142,7 +142,14 @@ public sealed class SegmentedIndex : IDisposable
         _pathToDoc.Remove(relPath);
     }
 
-    public IReadOnlyList<SearchMatch> Search(string query, int maxResults = 200, bool caseSensitive = true)
+    /// <summary>Per-candidate verify accounting for the opt-in search trace: which files the trigram step
+    /// admitted, whether each had a block sidecar, how many bytes the verify actually read, and how many hits
+    /// it contributed. Lets an operator see WHERE a query's I/O goes (sidecar block-selective vs a whole-file
+    /// read of a no-sidecar large file) instead of guessing. Populated only when a trace list is passed.</summary>
+    public readonly record struct CandidateTrace(string Path, bool HasSidecar, long BytesRead, int Hits);
+
+    public IReadOnlyList<SearchMatch> Search(string query, int maxResults = 200, bool caseSensitive = true,
+                                             List<CandidateTrace>? trace = null)
     {
         if (string.IsNullOrEmpty(query)) return new List<SearchMatch>();
         if (_pending is { DocCount: > 0 }) FlushPending();
@@ -165,8 +172,8 @@ public sealed class SegmentedIndex : IDisposable
         // with a bounded-parallel verify (SMB2 credits let many reads share one connection). Locally,
         // reads are fast and the serial early-exit is already optimal, so keep the simple path.
         return NetworkPath.IsNetwork(_root)
-            ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults)
-            : VerifySerial(candidates, query, comparison, caseSensitive, maxResults);
+            ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults, trace)
+            : VerifySerial(candidates, query, comparison, caseSensitive, maxResults, trace);
     }
 
     /// <summary>
@@ -243,12 +250,12 @@ public sealed class SegmentedIndex : IDisposable
     }
 
     // Serial verify (local repos): read candidates in order, stopping the instant we have enough.
-    private List<SearchMatch> VerifySerial(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults)
+    private List<SearchMatch> VerifySerial(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace)
     {
         var results = new List<SearchMatch>();
         foreach (var rel in candidates)
         {
-            results.AddRange(ScanCandidate(rel, query, comparison, caseSensitive, maxResults, network: false));
+            results.AddRange(ScanCandidate(rel, query, comparison, caseSensitive, maxResults, network: false, trace));
             if (results.Count >= maxResults) return Cap(results, maxResults);
         }
         return Cap(results, maxResults);
@@ -258,7 +265,7 @@ public sealed class SegmentedIndex : IDisposable
     // without speculatively reading the whole candidate set. Results are merged in candidate order, so
     // the output is byte-identical to the serial path; we just reach it faster. A window's worth of
     // reads may be wasted once we have enough matches - a good trade when latency dwarfs a few reads.
-    private List<SearchMatch> VerifyParallel(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults)
+    private List<SearchMatch> VerifyParallel(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace)
     {
         var results = new List<SearchMatch>();
         int degree = Math.Max(1, CodeCompassConfig.WalkThreads(Environment.ProcessorCount));
@@ -270,7 +277,7 @@ public sealed class SegmentedIndex : IDisposable
             int count = Math.Min(window, candidates.Count - start);
             var perFile = new List<SearchMatch>[count];
             Parallel.For(0, count, opts, j =>
-                perFile[j] = ScanCandidate(candidates[start + j], query, comparison, caseSensitive, maxResults, network: true));
+                perFile[j] = ScanCandidate(candidates[start + j], query, comparison, caseSensitive, maxResults, network: true, trace));
 
             foreach (var list in perFile)
             {
@@ -288,7 +295,7 @@ public sealed class SegmentedIndex : IDisposable
     // (up to maxResults). Reads are network-aware and avoid a per-candidate stat: a file is known to be
     // "large" from its LOCAL sidecar, and otherwise we read the size off the already-open handle rather
     // than paying a separate round-trip. Never throws.
-    private List<SearchMatch> ScanCandidate(string rel, string query, StringComparison comparison, bool caseSensitive, int maxResults, bool network)
+    private List<SearchMatch> ScanCandidate(string rel, string query, StringComparison comparison, bool caseSensitive, int maxResults, bool network, List<CandidateTrace>? trace = null)
     {
         var results = new List<SearchMatch>();
         var full = Path.Combine(_root, rel.Replace('/', Path.DirectorySeparatorChar));
@@ -300,8 +307,10 @@ public sealed class SegmentedIndex : IDisposable
         // stat needed to know a file is large.
         if (PositionalSidecar.HasSidecar(_dir, rel))
         {
-            if (!PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults, caseSensitive))
+            bool handled = PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults, caseSensitive, out long sidecarBytes);
+            if (!handled)
                 FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network);
+            if (trace != null) AddTrace(trace, rel, true, handled ? sidecarBytes : TryFileLength(full), results.Count);
             return results;
         }
 
@@ -316,13 +325,27 @@ public sealed class SegmentedIndex : IDisposable
             {
                 var text = Storage.SourceFile.ReadAllText(fs);
                 FileScanner.ScanText(rel, text, query, results, maxResults, 0, comparison);
+                if (trace != null) AddTrace(trace, rel, false, size, results.Count);
                 return results;
             }
         }
-        catch { return results; }
+        catch { if (trace != null) AddTrace(trace, rel, false, 0, results.Count); return results; }
 
         FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network); // rare: large, no sidecar
+        if (trace != null) AddTrace(trace, rel, false, TryFileLength(full), results.Count); // whole-file read (the residual-cost shape)
         return results;
+    }
+
+    // Record one candidate's verify cost for the opt-in search trace. Thread-safe: the parallel verify path
+    // adds concurrently. Only ever called when a trace list was supplied, so it's free on the normal path.
+    private static void AddTrace(List<CandidateTrace> trace, string rel, bool hasSidecar, long bytesRead, int hits)
+    {
+        lock (trace) trace.Add(new CandidateTrace(rel, hasSidecar, bytesRead, hits));
+    }
+
+    private static long TryFileLength(string full)
+    {
+        try { return new FileInfo(full).Length; } catch { return 0; }
     }
 
     // Merge (sorted, distinct) the posting lists of every key in a group. One key => return it directly

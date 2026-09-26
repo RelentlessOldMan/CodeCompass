@@ -85,16 +85,24 @@ public static class RepositoryIndexer
                 dumps++;
 
                 var log = Log.For(root);
+                // Over a share, a worker "held" on a big file is usually just slow TRANSFER, not slow parse -
+                // and if the overall byte counter is still climbing (no hard stall) it will finish on its own.
+                // Excluding it / lowering caps (the local advice) is the wrong fix there, so word it differently.
+                bool onNetwork = NetworkPath.IsNetwork(root);
+                bool progressing = !hardStall;
                 string headline = stuck.Length > 0
-                    ? $"indexing slow: {stuck.Length} worker(s) held one file >{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB) - a slow-to-parse file is grinding a worker while others may idle."
+                    ? (onNetwork
+                        ? $"indexing slow: {stuck.Length} worker(s) held one large file >{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB) over a network share - likely slow transfer, not a stuck build."
+                        : $"indexing slow: {stuck.Length} worker(s) held one file >{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB) - a slow-to-parse file is grinding a worker while others may idle.")
                     : $"indexing made no progress for ~{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB).";
                 log.Warn(headline);
                 if (held.Length == 0)
                     log.Warn("  (no files in flight - the stall is in a post-parse/finalize step, not a single file)");
                 foreach (var kv in held.OrderByDescending(k => now - k.Value.StartMs))
                     log.Warn($"  worker {kv.Key}: {kv.Value.Path} ({kv.Value.Size / 1048576.0:F1} MB) held {(now - kv.Value.StartMs) / 1000.0:F0}s");
-                log.Warn("If a file has been held many seconds it is the culprit: exclude it (CODECOMPASS_IGNORE) or " +
-                         "lower CODECOMPASS_MAX_SYMBOL_MB / CODECOMPASS_MAX_FILE_MB.");
+                log.Warn(onNetwork && progressing
+                    ? "Over a network share this is normal for large files while overall progress continues - it should finish. Exclude it (CODECOMPASS_IGNORE) only if the build never completes."
+                    : "If a file has been held many seconds it is the culprit: exclude it (CODECOMPASS_IGNORE) or lower CODECOMPASS_MAX_SYMBOL_MB / CODECOMPASS_MAX_FILE_MB.");
 
                 // Also surface on-screen (stderr) once, so a stall isn't a silent frozen progress bar.
                 // stderr is safe for the MCP server too (stdout is its protocol channel, stderr is logs).
@@ -178,7 +186,10 @@ public static class RepositoryIndexer
                             if (worker.Text.ApproxBytes >= textBudget) FlushText(worker, dir, ref textSegCounter, textSegFiles);
                         }
                         else if (!bin)
-                            Log.For(root).Debug($"skipped unreadable large file {file.RelativePath}");
+                            // WARN, not Debug: a large file that fails to read (vs a deliberate binary skip)
+                            // is silently absent from the index otherwise - the exact "N fewer files, no log"
+                            // symptom seen over SMB. Visible at the default log level so it's diagnosable.
+                            Log.For(root).Warn($"NOT INDEXED - large file unreadable (transient I/O over a share?): {file.RelativePath}");
                         return worker;
                     }
                     finally { inFlight.TryRemove(tid, out var _sg); reads.Release(StreamingReserveBytes); }
@@ -196,7 +207,9 @@ public static class RepositoryIndexer
                 {
                     byte[] bytes;
                     try { bytes = File.ReadAllBytes(file.FullPath); }
-                    catch (Exception ex) { Log.For(root).Debug($"skipped unreadable file {file.RelativePath}: {ex.Message}"); return worker; }
+                    // WARN, not Debug: a read failure silently drops the file from the index (the "N fewer
+                    // files, no log" symptom over SMB); surface it at the default level so it's diagnosable.
+                    catch (Exception ex) { Log.For(root).Warn($"NOT INDEXED - file unreadable (transient I/O over a share?): {file.RelativePath}: {ex.Message}"); return worker; }
                     if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return worker;
 
                     var content = TextDecoder.FromBytes(bytes);

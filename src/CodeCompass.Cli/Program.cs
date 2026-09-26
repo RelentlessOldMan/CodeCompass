@@ -953,8 +953,13 @@ static int CmdSearch(string[] args)
     if (!RepositoryIndexer.TryLoad(root, out var index, out _)) return NoIndex(root);
 
     const int cap = 200;
+    // Opt-in diagnostic (CODECOMPASS_SEARCH_TRACE=1): record where the query's I/O went, per candidate file.
+    // Answers "why did this query read N GB?" - sidecar block-selective reads vs whole-file reads of large
+    // no-sidecar files - without guessing. Off by default, so normal output/perf is untouched.
+    var trace = Environment.GetEnvironmentVariable("CODECOMPASS_SEARCH_TRACE") is "1" or "true"
+        ? new List<CodeCompass.Core.Indexing.Segments.SegmentedIndex.CandidateTrace>() : null;
     var sw = Stopwatch.StartNew();
-    var matches = index.Search(query, cap + 1, caseSensitive: !ignoreCase); // one extra to detect truncation
+    var matches = index.Search(query, cap + 1, caseSensitive: !ignoreCase, trace); // one extra to detect truncation
     sw.Stop();
 
     bool truncated = matches.Count > cap;
@@ -963,6 +968,15 @@ static int CmdSearch(string[] args)
     Console.Error.WriteLine(truncated
         ? $"-- showing first {cap}; MORE EXIST (narrow the query) in {sw.Elapsed.TotalMilliseconds:F0} ms"
         : $"-- {matches.Count} match(es) in {sw.Elapsed.TotalMilliseconds:F0} ms");
+    if (trace is not null)
+    {
+        long total = trace.Sum(t => t.BytesRead);
+        int noSidecar = trace.Count(t => !t.HasSidecar);
+        Console.Error.WriteLine($"-- search trace: {trace.Count} candidate(s), {total / 1048576.0:F1} MB read " +
+                                $"({noSidecar} had no sidecar). Biggest readers:");
+        foreach (var t in trace.OrderByDescending(t => t.BytesRead).Take(15))
+            Console.Error.WriteLine($"     {t.BytesRead / 1048576.0,8:F1} MB  sidecar={(t.HasSidecar ? "yes" : "no ")}  hits={t.Hits}  {t.Path}");
+    }
     return 0;
 }
 
