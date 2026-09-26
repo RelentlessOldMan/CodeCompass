@@ -87,7 +87,7 @@ Start-Sleep -Seconds 2
 
 $cli = @(
     (Join-Path $PSScriptRoot "plugin/bin/CodeCompass.Cli.exe"),
-    (Join-Path $PSScriptRoot "src/CodeCompass.Cli/bin/Release/net8.0/CodeCompass.Cli.exe")
+    (Join-Path $PSScriptRoot "src/CodeCompass.Cli/bin/Release/net10.0/CodeCompass.Cli.exe")
 ) | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $cli) { Write-Warning "CLI not built (run build-plugin.ps1 or dotnet build -c Release); skipping -Run."; exit 0 }
 

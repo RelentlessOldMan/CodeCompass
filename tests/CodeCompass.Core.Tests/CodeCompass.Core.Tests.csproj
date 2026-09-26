@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- net10 because this project references CodeCompass.Mcp (net10) - a net8 project can't consume a net10
+         assembly. Runs the net8 Core/Semantics libraries fine on the net10 test runtime. -->
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 

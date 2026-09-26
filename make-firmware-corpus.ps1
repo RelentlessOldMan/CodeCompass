@@ -308,7 +308,7 @@ $stats = Get-ChildItem $outFull -Recurse -File
 $total = ($stats | Measure-Object Length -Sum).Sum
 Write-Host ("Done: {0:N0} files, {1:N2} GB, {2:N0} dirs, {3} root(s) (compileDb=$CompileDb)." -f $stats.Count, ($total / 1GB), $dirList.Count, $rootsList.Count)
 
-$exe = Join-Path $root "src/CodeCompass.Cli/bin/Release/net8.0/CodeCompass.Cli.exe"
+$exe = Join-Path $root "src/CodeCompass.Cli/bin/Release/net10.0/CodeCompass.Cli.exe"
 if (($Run -or $Verify) -and -not (Test-Path $exe)) { Write-Host "build the Release CLI first: dotnet build -c Release"; exit 0 }
 $ErrorActionPreference = 'Continue' # native CLI writes progress to stderr; don't let it fault a good run
 

@@ -16,7 +16,12 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- net10: the MCP SDK (ModelContextProtocol / Microsoft.Extensions.AI / Hosting) depends on the .NET 10
+         base-library family (System.Text.Json 10, System.Text.Encodings.Web 10, ...). A net8 self-contained
+         publish ships the .NET 8 copies of those in-box assemblies and the server crashes on launch, so the
+         executable must target net10 (its runtime pack carries the matching versions). Core/Semantics stay
+         net8 and are consumed fine by this net10 exe. -->
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>

@@ -82,6 +82,41 @@ if ($Publish) {
 & (Join-Path $root "build-plugin.ps1")
 if ($LASTEXITCODE -ne 0) { throw "build-plugin.ps1 failed" }
 
+# 1a) Smoke the PUBLISHED MCP server exe: do a real MCP stdio handshake and require it to list its tools.
+# This is the gap that let a broken self-contained server ship (1.0.140-1.0.145 crashed on startup because a
+# net8 build couldn't carry the MCP SDK's .NET 10 base libraries) - the -Big gate only exercises the CLI and
+# in-process tests, never the shipped server binary. Abort the release if the server can't start and answer.
+Write-Host "Smoke-testing the published MCP server (initialize + tools/list) ..."
+$mcpExe = Join-Path $root "plugin/bin/CodeCompass.Mcp.exe"
+if (-not (Test-Path $mcpExe)) { throw "published MCP exe missing: $mcpExe" }
+$psi = [System.Diagnostics.ProcessStartInfo]::new($mcpExe)
+$psi.WorkingDirectory = $root
+$psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
+$mcpProc = [System.Diagnostics.Process]::Start($psi)
+try {
+    $mcpProc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}')
+    $mcpProc.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
+    $mcpProc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+    $mcpProc.StandardInput.Flush()
+    $readTask = $mcpProc.StandardOutput.ReadToEndAsync()
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $toolsLine = $null
+    while ($sw.Elapsed.TotalSeconds -lt 30 -and -not $mcpProc.HasExited) {
+        Start-Sleep -Milliseconds 200
+        # Peek at whatever has been produced so far by closing stdin to force EOF once we've likely got a reply.
+        if ($sw.Elapsed.TotalSeconds -gt 3) { break }
+    }
+    $mcpProc.StandardInput.Close()             # EOF -> the stdio server flushes remaining replies and exits
+    if (-not $mcpProc.WaitForExit(15000)) { $mcpProc.Kill() }
+    $out = $readTask.Result
+    if ($out -notmatch '"tools"' -or $out -notmatch 'find_definition') {
+        $errOut = $mcpProc.StandardError.ReadToEnd()
+        throw "MCP server smoke FAILED - no tools/list response. The published server does not start/answer. stderr:`n$errOut"
+    }
+    Write-Host "  PASS  MCP server responds to initialize + tools/list (tools present)."
+}
+finally { try { if (-not $mcpProc.HasExited) { $mcpProc.Kill() } } catch {} }
+
 # 2) Version = the numeric version build-plugin stamped into the manifest (matches `codecompass version`).
 $pjPath = Join-Path $root "plugin/.claude-plugin/plugin.json"
 $version = (Get-Content $pjPath -Raw | ConvertFrom-Json).version

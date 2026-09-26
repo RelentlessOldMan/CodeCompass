@@ -66,7 +66,7 @@ function Check($name, [bool]$cond) { if ($cond) { Ok $name } else { Bad $name } 
 
 # Run the built CLI capturing stdout/stderr/exit without PowerShell's native-stderr pitfalls, with a
 # timeout so a hang is a failure rather than a wedge.
-$cli = Join-Path $root "src/CodeCompass.Cli/bin/Release/net8.0/CodeCompass.Cli.exe"
+$cli = Join-Path $root "src/CodeCompass.Cli/bin/Release/net10.0/CodeCompass.Cli.exe"
 function Invoke-Cli([string[]]$CliArgs, [int]$TimeoutSec = 600) {
     $o = (New-TemporaryFile).FullName; $e = (New-TemporaryFile).FullName
     $p = Start-Process -FilePath $cli -ArgumentList $CliArgs -NoNewWindow -PassThru `
