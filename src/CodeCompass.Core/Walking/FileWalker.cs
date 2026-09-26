@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using CodeCompass.Core.Config;
 using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
+using CodeCompass.Core.Storage;
 
 namespace CodeCompass.Core.Walking;
 
@@ -39,6 +40,19 @@ public sealed class FileWalker
     private int _overCapSkipped;
     private readonly object _largestLock = new(); // guards the largest-over-cap pair (parallel walk)
 
+    /// <summary>Directory subtrees DROPPED during the last <see cref="Walk"/> because their listing failed
+    /// (or came back empty) even after a network retry - i.e. their files are silently absent from the index.
+    /// Valid after enumeration completes. D &gt; 0 means the walk was incomplete (a correctness gap), distinct
+    /// from legitimately-empty directories, which are never counted.</summary>
+    public int DroppedDirs => _droppedDirs;
+    private int _droppedDirs;
+
+    private const int RetryDelayMs = 75; // brief pause before a single network re-read of a failed directory
+
+    // Test-only fault-injection seam: invoked with each directory path just before it is enumerated, so a
+    // test can simulate a transient SMB failure (throw once) and assert the walker retries into it.
+    internal Action<string>? BeforeReadDirHook;
+
     private static EnumerationOptions EnumOpts() => new()
     {
         // AttributesToSkip=0 preserves coverage (the default drops Hidden/System); IgnoreInaccessible skips
@@ -52,11 +66,16 @@ public sealed class FileWalker
     {
         root = Path.GetFullPath(root);
         _overCapSkipped = 0;
+        _droppedDirs = 0;
         LargestOverCapBytes = 0;
         LargestOverCapPath = null;
 
+        // A network root gets retry-on-failure directory reads: over SMB under concurrent load, a directory
+        // listing can transiently throw (path-not-found on a dir that exists) or come back empty (a child
+        // access error swallowed by IgnoreInaccessible), silently dropping a whole subtree from the index.
+        bool network = NetworkPath.IsNetwork(root);
         int degree = _walkThreads > 0 ? _walkThreads : CodeCompassConfig.WalkThreads(Environment.ProcessorCount);
-        return degree <= 1 ? WalkSerial(root) : WalkParallel(root, degree);
+        return degree <= 1 ? WalkSerial(root, network) : WalkParallel(root, degree, network);
     }
 
     // Keep a subdirectory (not ignored, not a reparse point). Attributes are cached from the enumeration.
@@ -95,20 +114,65 @@ public sealed class FileWalker
         return true;
     }
 
-    // Materialize one directory's entries under a try so a mid-iteration failure is caught here (one bad
-    // subtree logged and skipped, not fatal). Returns null on failure.
-    private List<FileSystemInfo>? ReadDir(string dir, string root, EnumerationOptions opts)
+    // Materialize one directory's entries. Over a network root, a transient SMB failure or a swallowed
+    // empty listing is retried once before the subtree is given up - the difference between a complete index
+    // and silently missing files under concurrent load. A genuinely-vanished directory (not-found AND no
+    // longer on disk) is dropped silently; any OTHER give-up is counted and logged (never silent). null =>
+    // no entries for this directory.
+    private List<FileSystemInfo>? ReadDir(string dir, string root, EnumerationOptions opts, bool network)
     {
-        try { return new DirectoryInfo(dir).EnumerateFileSystemInfos("*", opts).ToList(); }
-        catch (DirectoryNotFoundException) { return null; } // vanished between enqueue and read: fine
-        catch (Exception ex)
+        var list = TryEnumerate(dir, opts, out var ex);
+
+        if (ex is null)
         {
-            Log.For(root).Warn($"walk skipped a directory subtree: {dir} ({ex.GetType().Name}: {ex.Message})");
-            return null;
+            // An empty listing on a share can be a transient child-access error swallowed by
+            // IgnoreInaccessible rather than a truly-empty directory. Re-read once (no delay - empty dirs
+            // enumerate instantly); if the retry sees entries, the first read had dropped children.
+            if (network && list!.Count == 0)
+            {
+                var again = TryEnumerate(dir, opts, out var ex2);
+                if (ex2 is null && again!.Count > 0) return again;
+            }
+            return list;
         }
+
+        // A not-found for a directory that truly no longer exists is fine - it vanished between being
+        // enqueued and read. Drop it silently; do not count it as a coverage gap.
+        if (ex is DirectoryNotFoundException && !DirExists(dir)) return null;
+
+        // It exists (or a non-not-found error): over a share, retry once after a brief pause before giving up.
+        if (network)
+        {
+            System.Threading.Thread.Sleep(RetryDelayMs);
+            var retry = TryEnumerate(dir, opts, out var ex3);
+            if (ex3 is null) return retry; // transient - recovered the subtree
+            ex = ex3;
+        }
+
+        // Give up on a directory we could not read though it exists: NOT silent - count it and warn, so a
+        // coverage gap is visible instead of a confident-but-incomplete index.
+        System.Threading.Interlocked.Increment(ref _droppedDirs);
+        Log.For(root).Warn($"walk DROPPED a directory - its files are NOT indexed (search/def may return a false zero): {dir} ({ex.GetType().Name}: {ex.Message})");
+        return null;
     }
 
-    private IEnumerable<FileRecord> WalkSerial(string root)
+    private List<FileSystemInfo>? TryEnumerate(string dir, EnumerationOptions opts, out Exception? error)
+    {
+        try
+        {
+            BeforeReadDirHook?.Invoke(dir); // test seam: may throw to simulate a transient failure
+            error = null;
+            return new DirectoryInfo(dir).EnumerateFileSystemInfos("*", opts).ToList();
+        }
+        catch (Exception ex) { error = ex; return null; }
+    }
+
+    private static bool DirExists(string dir)
+    {
+        try { return Directory.Exists(dir); } catch { return false; }
+    }
+
+    private IEnumerable<FileRecord> WalkSerial(string root, bool network)
     {
         var opts = EnumOpts();
         var stack = new Stack<string>();
@@ -116,7 +180,7 @@ public sealed class FileWalker
 
         while (stack.Count > 0)
         {
-            var entries = ReadDir(stack.Pop(), root, opts);
+            var entries = ReadDir(stack.Pop(), root, opts, network);
             if (entries is null) continue;
             foreach (var info in entries)
             {
@@ -130,7 +194,7 @@ public sealed class FileWalker
     // concurrently (overlapping SMB round-trips), pushing files to a bounded output the caller drains.
     // A pending-directory counter drives completion; a cancellation token lets an early-breaking consumer
     // stop the workers without a hang or a thread leak.
-    private IEnumerable<FileRecord> WalkParallel(string root, int degree)
+    private IEnumerable<FileRecord> WalkParallel(string root, int degree, bool network)
     {
         var opts = EnumOpts();
         var output = new BlockingCollection<FileRecord>(8192); // bounded => backpressure paces the walk
@@ -151,7 +215,7 @@ public sealed class FileWalker
                     {
                         try
                         {
-                            var entries = ReadDir(dir, root, opts);
+                            var entries = ReadDir(dir, root, opts, network);
                             if (entries is not null)
                                 foreach (var info in entries)
                                 {

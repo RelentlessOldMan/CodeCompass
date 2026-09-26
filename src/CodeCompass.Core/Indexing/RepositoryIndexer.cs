@@ -279,6 +279,11 @@ public static class RepositoryIndexer
                 $"Raise CODECOMPASS_MAX_FILE_MB to include them.");
         }
 
+        if (walker.DroppedDirs > 0)
+            Log.For(root).Warn($"walk DROPPED {walker.DroppedDirs:N0} director(y/ies) that could not be read even after retry - " +
+                "their files are NOT in this index (search/find_definition may return a false zero). This is usually a " +
+                "transient network error under load; re-run 'codecompass update' (or index) to pick them up. See the WARN lines above for paths.");
+
         var textOrdered = textSegFiles.OrderBy(x => x.Num).Select(x => x.Name).ToList();
         var symOrdered = symSegFiles.OrderBy(x => x.Num).Select(x => x.Name).ToList();
         var text = SegmentedIndex.FromSegmentFiles(root, dir, textOrdered, textSegCounter, textBudget);
