@@ -16,20 +16,23 @@ namespace CodeCompass.Core.Storage;
 /// <see cref="ContentVersion"/> records <see cref="BuildInfo.IndexerContentVersion"/> at build time, so a
 /// later binary can tell whether a rebuild would actually change results (vs. a mere product-version bump);
 /// it defaults to 0 for an older meta, which equals the baseline, so pre-stamp indexes are never falsely
-/// flagged stale.</summary>
-public sealed record IndexMeta(string Root, string Version, string BuiltUtc, int Files, int FilesOverCap = 0, int FilesSymbolSkipped = 0, int ContentVersion = 0);
+/// flagged stale. <see cref="DroppedDirs"/> is the number of directory subtrees the last walk gave up on
+/// after a retry (their files are absent from this index) - a durable coverage-gap signal like
+/// <see cref="FilesOverCap"/>, so doctor/report can flag a known-incomplete index even after the build log
+/// has rotated away. 0 = complete.</summary>
+public sealed record IndexMeta(string Root, string Version, string BuiltUtc, int Files, int FilesOverCap = 0, int FilesSymbolSkipped = 0, int ContentVersion = 0, int DroppedDirs = 0);
 
 public static class IndexMetaFile
 {
     private const string Name = "meta.json";
 
     /// <summary>Stamp version + timestamp automatically; callers pass only what they know.</summary>
-    public static void Write(string repoRoot, int files, int filesOverCap = 0, int filesSymbolSkipped = 0)
+    public static void Write(string repoRoot, int files, int filesOverCap = 0, int filesSymbolSkipped = 0, int droppedDirs = 0)
     {
         try
         {
             var meta = new IndexMeta(Path.GetFullPath(repoRoot), BuildInfo.Version,
-                DateTime.UtcNow.ToString("o"), files, filesOverCap, filesSymbolSkipped, BuildInfo.IndexerContentVersion);
+                DateTime.UtcNow.ToString("o"), files, filesOverCap, filesSymbolSkipped, BuildInfo.IndexerContentVersion, droppedDirs);
             AtomicFile.WriteText(Path.Combine(IndexStore.GetCacheDir(repoRoot), Name), w => w.Write(JsonSerializer.Serialize(meta)));
         }
         catch { /* best-effort; never break a build over metadata */ }

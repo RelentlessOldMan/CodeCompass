@@ -53,6 +53,23 @@ public class DiagnosticsTests
     }
 
     [Fact]
+    public void HealthChecks_WalkCoverage_OkWhenNoneDropped_WarnsWhenDropped()
+    {
+        using var repo = new TempRepo();
+        repo.Write("x.cs", "class A {}");
+        var (t, s, _) = RepositoryIndexer.Build(repo.Root);
+        t.Dispose(); s.Dispose();
+
+        IndexMetaFile.Write(repo.Root, 1); // droppedDirs defaults to 0
+        Assert.Contains(RepoDiagnostics.HealthChecks(repo.Root), c => c.Name == "walk coverage complete" && c.Ok);
+
+        IndexMetaFile.Write(repo.Root, 1, droppedDirs: 2); // simulate a build that gave up on 2 dirs
+        var warned = RepoDiagnostics.HealthChecks(repo.Root).Single(c => c.Name == "walk coverage complete");
+        Assert.False(warned.Ok);
+        Assert.Contains("2", warned.Detail);
+    }
+
+    [Fact]
     public void HealthChecks_FlagUnbuiltIndex()
     {
         using var repo = new TempRepo();

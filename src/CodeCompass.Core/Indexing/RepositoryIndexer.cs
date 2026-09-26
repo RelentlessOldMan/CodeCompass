@@ -299,7 +299,7 @@ public static class RepositoryIndexer
         // Record path/version/time + coverage (files excluded by the size cap, and files indexed for text
         // but with no symbols extracted) so the search tools can be honest about a zero result and
         // doctor/cache can report by real path.
-        IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, totalSymbolSkipped);
+        IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, totalSymbolSkipped, walker.DroppedDirs);
         return (text, symbols, stats);
     }
 
@@ -490,7 +490,9 @@ public static class RepositoryIndexer
             // the symbol-skipped count needs file CONTENT to classify, which an incremental walk only has for
             // changed files, so carry forward the last full build's value (a full reindex refreshes it exactly).
             int carriedSymbolSkipped = IndexMetaFile.Read(root)?.FilesSymbolSkipped ?? 0;
-            IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, carriedSymbolSkipped);
+            // DroppedDirs is exact from THIS walk: if the update re-walked those dirs successfully it clears
+            // the flag (the gap is closed); if they dropped again it stays flagged.
+            IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, carriedSymbolSkipped, walker.DroppedDirs);
             return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false));
         }
     }

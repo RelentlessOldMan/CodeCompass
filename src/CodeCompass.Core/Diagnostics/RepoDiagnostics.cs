@@ -106,6 +106,8 @@ public static class RepoDiagnostics
                 w.WriteLine($"over size cap:    {meta.FilesOverCap:N0} file(s) NOT indexed (raise maxFileMb / run survey)");
             if (meta.FilesSymbolSkipped > 0)
                 w.WriteLine($"symbols skipped:  {meta.FilesSymbolSkipped:N0} file(s) text-searchable but no symbols (over symbol cap / data blob / streamed)");
+            if (meta.DroppedDirs > 0)
+                w.WriteLine($"dirs dropped:     {meta.DroppedDirs:N0} director(y/ies) unreadable during the walk - their files are NOT indexed (re-run update/index; usually a transient network error)");
             if (!string.Equals(Path.GetFullPath(meta.Root), root, StringComparison.OrdinalIgnoreCase))
                 w.WriteLine($"[!] meta root differs: {meta.Root}");
         }
@@ -270,6 +272,15 @@ public static class RepoDiagnostics
                 behind ? $"index built by an older indexer (content v{builtCv} < v{curCv}) - a rebuild would change " +
                          $"results (recall/symbols may be under-reported). Run: codecompass index \"{root}\""
                        : $"content v{curCv} - a rebuild would not change results"));
+
+            // Walk coverage: if the build/update gave up on any directory (unreadable after retry, usually a
+            // transient network error), its files are absent - a durable "known-incomplete index" signal so a
+            // search/def false-zero is explainable long after the build log has rotated away.
+            int dropped = meta?.DroppedDirs ?? 0;
+            checks.Add(new("walk coverage complete", dropped == 0,
+                dropped == 0 ? "no directories were dropped during the last walk"
+                             : $"{dropped:N0} director(y/ies) were unreadable during the last walk - their files are NOT in " +
+                               $"the index (search/find_definition may return a false zero). Re-run: codecompass update \"{root}\""));
         }
 
         if (NetworkPath.IsNetwork(root))
