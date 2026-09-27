@@ -13,6 +13,12 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Disable Dynamic PGO. On the net10 runtime it makes the clang C/C++ find_references hot loop ~2.5x
+         slower (CPU, not wait) than net8 - a real regression introduced by the net8->net10 retarget, isolated
+         to Tiered PGO by A/B (DOTNET_TieredPGO=0 restores net8 speed exactly). Indexing/search are unaffected.
+         Emitting this property bakes System.Runtime.TieredPGO:false into runtimeconfig.json, so every host
+         (Claude Code, Codex, bare CLI) gets the fix with no env var. -->
+    <TieredPGO>false</TieredPGO>
   </PropertyGroup>
 
 </Project>
