@@ -8,7 +8,7 @@
   This is deliberately NOT part of check.ps1 - a full run generates tens of GB and indexes for many minutes,
   so you invoke it by hand when you want to stress the real-scale, real-shape, over-the-wire path.
 
-  It reuses make-firmware-corpus.ps1 (the calibrated generator) for the tree, then:
+  It reuses the vendored CodeSpawner generator (tools/codespawner/) for the tree, then:
     1. plants a unique marker near the END of the largest >1 GB header (to test positional/block-selective
        search on a multi-GB file - the thing _bigfile at 308 MB never reached);
     2. with -Network, robocopies the tree to $Dest (a UNC share) and indexes THAT (reads over SMB);
@@ -68,8 +68,13 @@ $bigHeaders = [int][Math]::Max(1, [Math]::Round($remainGB / 0.055))
 $giantMB = [int]([Math]::Round($GiantHeaderGB * 1024))
 
 Say "== fabricating work-shape tree (~$TargetGB GB target): $GiantHeaders giants @ ${giantMB}MB (>1GB), ~$bigHeaders big headers, scale $Scale =="
-& (Join-Path $root "make-firmware-corpus.ps1") -Out $genDir -Scale $Scale `
-    -GiantHeaders $GiantHeaders -MaxHeaderMB $giantMB -BigHeaders $bigHeaders
+# Vendored CodeSpawner (native AOT, ~40x faster than the old PowerShell generator, and it drops a
+# sibling ground-truth manifest). Same knob semantics; giant headers are still named regmap_block*.h,
+# so the marker-plant glob below is unchanged.
+$spawner = Join-Path $root "tools/codespawner/codespawner.exe"
+if (-not (Test-Path $spawner)) { throw "vendored generator missing: $spawner (run scripts/vendor-codespawner.ps1)" }
+& $spawner gen --out $genDir --scale $Scale --giant-headers $GiantHeaders --max-header-mb $giantMB --big-headers $bigHeaders --force
+if ($LASTEXITCODE -ne 0) { throw "codespawner gen failed (exit $LASTEXITCODE)" }
 # Resolve to an ABSOLUTE path: index runs via Start-Process, which does NOT inherit this shell's working
 # directory, so a relative -Dest would fail to resolve there.
 $genDir = (Resolve-Path $genDir).Path

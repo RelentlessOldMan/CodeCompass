@@ -5,6 +5,11 @@
 change between generator versions; **this schema is the stable coupling point.** Both consumers MUST
 hard-assert `_meta.manifestVersion` before trusting a manifest.
 
+> **Versioning rule** (agreed across consumers): *additive optional fields never bump `manifestVersion`;
+> renames, removals, or semantic changes do.* New optional fields (e.g. `_meta.populations`, and the
+> planned `expectedMiss`/`dupGroups`) ship at v1 — old adapters ignore what they don't consume. The next
+> real **v2** bump is reserved for when the schema grows for real (the C++ language profile).
+
 The generator writes the manifest as a sibling of the corpus directory: for `--out <dir>` it emits
 `<dir>-manifest.json`.
 
@@ -42,6 +47,13 @@ The generator writes the manifest as a sibling of the corpus directory: for `--o
 | `generatorVersion` | CodeSpawner version that emitted the corpus. |
 | `seed` | RNG seed. Consumers should assert this matches the corpus they think they have. |
 | `corpusRoot` | The absolute `--out` dir at generation time. **Informational only** — do NOT resolve paths against it (the corpus may have been copied/staged on an SMB share). Resolve against the corpus dir you are actually reading. |
+| `populations` | *(optional)* Per-population shape stats: `{ "<name>": {fileCount, totalBytes, identCount} }`. Lets a consumer assert the corpus is the shape it expects *before* trusting any pass/fail. Present for the header bands (`giant-headers`/`big-headers`/`med-headers`/`dense-band`) and the pathology populations (`broad-token`/`long-lines`/`encoding-mix`). Additive — absent on older manifests. |
+
+### Notable symbols
+
+- **`hot_shared`** — a hot symbol called from every giant-including `.c`; its `refs` are the aggregate-query expected-set.
+- **`broad_hot`** — (`broad-token` preset) one def, a large expected ref-set: every hot-token call site across the 2–8 MB carrier band, seeded at deterministic offsets including near-EOF. This is a `find_references`-at-scale expected-set *and* a block-selective ("sidecar") read-amplification test.
+- **`vendor_gated`** — the negative case (see `unreachableRefs`).
 
 ## `symbols`
 
