@@ -48,6 +48,15 @@ public static class PositionalSidecar
     public static bool HasSidecar(string dir, string relPath) =>
         File.Exists(Path.Combine(dir, SidecarName(relPath)));
 
+    /// <summary>Size on disk of a path's sidecar (header + block table + every block's Bloom), or 0 if none.
+    /// This is the LOCAL byte cost <see cref="TryScan"/> pays up front per candidate to decide which blocks to
+    /// read - surfaced so the search trace can separate it from the source bytes actually pulled.</summary>
+    public static long SidecarLength(string dir, string relPath)
+    {
+        try { var fi = new FileInfo(Path.Combine(dir, SidecarName(relPath))); return fi.Exists ? fi.Length : 0; }
+        catch { return 0; }
+    }
+
     /// <summary>Best-effort removal of sidecars not in <paramref name="keep"/> (the live large-file
     /// sidecar names), so a rebuild that drops a big file doesn't leave its sidecar behind.</summary>
     public static void CleanupOrphans(string dir, IReadOnlySet<string> keep) =>

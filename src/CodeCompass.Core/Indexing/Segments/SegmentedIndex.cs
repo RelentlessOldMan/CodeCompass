@@ -148,7 +148,11 @@ public sealed class SegmentedIndex : IDisposable
     /// admitted, whether each had a block sidecar, how many bytes the verify actually read, and how many hits
     /// it contributed. Lets an operator see WHERE a query's I/O goes (sidecar block-selective vs a whole-file
     /// read of a no-sidecar large file) instead of guessing. Populated only when a trace list is passed.</summary>
-    public readonly record struct CandidateTrace(string Path, bool HasSidecar, long BytesRead, int Hits);
+    /// <param name="BytesRead">SOURCE bytes pulled: candidate-block bytes for a sidecar'd file, or the whole
+    /// file for a no-sidecar candidate. <param name="SidecarBytes">the sidecar's own bytes read up front
+    /// (header + block table + every Bloom) to decide which blocks to read - 0 for a no-sidecar file. Split so
+    /// the trace can attribute the true cost (block reads vs whole-file reads vs sidecar overhead).</summary>
+    public readonly record struct CandidateTrace(string Path, bool HasSidecar, long BytesRead, long SidecarBytes, int Hits);
 
     public IReadOnlyList<SearchMatch> Search(string query, int maxResults = 200, bool caseSensitive = true,
                                              List<CandidateTrace>? trace = null)
@@ -315,7 +319,9 @@ public sealed class SegmentedIndex : IDisposable
             bool handled = PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults, caseSensitive, out long sidecarBytes);
             if (!handled)
                 FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network);
-            if (trace != null) AddTrace(trace, rel, true, handled ? sidecarBytes : TryFileLength(full), results.Count);
+            // Block bytes (or a whole-file fallback read) + the sidecar's own bytes read to pick those blocks.
+            if (trace != null) AddTrace(trace, rel, true, handled ? sidecarBytes : TryFileLength(full),
+                                        PositionalSidecar.SidecarLength(_dir, rel), results.Count);
             return results;
         }
 
@@ -330,22 +336,22 @@ public sealed class SegmentedIndex : IDisposable
             {
                 var text = Storage.SourceFile.ReadAllText(fs);
                 FileScanner.ScanText(rel, text, query, results, maxResults, 0, comparison);
-                if (trace != null) AddTrace(trace, rel, false, size, results.Count);
+                if (trace != null) AddTrace(trace, rel, false, size, 0, results.Count);
                 return results;
             }
         }
-        catch { if (trace != null) AddTrace(trace, rel, false, 0, results.Count); return results; }
+        catch { if (trace != null) AddTrace(trace, rel, false, 0, 0, results.Count); return results; }
 
         FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network); // rare: large, no sidecar
-        if (trace != null) AddTrace(trace, rel, false, TryFileLength(full), results.Count); // whole-file read (the residual-cost shape)
+        if (trace != null) AddTrace(trace, rel, false, TryFileLength(full), 0, results.Count); // whole-file read (the residual-cost shape)
         return results;
     }
 
     // Record one candidate's verify cost for the opt-in search trace. Thread-safe: the parallel verify path
     // adds concurrently. Only ever called when a trace list was supplied, so it's free on the normal path.
-    private static void AddTrace(List<CandidateTrace> trace, string rel, bool hasSidecar, long bytesRead, int hits)
+    private static void AddTrace(List<CandidateTrace> trace, string rel, bool hasSidecar, long bytesRead, long sidecarBytes, int hits)
     {
-        lock (trace) trace.Add(new CandidateTrace(rel, hasSidecar, bytesRead, hits));
+        lock (trace) trace.Add(new CandidateTrace(rel, hasSidecar, bytesRead, sidecarBytes, hits));
     }
 
     private static long TryFileLength(string full)

@@ -986,12 +986,19 @@ static int CmdSearch(string[] args)
         : $"-- {matches.Count} match(es) in {sw.Elapsed.TotalMilliseconds:F0} ms");
     if (trace is not null)
     {
-        long total = trace.Sum(t => t.BytesRead);
+        static double Mb(long b) => b / 1048576.0;
+        long blockBytes = trace.Where(t => t.HasSidecar).Sum(t => t.BytesRead);   // candidate blocks read from sidecar'd files
+        long wholeBytes = trace.Where(t => !t.HasSidecar).Sum(t => t.BytesRead);  // whole-file reads of no-sidecar candidates
+        long sidecarOh  = trace.Sum(t => t.SidecarBytes);                         // sidecar header+Bloom bytes read up front
+        long total = blockBytes + wholeBytes + sidecarOh;
         int noSidecar = trace.Count(t => !t.HasSidecar);
-        Console.Error.WriteLine($"-- search trace: {trace.Count} candidate(s), {total / 1048576.0:F1} MB read " +
-                                $"({noSidecar} had no sidecar). Biggest readers:");
-        foreach (var t in trace.OrderByDescending(t => t.BytesRead).Take(15))
-            Console.Error.WriteLine($"     {t.BytesRead / 1048576.0,8:F1} MB  sidecar={(t.HasSidecar ? "yes" : "no ")}  hits={t.Hits}  {t.Path}");
+        Console.Error.WriteLine($"-- search trace: {trace.Count} candidate(s), {Mb(total):F1} MB read total ({noSidecar} no-sidecar).");
+        Console.Error.WriteLine($"   breakdown: {Mb(blockBytes):F1} MB sidecar blocks + {Mb(wholeBytes):F1} MB whole-file (no sidecar) " +
+                                $"+ {Mb(sidecarOh):F1} MB sidecar headers/Blooms (read to pick blocks).");
+        Console.Error.WriteLine("   biggest readers (source + sidecar bytes):");
+        foreach (var t in trace.OrderByDescending(t => t.BytesRead + t.SidecarBytes).Take(15))
+            Console.Error.WriteLine($"     {Mb(t.BytesRead + t.SidecarBytes),8:F1} MB  sidecar={(t.HasSidecar ? "yes" : "no ")}  " +
+                                    $"(blocks {Mb(t.BytesRead):F1} + hdr/Bloom {Mb(t.SidecarBytes):F1})  hits={t.Hits}  {t.Path}");
     }
     return 0;
 }
