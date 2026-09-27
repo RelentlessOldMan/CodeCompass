@@ -20,19 +20,23 @@ namespace CodeCompass.Core.Storage;
 /// after a retry (their files are absent from this index) - a durable coverage-gap signal like
 /// <see cref="FilesOverCap"/>, so doctor/report can flag a known-incomplete index even after the build log
 /// has rotated away. 0 = complete.</summary>
-public sealed record IndexMeta(string Root, string Version, string BuiltUtc, int Files, int FilesOverCap = 0, int FilesSymbolSkipped = 0, int ContentVersion = 0, int DroppedDirs = 0);
+public sealed record IndexMeta(string Root, string Version, string BuiltUtc, int Files, int FilesOverCap = 0, int FilesSymbolSkipped = 0, int ContentVersion = 0, int DroppedDirs = 0, long SidecarThresholdBytes = 8L << 20, string? Landscape = null);
 
 public static class IndexMetaFile
 {
     private const string Name = "meta.json";
 
-    /// <summary>Stamp version + timestamp automatically; callers pass only what they know.</summary>
-    public static void Write(string repoRoot, int files, int filesOverCap = 0, int filesSymbolSkipped = 0, int droppedDirs = 0)
+    /// <summary>Stamp version + timestamp automatically; callers pass only what they know. The sidecar
+    /// threshold (adaptive per repo shape + network) is recorded so incremental updates use the SAME cutoff
+    /// the build did - otherwise an edited mid-size file could leave a stale/orphaned sidecar.</summary>
+    public static void Write(string repoRoot, int files, int filesOverCap = 0, int filesSymbolSkipped = 0, int droppedDirs = 0,
+                             long sidecarThresholdBytes = 8L << 20, string? landscape = null)
     {
         try
         {
             var meta = new IndexMeta(Path.GetFullPath(repoRoot), BuildInfo.Version,
-                DateTime.UtcNow.ToString("o"), files, filesOverCap, filesSymbolSkipped, BuildInfo.IndexerContentVersion, droppedDirs);
+                DateTime.UtcNow.ToString("o"), files, filesOverCap, filesSymbolSkipped, BuildInfo.IndexerContentVersion, droppedDirs,
+                sidecarThresholdBytes, landscape);
             AtomicFile.WriteText(Path.Combine(IndexStore.GetCacheDir(repoRoot), Name), w => w.Write(JsonSerializer.Serialize(meta)));
         }
         catch { /* best-effort; never break a build over metadata */ }

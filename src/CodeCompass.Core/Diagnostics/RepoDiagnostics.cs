@@ -126,6 +126,13 @@ public static class RepoDiagnostics
                 w.WriteLine($"symbols skipped:  {meta.FilesSymbolSkipped:N0} file(s) text-searchable but no symbols (over symbol cap / data blob / streamed)");
             if (meta.DroppedDirs > 0)
                 w.WriteLine($"dirs dropped:     {meta.DroppedDirs:N0} director(y/ies) unreadable during the walk - their files are NOT indexed (re-run update/index; usually a transient network error)");
+            if (!string.IsNullOrEmpty(meta.Landscape))
+                w.WriteLine($"repo shape:       {meta.Landscape}");
+            var scMb = meta.SidecarThresholdBytes / (1024.0 * 1024);
+            w.WriteLine($"sidecar cutoff:   {scMb:F0} MB" +
+                        (meta.SidecarThresholdBytes < RepoLandscape.DefaultSidecarThreshold
+                            ? "  (lowered from 8 MB - network path with a mid-size tail, so 2-8 MB files get block-selective reads)"
+                            : ""));
             if (!string.Equals(Path.GetFullPath(meta.Root), root, StringComparison.OrdinalIgnoreCase))
                 w.WriteLine($"[!] meta root differs: {meta.Root}");
         }
