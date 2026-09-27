@@ -26,7 +26,9 @@
 .PARAMETER GiantHeaderGB   Size of each giant header in GB (default 1.2). Must stay < 2 (streaming ceiling).
 .PARAMETER Scale       Count multiplier for the rest of the tree (default 1.0 ~= 50k files).
 .PARAMETER GenerateOnly  Fabricate (+ stage) only; skip the index/search test.
-.PARAMETER Keep        Do not delete the generated tree / staged copy / index cache afterwards.
+.PARAMETER Cleanup     Delete the generated tree / staged copy / index cache when done. OFF by default -
+                       the death corpus is expensive to build and meant to be REUSED, so it is kept unless
+                       you explicitly ask to remove it.
 
 .EXAMPLE
   # Full real-scale run against the mini-PC share (hours, ~90 GB both ends):
@@ -44,7 +46,7 @@ param(
     [double]$GiantHeaderGB = 1.2,
     [double]$Scale = 1.0,
     [switch]$GenerateOnly,
-    [switch]$Keep
+    [switch]$Cleanup
 )
 
 $ErrorActionPreference = "Stop"
@@ -123,8 +125,8 @@ if ($giant) {
     Remove-Item Env:\CODECOMPASS_SEARCH_TRACE -ErrorAction SilentlyContinue
 }
 
-# --- CLEANUP ---
-if (-not $Keep) {
+# --- CLEANUP (opt-in only: the corpus is expensive and meant to be reused) ---
+if ($Cleanup) {
     Say "== cleanup =="
     & $cli cache clear $repo 2>$null | Out-Null
     Remove-Item $genDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -135,7 +137,7 @@ if (-not $Keep) {
     }
     # the generator also drops a sibling *-manifest.json
     Remove-Item ((Split-Path $genDir) + [IO.Path]::DirectorySeparatorChar + (Split-Path $genDir -Leaf) + "-manifest.json") -Force -ErrorAction SilentlyContinue
-    Say "cleaned. (use -Keep to retain the tree/index for repeat runs)"
+    Say "cleaned (you asked with -Cleanup)."
 } else {
-    Say "kept: $genDir$(if($Network){" (staged: $Dest)"})  - index cache retained"
+    Say "KEPT (default): $genDir$(if($Network){" (staged: $Dest)"})  - index cache retained. Pass -Cleanup to remove."
 }
