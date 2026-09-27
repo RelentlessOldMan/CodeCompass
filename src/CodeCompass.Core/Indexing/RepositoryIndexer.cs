@@ -134,6 +134,19 @@ public static class RepositoryIndexer
 
         var sw = Stopwatch.StartNew();
 
+        // ONE enumeration up front: materialize the file list. The walk stats every file's size regardless,
+        // so this is the SAME pass, not a second one (no extra SMB round-trips) - it just lets us measure the
+        // repo's SHAPE before indexing and adapt the sidecar cutoff to it, in a single deterministic build
+        // (no "measure now, apply on the next index" divergence). Memory is O(files) of small records - the
+        // same order as the snapshot we already hold.
+        var files = walker.Walk(root).ToList();
+        bool isNetwork = Storage.NetworkPath.IsNetwork(root);
+        var landscape = RepoLandscape.Compute(files.ConvertAll(f => f.Size));
+        long sidecarThreshold = landscape.EffectiveSidecarThreshold(isNetwork);
+        if (sidecarThreshold != RepoLandscape.DefaultSidecarThreshold)
+            Log.For(root).Info($"adaptive sidecar threshold -> {sidecarThreshold / 1048576} MB " +
+                               $"(network={isNetwork}; {landscape.Summary()})");
+
         // Each worker fills private trigram + symbol segment buffers lock-free and flushes them
         // to disk at their byte budgets, so build RAM is bounded regardless of repo size.
         //
@@ -146,7 +159,7 @@ public static class RepositoryIndexer
         // data-blob sources at ~1s/MB) - that is bounded by the symbol-size cap, not by scheduling
         // (confirmed on a real 90GB repo: NoBuffering made no difference to that case).
         Parallel.ForEach(
-            Partitioner.Create(walker.Walk(root), EnumerablePartitionerOptions.NoBuffering),
+            Partitioner.Create(files, EnumerablePartitionerOptions.NoBuffering),
             new ParallelOptions { MaxDegreeOfParallelism = cores },
             () => new BuildWorker(),
             (file, _, worker) =>
@@ -222,7 +235,7 @@ public static class RepositoryIndexer
                     // Mid-size files (>= sidecar threshold, but under the streaming threshold so still whole-read
                     // here) get a positional block sidecar built from the bytes already in memory - so a search
                     // whose trigrams land in a 10-128 MB file reads only the candidate blocks, not the whole file.
-                    if (bytes.Length >= LargeFileIndexer.SidecarThresholdBytes)
+                    if (bytes.Length >= sidecarThreshold)
                     {
                         var midBlocks = LargeFileIndexer.BuildBlocks(bytes);
                         if (midBlocks is not null)
@@ -299,7 +312,8 @@ public static class RepositoryIndexer
         // Record path/version/time + coverage (files excluded by the size cap, and files indexed for text
         // but with no symbols extracted) so the search tools can be honest about a zero result and
         // doctor/cache can report by real path.
-        IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, totalSymbolSkipped, walker.DroppedDirs);
+        IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, totalSymbolSkipped, walker.DroppedDirs,
+                            sidecarThreshold, landscape.Summary());
         return (text, symbols, stats);
     }
 
@@ -439,6 +453,12 @@ public static class RepositoryIndexer
             var newSnapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
             var seen = new HashSet<string>(StringComparer.Ordinal);
             int added = 0, modified = 0, removed = 0, walked = 0;
+            // The sidecar cutoff is a repo property decided at BUILD time (adaptive to shape + network) and
+            // recorded in meta. An incremental update MUST reuse the same value and re-persist it - otherwise
+            // an edited mid-size file gets written/deleted under a different cutoff, leaving a stale or
+            // orphaned sidecar, and the next update would keep drifting.
+            var priorMeta = IndexMetaFile.Read(root);
+            long sidecarThreshold = priorMeta?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold;
 
             using (var extractor = new TreeSitterSymbolExtractor())
             {
@@ -463,7 +483,7 @@ public static class RepositoryIndexer
                         continue;
                     }
 
-                    switch (ApplyExistingFile(text, symbols, dir, rel, file.FullPath, file.Size, mtime, oldState, extractor, upsert, drop))
+                    switch (ApplyExistingFile(text, symbols, dir, sidecarThreshold, rel, file.FullPath, file.Size, mtime, oldState, extractor, upsert, drop))
                     {
                         case ChangeKind.Added: added++; break;
                         case ChangeKind.Modified: modified++; break;
@@ -477,8 +497,7 @@ public static class RepositoryIndexer
                 if (seen.Contains(rel)) continue;
                 text.RemovePath(rel);
                 symbols.RemovePath(rel);
-                if (old.TryGetValue(rel, out var gone) && gone.Size >= LargeFileIndexer.SidecarThresholdBytes)
-                    PositionalSidecar.Delete(dir, rel); // drop a removed large/mid-size file's sidecar
+                PositionalSidecar.Delete(dir, rel); // idempotent (no-op if none) - covers any cutoff, no orphans
                 removed++;
             }
 
@@ -490,10 +509,12 @@ public static class RepositoryIndexer
             // Refresh coverage/meta. OverCapSkipped is exact from this walk (a size decision, free per file);
             // the symbol-skipped count needs file CONTENT to classify, which an incremental walk only has for
             // changed files, so carry forward the last full build's value (a full reindex refreshes it exactly).
-            int carriedSymbolSkipped = IndexMetaFile.Read(root)?.FilesSymbolSkipped ?? 0;
+            int carriedSymbolSkipped = priorMeta?.FilesSymbolSkipped ?? 0;
             // DroppedDirs is exact from THIS walk: if the update re-walked those dirs successfully it clears
-            // the flag (the gap is closed); if they dropped again it stays flagged.
-            IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, carriedSymbolSkipped, walker.DroppedDirs);
+            // the flag (the gap is closed); if they dropped again it stays flagged. Carry the build's adaptive
+            // sidecar threshold + landscape forward unchanged (a full reindex is what re-measures the shape).
+            IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, carriedSymbolSkipped, walker.DroppedDirs,
+                                sidecarThreshold, priorMeta?.Landscape);
             return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false));
         }
     }
@@ -622,7 +643,9 @@ public static class RepositoryIndexer
         }
 
         var mtime = File.GetLastWriteTimeUtc(full).Ticks; // targeted path has no walk record -> stat once
-        switch (ApplyExistingFile(text, symbols, dir, rel, full, size, mtime, oldState, extractor,
+        // Use the same adaptive sidecar cutoff the build recorded (cheap read; a watch batch is a few files).
+        long sidecarThreshold = IndexMetaFile.ReadFromCacheDir(dir)?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold;
+        switch (ApplyExistingFile(text, symbols, dir, sidecarThreshold, rel, full, size, mtime, oldState, extractor,
                                   (r, s) => snapshot[r] = s, r => snapshot.Remove(r)))
         {
             case ChangeKind.Added: added++; break;
@@ -648,7 +671,7 @@ public static class RepositoryIndexer
     /// diffing and its own RAM budget/watchdog, so folding it in would compromise the hot path.
     /// </summary>
     private static ChangeKind ApplyExistingFile(
-        SegmentedIndex text, SegmentedSymbolIndex symbols, string dir,
+        SegmentedIndex text, SegmentedSymbolIndex symbols, string dir, long sidecarThreshold,
         string rel, string full, long size, long mtime, FileState? oldState,
         TreeSitterSymbolExtractor extractor,
         Action<string, FileState> upsert, Action<string> drop)
@@ -695,7 +718,7 @@ public static class RepositoryIndexer
         // Reconcile the mid-size positional sidecar (mirror the build path): eligible + UTF-8 -> (re)write;
         // otherwise remove any stale one (shrank below the threshold, or became non-UTF-8). Write overwrites
         // a prior large-file sidecar at the same name, so a shrink from >=streaming to mid-size is handled too.
-        if (bytes.Length >= LargeFileIndexer.SidecarThresholdBytes && LargeFileIndexer.BuildBlocks(bytes) is { } mid)
+        if (bytes.Length >= sidecarThreshold && LargeFileIndexer.BuildBlocks(bytes) is { } mid)
             PositionalSidecar.Write(dir, rel, mid);
         else
             PositionalSidecar.Delete(dir, rel);
@@ -717,11 +740,11 @@ public static class RepositoryIndexer
         SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string dir,
         string rel, ref int removed)
     {
-        if (snapshot.TryGetValue(rel, out var st) && snapshot.Remove(rel))
+        if (snapshot.TryGetValue(rel, out _) && snapshot.Remove(rel))
         {
             text.RemovePath(rel);
             symbols.RemovePath(rel);
-            if (st.Size >= LargeFileIndexer.SidecarThresholdBytes) PositionalSidecar.Delete(dir, rel);
+            PositionalSidecar.Delete(dir, rel); // idempotent (no-op if none) - cutoff-independent, no orphans
             removed++;
         }
 
@@ -729,11 +752,10 @@ public static class RepositoryIndexer
         var children = snapshot.KeysWithPrefix(prefix).ToList();
         foreach (var k in children)
         {
-            bool big = snapshot.TryGetValue(k, out var cs) && cs.Size >= LargeFileIndexer.SidecarThresholdBytes;
             snapshot.Remove(k);
             text.RemovePath(k);
             symbols.RemovePath(k);
-            if (big) PositionalSidecar.Delete(dir, k);
+            PositionalSidecar.Delete(dir, k); // idempotent - covers any adaptive cutoff without orphaning
             removed++;
         }
     }
