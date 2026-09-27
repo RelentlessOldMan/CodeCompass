@@ -37,6 +37,44 @@ public class DiagnosticsTests
     }
 
     [Fact]
+    public void Report_RedactsSecretLookingEnvValues_ButKeepsNamesAndBenignValues()
+    {
+        // The support bundle is meant to be shared, so a CODECOMPASS_* var whose NAME hints at a secret
+        // (TOKEN/SECRET/KEY/PASS/PWD/CRED) must have its VALUE masked; benign knobs still print verbatim.
+        // Regression guard for the diagnostics privacy guarantee - a leak here ships credentials to whoever
+        // receives the bundle.
+        const string secretVar = "CODECOMPASS_FUZZTEST_APIKEY";               // matches "KEY"
+        const string secretVal = "sk-supersecret-DO-NOT-LEAK-9f83a2b1";
+        const string benignVar = "CODECOMPASS_FUZZTEST_MAX_MB";               // no secret marker
+        const string benignVal = "12345";
+        var prevSecret = System.Environment.GetEnvironmentVariable(secretVar);
+        var prevBenign = System.Environment.GetEnvironmentVariable(benignVar);
+        try
+        {
+            System.Environment.SetEnvironmentVariable(secretVar, secretVal);
+            System.Environment.SetEnvironmentVariable(benignVar, benignVal);
+
+            using var repo = new TempRepo();
+            repo.Write("x.cs", "namespace N { class A { } }");
+            var (t, s, _) = RepositoryIndexer.Build(repo.Root);
+            t.Dispose(); s.Dispose();
+
+            var sw = new StringWriter();
+            RepoDiagnostics.WriteReport(sw, repo.Root);
+            var text = sw.ToString();
+
+            Assert.DoesNotContain(secretVal, text);            // the secret value must never appear
+            Assert.Contains($"{secretVar}=<redacted>", text);  // masked, but the name is still disclosed
+            Assert.Contains($"{benignVar}={benignVal}", text); // a non-secret knob prints its value verbatim
+        }
+        finally
+        {
+            System.Environment.SetEnvironmentVariable(secretVar, prevSecret);
+            System.Environment.SetEnvironmentVariable(benignVar, prevBenign);
+        }
+    }
+
+    [Fact]
     public void HealthChecks_FreshIndex_IsUpToDate_AndProvenanceIsNotAWarning()
     {
         using var repo = new TempRepo();
