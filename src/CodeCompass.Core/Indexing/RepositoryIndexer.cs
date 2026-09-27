@@ -130,6 +130,7 @@ public static class RepositoryIndexer
         long totalBytes = 0;
         long totalPostings = 0;
         int totalSymbolSkipped = 0;
+        int totalMemorySkipped = 0;
         var gate = new object();
 
         var sw = Stopwatch.StartNew();
@@ -205,6 +206,17 @@ public static class RepositoryIndexer
                             Log.For(root).Warn($"NOT INDEXED - large file unreadable (transient I/O over a share?): {file.RelativePath}");
                         return worker;
                     }
+                    catch (OutOfMemoryException)
+                    {
+                        // Same memory-pressure backstop as the whole-file path: reclaim, skip this file,
+                        // keep building. It's left out of the snapshot so `update` re-indexes it later.
+                        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true);
+                        worker.MemorySkipped++;
+                        Log.For(root).Warn($"NOT INDEXED - skipped under memory pressure (machine near its commit limit): " +
+                            $"{file.RelativePath}. Close other memory-heavy apps, or lower CODECOMPASS_THREADS / " +
+                            $"CODECOMPASS_READ_BUDGET_MB, then re-run 'codecompass update' to pick it up.");
+                        return worker;
+                    }
                     finally { inFlight.TryRemove(tid, out var _sg); reads.Release(StreamingReserveBytes); }
                 }
 
@@ -219,7 +231,11 @@ public static class RepositoryIndexer
                 try
                 {
                     byte[] bytes;
+                    // OutOfMemory here is NOT an I/O error: it means the machine can't commit the read.
+                    // Let it fall to the memory-pressure handler below (which reclaims and skips the file
+                    // without aborting the whole build) rather than mislabeling it "transient I/O".
                     try { bytes = File.ReadAllBytes(file.FullPath); }
+                    catch (OutOfMemoryException) { throw; }
                     // WARN, not Debug: a read failure silently drops the file from the index (the "N fewer
                     // files, no log" symptom over SMB); surface it at the default level so it's diagnosable.
                     catch (Exception ex) { Log.For(root).Warn($"NOT INDEXED - file unreadable (transient I/O over a share?): {file.RelativePath}: {ex.Message}"); return worker; }
@@ -260,6 +276,22 @@ public static class RepositoryIndexer
                     if (worker.Symbols.ApproxBytes >= symBudget) FlushSymbols(worker, dir, ref symSegCounter, symSegFiles);
                     return worker;
                 }
+                catch (OutOfMemoryException)
+                {
+                    // Memory-pressure backstop: the machine ran out of committable memory mid-file (a big
+                    // file read/decode when other processes hold most of the commit charge). The failed
+                    // allocation didn't happen, so the process is intact - reclaim it, skip THIS file, and
+                    // keep building instead of aborting the whole index. The file is left out of the
+                    // snapshot, so a later `codecompass update` re-indexes it once memory frees (self-heals).
+                    // The read budget is normally sized to prevent this (it caps against available commit);
+                    // this catches the case where the machine tightened further mid-build.
+                    GC.Collect(2, GCCollectionMode.Aggressive, blocking: true);
+                    worker.MemorySkipped++;
+                    Log.For(root).Warn($"NOT INDEXED - skipped under memory pressure (machine near its commit limit): " +
+                        $"{file.RelativePath}. Close other memory-heavy apps, or lower CODECOMPASS_THREADS / " +
+                        $"CODECOMPASS_READ_BUDGET_MB, then re-run 'codecompass update' to pick it up.");
+                    return worker;
+                }
                 finally { inFlight.TryRemove(tid, out var _gone); reads.Release(footprint); }
             },
             worker =>
@@ -272,6 +304,7 @@ public static class RepositoryIndexer
                     totalBytes += worker.Bytes;
                     totalPostings += worker.TrigramPostings;
                     totalSymbolSkipped += worker.SymbolSkipped;
+                    totalMemorySkipped += worker.MemorySkipped;
                 }
                 worker.Extractor.Dispose();
             });
@@ -290,6 +323,19 @@ public static class RepositoryIndexer
             Log.For(root).Info($"skipped {walker.OverCapSkipped:N0} file(s) over the " +
                 $"{ignore.MaxFileSizeBytes / 1048576.0:F0} MB size cap{largest} - not in the index. " +
                 $"Raise CODECOMPASS_MAX_FILE_MB to include them.");
+        }
+
+        if (totalMemorySkipped > 0)
+        {
+            // A coverage gap, but a TRANSIENT one (unlike the size cap): the machine was out of committable
+            // memory during this build. NOT persisted to meta - the files are simply absent from the
+            // snapshot, so `codecompass update` re-indexes them once memory frees. Surface loudly on both
+            // the log and stderr so a partial index isn't mistaken for a complete one.
+            var msg = $"{totalMemorySkipped:N0} file(s) were SKIPPED under memory pressure and are NOT in this index " +
+                      "(the machine was near its commit limit). Close other memory-heavy apps, or lower " +
+                      "CODECOMPASS_THREADS / CODECOMPASS_READ_BUDGET_MB, then re-run 'codecompass update' to pick them up.";
+            Log.For(root).Warn(msg);
+            Console.Error.WriteLine($"[codecompass] {msg}");
         }
 
         if (walker.DroppedDirs > 0)
@@ -432,6 +478,7 @@ public static class RepositoryIndexer
         public long Bytes;
         public long TrigramPostings; // sum of per-doc distinct-trigram counts (deterministic total)
         public int SymbolSkipped;    // symbol-language files indexed for text but with NO symbols extracted
+        public int MemorySkipped;    // files skipped because the machine was out of committable memory (transient; not persisted)
     }
 
     /// <param name="onScan">Optional heartbeat: invoked with the running count of files stat-walked,

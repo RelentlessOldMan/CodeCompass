@@ -235,18 +235,29 @@ public static class CodeCompassConfig
     /// <summary>
     /// Total file bytes allowed in flight during a parallel build. Bounds RAM when the file cap is
     /// large: without it, every core could read a multi-GB file at once and blow up memory. Scales
-    /// with machine RAM (~1/16 of it, clamped 256 MB..4 GB); a single file bigger than the budget is
-    /// read alone. Override with CODECOMPASS_READ_BUDGET_MB / config readBudgetMb.
+    /// with machine RAM (~1/16 of it, clamped 256 MB..4 GB), but is ALSO capped at half the memory the
+    /// machine can actually commit right now - sizing against total RAM alone over-commits when other
+    /// processes hold most of the commit charge (a game, other builds), turning a big-file parallel
+    /// read into an OutOfMemoryException. A single file bigger than the budget is read alone. Override
+    /// with CODECOMPASS_READ_BUDGET_MB / config readBudgetMb (which bypasses the availability cap).
     /// </summary>
     public static long ReadBudgetBytes() => ReadBudgetBytes(_current);
     public static long ReadBudgetBytes(RepoConfig cfg)
     {
         long? mb = EnvLong("CODECOMPASS_READ_BUDGET_MB") ?? cfg.ReadBudgetMb;
         if (mb is > 0) return mb.Value * 1024 * 1024;
-        long avail;
-        try { avail = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { avail = 8L * 1024 * 1024 * 1024; }
-        if (avail <= 0) avail = 8L * 1024 * 1024 * 1024;
-        return Math.Clamp(avail / 16, 256L * 1024 * 1024, 4L * 1024 * 1024 * 1024);
+        long total;
+        try { total = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { total = 8L * 1024 * 1024 * 1024; }
+        if (total <= 0) total = 8L * 1024 * 1024 * 1024;
+        long budget = Math.Clamp(total / 16, 256L * 1024 * 1024, 4L * 1024 * 1024 * 1024);
+
+        // Cap against what can ACTUALLY be committed now, leaving half the free commit as headroom for
+        // the decode transient (raw bytes + UTF-16 string) and everything else on the machine. Below the
+        // 256 MB floor we keep the floor and lean on the per-file OOM backstop rather than stalling.
+        long avail = Diagnostics.SystemMemory.AvailableCommitBytes();
+        if (avail > 0)
+            budget = Math.Min(budget, Math.Max(256L * 1024 * 1024, avail / 2));
+        return budget;
     }
 
     /// <summary>Seconds of no indexing progress before a stall warning (default 60).</summary>
