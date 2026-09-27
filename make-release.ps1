@@ -67,13 +67,21 @@ if ($Publish) {
         git merge-base --is-ancestor origin/main HEAD
         if ($LASTEXITCODE -ne 0) { throw "origin/main has commits not in this build (diverged) - reconcile (git pull --rebase) before releasing." }
 
-        Write-Host "Pushing $sha -> origin/main ..."
-        # --no-verify: we already ran check.ps1 -Big above, so skip the pre-push hook's redundant re-run.
-        # (With -SkipTests we did NOT gate here - let the hook run, so keep verification on that push.)
-        $pushArgs = @("push", "origin", "${sha}:refs/heads/main")
-        if (-not $SkipTests) { $pushArgs = @("push", "--no-verify", "origin", "${sha}:refs/heads/main") }
-        git @pushArgs
-        if ($LASTEXITCODE -ne 0) { throw "git push to origin/main failed - resolve, then re-run." }
+        # Skip the push entirely if origin/main is already at HEAD (the usual case: we push before releasing).
+        # A no-op `git push` prints "Everything up-to-date" to STDERR, which surfaces as noisy NativeCommandError
+        # output when the release is run under 2>&1. Nothing to push -> say so and move on.
+        git merge-base --is-ancestor HEAD origin/main
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "origin/main already at $sha - nothing to push."
+        } else {
+            Write-Host "Pushing $sha -> origin/main ..."
+            # --no-verify: we already ran check.ps1 -Big above, so skip the pre-push hook's redundant re-run.
+            # (With -SkipTests we did NOT gate here - let the hook run, so keep verification on that push.)
+            $pushArgs = @("push", "origin", "${sha}:refs/heads/main")
+            if (-not $SkipTests) { $pushArgs = @("push", "--no-verify", "origin", "${sha}:refs/heads/main") }
+            git @pushArgs
+            if ($LASTEXITCODE -ne 0) { throw "git push to origin/main failed - resolve, then re-run." }
+        }
     }
     finally { $ErrorActionPreference = $prevEap }
 }
@@ -121,7 +129,13 @@ try {
     }
     Write-Host "  PASS  MCP server responds to initialize + tools/list (tools present)."
 }
-finally { try { if (-not $mcpProc.HasExited) { $mcpProc.Kill() } } catch {} }
+finally {
+    # Fully terminate the smoke process AND wait for the OS to release its handle on CodeCompass.Mcp.exe
+    # before we package plugin/bin - otherwise the zip below races the dying process and hits a file lock.
+    try { if (-not $mcpProc.HasExited) { $mcpProc.Kill() } } catch {}
+    try { $mcpProc.WaitForExit(5000) | Out-Null } catch {}
+    try { $mcpProc.Dispose() } catch {}
+}
 
 # 2) Version = the numeric version build-plugin stamped into the manifest (matches `codecompass version`).
 $pjPath = Join-Path $root "plugin/.claude-plugin/plugin.json"
@@ -188,8 +202,10 @@ Write-Host "Zipping plugin -> $zip ..."
 # probe). Let it settle and retry so packaging doesn't fail on a transient lock.
 [GC]::Collect(); Start-Sleep -Seconds 2
 for ($attempt = 1; ; $attempt++) {
-    try { Compress-Archive -Path (Join-Path $root "plugin/*") -DestinationPath $zip -CompressionLevel Optimal; break }
-    catch { if ($attempt -ge 4) { throw }; Write-Host "  zip locked, retrying ($attempt)..."; Start-Sleep -Seconds 3 }
+    # -ErrorAction Stop: promote a lock to a terminating error the catch handles, WITHOUT Compress-Archive
+    # also emitting a non-terminating error record (which would surface as noise even though we recover).
+    try { Compress-Archive -Path (Join-Path $root "plugin/*") -DestinationPath $zip -CompressionLevel Optimal -ErrorAction Stop; break }
+    catch { if ($attempt -ge 4) { throw }; Write-Host "  zip locked, retrying ($attempt)..."; [GC]::Collect(); Start-Sleep -Seconds 3 }
 }
 $zipMb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host ("Release zip ready: {0} ({1} MB)" -f $zip, $zipMb)
