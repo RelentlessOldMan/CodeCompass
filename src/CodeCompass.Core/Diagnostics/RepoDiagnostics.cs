@@ -77,6 +77,7 @@ public static class RepoDiagnostics
         w.WriteLine($"CodeCompass diagnostics");
         w.WriteLine($"generated (UTC):  {DateTime.UtcNow:o}");
         w.WriteLine($"version:          {BuildInfo.Version}");
+        w.WriteLine($"session:          {Log.SessionId}  (this report run; log lines are tagged [pid/session])");
         w.WriteLine();
 
         w.WriteLine("== environment ==");

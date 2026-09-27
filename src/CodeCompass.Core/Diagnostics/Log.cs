@@ -16,8 +16,18 @@ public enum LogLevel { Off = 0, Error = 1, Warn = 2, Info = 3, Debug = 4 }
 /// </summary>
 public static class Log
 {
+    /// <summary>A short id unique to THIS process execution, stamped on every log line so all events from
+    /// one run - and one run among several concurrent servers writing the shared log - can be correlated.
+    /// Declared before <see cref="Global"/> so it is set before any line is written.</summary>
+    public static string SessionId { get; } = NewSessionId();
+
     /// <summary>Process-wide log: lifecycle events and all warnings/errors across repos.</summary>
     public static DiskLogger Global { get; } = BuildGlobal();
+
+    private static string NewSessionId()
+    {
+        try { return Guid.NewGuid().ToString("N")[..8]; } catch { return "00000000"; }
+    }
 
     private static readonly object ReposGate = new();
     private static readonly Dictionary<string, DiskLogger> Repos = new(StringComparer.OrdinalIgnoreCase);
@@ -137,7 +147,7 @@ public sealed class DiskLogger
             var sb = new StringBuilder(160);
             sb.Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff"))
               .Append(' ').Append(Pad(level))
-              .Append(" [").Append(_pid).Append("] [").Append(_component).Append("] ")
+              .Append(" [").Append(_pid).Append('/').Append(Log.SessionId).Append("] [").Append(_component).Append("] ")
               .Append(message);
             if (ex is not null)
                 sb.Append(" | ").Append(ex.GetType().Name).Append(": ").Append(ex.Message)

@@ -16,7 +16,11 @@ var root = !string.IsNullOrEmpty(argRoot) && Directory.Exists(argRoot)
     ? argRoot
     : Directory.GetCurrentDirectory();
 
-Log.Global.Info($"mcp server v{BuildInfo.Version} starting, root={root}");
+// Install top-level exception logging + session-liveness tracking BEFORE any real work, so a background
+// crash is recorded and a previous abnormal exit is reported on this start (this is a long-lived server).
+DiagnosticsSession.Start("mcp", trackSession: true);
+
+Log.Global.Info($"mcp server v{BuildInfo.Version} starting (session {Log.SessionId}), root={root}");
 Log.For(root).Info("mcp server attached to this repo");
 // Also to stderr (stdout is the JSON-RPC transport): hosts like Codex that pass no workspace arg rely on
 // the cwd fallback, so surfacing the RESOLVED root here makes a wrong-directory launch diagnosable at a
