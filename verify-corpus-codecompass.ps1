@@ -62,8 +62,12 @@ function Get-Refs([string]$sym) {
 }
 
 # --- POSITIVE oracle ---
-$positive = @($syms.PSObject.Properties | Where-Object { @($_.Value.refs).Count -gt 0 } |
-    Sort-Object { $rng.Next() } | Select-Object -First $Sample)
+# Exclude expectedMiss symbols (token-paste names a lexical indexer is SUPPOSED to miss) - they have their
+# own oracle below; sampling them as positives would flag a correct honest-miss as a recall failure.
+$positive = @($syms.PSObject.Properties | Where-Object {
+        @($_.Value.refs).Count -gt 0 -and
+        -not (($_.Value.PSObject.Properties.Name -contains 'expectedMiss') -and $_.Value.expectedMiss)
+    } | Sort-Object { $rng.Next() } | Select-Object -First $Sample)
 $pass = 0; $fail = 0
 foreach ($prop in $positive) {
     $sym = $prop.Name; $expected = @($prop.Value.refs)
@@ -107,6 +111,61 @@ if ($gated.Count -gt 0) {
     $dout = Get-Content $do -Raw; Remove-Item $do -Force -ErrorAction SilentlyContinue
     if ($dout -match 'translation unit\(s\) reference at least one') { Write-Host "  OK  doctor reported the unresolved-include scan" -ForegroundColor Green }
     else { $fail++; Write-Host "  MISS doctor did not report the unresolved-include scan" -ForegroundColor Red }
+}
+
+# --- EXPECTED-MISS oracle (honest-miss dual of unreachableRefs) ---
+# Symbols with expectedMiss=true are token-paste (##) macro names that never appear literally in the
+# source, so a lexical / preprocessor-blind indexer is EXPECTED to return no def/ref site. Finding one
+# would be a false positive (the indexer inventing a symbol that isn't textually there).
+$expMiss = @($syms.PSObject.Properties | Where-Object {
+        ($_.Value.PSObject.Properties.Name -contains 'expectedMiss') -and $_.Value.expectedMiss } |
+    Sort-Object { $rng.Next() } | Select-Object -First $Sample)  # sample like positives - one CLI call each
+if ($expMiss.Count -gt 0) {
+    Write-Host "--- expected-miss oracle: token-paste (##) names must NOT resolve (sampled $($expMiss.Count)) ---"
+    foreach ($prop in $expMiss) {
+        $sym = $prop.Name
+        $out = Get-Refs $sym
+        # A resolved hit prints a path:line:col location. Its ABSENCE is the correct (honest-miss) result.
+        if ($out -match ':\d+:\d+:') {
+            $fail++; Write-Host "  LEAK $sym : an expected-miss token-paste name resolved to a location" -ForegroundColor Red
+        }
+        else { Write-Host "  OK  $sym : correctly NOT resolved (expected miss)" -ForegroundColor Green }
+    }
+}
+
+# --- DUP-CONTENT oracle: byte-identical copies must each stay independently searchable ---
+# Content-hash dedup is for change detection, not for collapsing search results: every byte-identical
+# file is its own document. A distinctive identifier from one copy must find ALL copies in the group.
+if (($m.PSObject.Properties.Name -contains 'dupGroups') -and $m.dupGroups) {
+    Write-Host "--- dup-content oracle: every identical copy is indexed (dedup must not drop files) ---"
+    $dupSample = @($m.dupGroups.PSObject.Properties | Sort-Object { $rng.Next() } | Select-Object -First $Sample)
+    foreach ($grp in $dupSample) {
+        $paths = @($grp.Value.paths)
+        if ($paths.Count -lt 2) { continue }
+        $first = Join-Path $Corpus ($paths[0] -replace '/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path $first)) { $fail++; Write-Host "  MISS dup file absent on disk: $($paths[0])" -ForegroundColor Red; continue }
+        # Prefer a full identifier that embeds the group name (e.g. dup0 -> dup0_seed) - guaranteed
+        # group-distinctive, so results aren't a broad token spanning the corpus; fall back to any
+        # long-ish identifier. Scan identifiers on each line and pick the first containing the name.
+        $tok = $null
+        foreach ($ln in (Get-Content $first -TotalCount 300)) {
+            foreach ($id in [regex]::Matches($ln, '[A-Za-z_][A-Za-z0-9_]*')) {
+                if ($id.Value -like "*$($grp.Name)*") { $tok = $id.Value; break }
+            }
+            if ($tok) { break }
+        }
+        if (-not $tok) {
+            foreach ($ln in (Get-Content $first -TotalCount 300)) {
+                $mt = [regex]::Match($ln, '[A-Za-z_][A-Za-z0-9_]{11,}')
+                if ($mt.Success) { $tok = $mt.Value; break }
+            }
+        }
+        if (-not $tok) { Write-Host "  SKIP $($grp.Name): no distinctive token to search" -ForegroundColor Yellow; continue }
+        $out = & $Cli search $Corpus $tok 2>$null | Out-String
+        $missing = @($paths | Where-Object { $out -notmatch [regex]::Escape([IO.Path]::GetFileName($_)) })
+        if ($missing.Count -eq 0) { Write-Host "  OK  $($grp.Name): all $($paths.Count) identical copies searchable via '$tok'" -ForegroundColor Green }
+        else { $fail++; Write-Host "  MISS $($grp.Name): $($missing.Count)/$($paths.Count) copies not found for '$tok' (dedup dropped a file, or results were capped)" -ForegroundColor Red }
+    }
 }
 
 if ($fail -ne 0) { Write-Host "VERIFY: FAIL ($fail problem(s))" -ForegroundColor Red; exit 1 }
