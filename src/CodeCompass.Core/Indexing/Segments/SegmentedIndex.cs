@@ -316,12 +316,14 @@ public sealed class SegmentedIndex : IDisposable
         // stat needed to know a file is large.
         if (PositionalSidecar.HasSidecar(_dir, rel))
         {
-            bool handled = PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults, caseSensitive, out long sidecarBytes);
+            bool handled = PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults, caseSensitive, out long srcBytes, out long scBytesRead);
             if (!handled)
                 FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network);
             // Block bytes (or a whole-file fallback read) + the sidecar's own bytes read to pick those blocks.
-            if (trace != null) AddTrace(trace, rel, true, handled ? sidecarBytes : TryFileLength(full),
-                                        PositionalSidecar.SidecarLength(_dir, rel), results.Count);
+            // scBytesRead is 0 when the sidecar was already parsed+cached in-process, so the trace reflects
+            // the TRUE I/O this query paid (the field report's ~695 MB residual was this re-read every call).
+            if (trace != null) AddTrace(trace, rel, true, handled ? srcBytes : TryFileLength(full),
+                                        scBytesRead, results.Count);
             return results;
         }
 
