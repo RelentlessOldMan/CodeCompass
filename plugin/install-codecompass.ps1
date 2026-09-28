@@ -5,13 +5,17 @@
 .DESCRIPTION
   Run this from the unzipped plugin folder (it locates bin\CodeCompass.Mcp.exe next to itself).
 
-  Codex: registers the server via `codex mcp add codecompass -- "<abs path>\bin\CodeCompass.Mcp.exe"`.
-    - The ABSOLUTE exe path is resolved at install time, so the server starts no matter what directory
-      `codex` is invoked from (no hardcoded %USERPROFILE% assumption, no copy step).
-    - No workspace argument is passed: the server serves Codex's working directory (its cwd fallback) and
-      prints the resolved root to stderr at startup, so a wrong-directory launch is obvious in Codex's MCP
-      log. Codex launches a stdio MCP server per session with the session's cwd, so it targets that project.
-    - Idempotent: an existing `codecompass` entry is removed first, so re-running upgrades cleanly.
+  Codex: installs via the native Codex PLUGIN marketplace (preferred) so Codex gets BOTH the MCP server
+  AND the bundled advisory skill (skills\codecompass\SKILL.md) that steers Codex toward the tools:
+      codex plugin marketplace add "<this folder>"     # this folder ships .agents\plugins\marketplace.json
+      codex plugin add codecompass@codecompass         # registers the MCP server (${CODEX_PLUGIN_ROOT}\bin\...)
+    - The plugin's mcp.json uses ${CODEX_PLUGIN_ROOT}, which Codex expands to this folder, so no absolute
+      path is baked in and no copy step is needed. Verified: `codex mcp list` then shows the server enabled.
+    - No workspace argument is passed: the server serves Codex's working directory (cwd fallback) and prints
+      the resolved root to stderr at startup. Codex launches a stdio MCP server per session with the cwd.
+    - FALLBACK: if the installed Codex is too old to have `codex plugin` (pre-marketplace), the script
+      registers the raw MCP server via `codex mcp add codecompass -- "<abs>\bin\CodeCompass.Mcp.exe"`
+      instead (server only, no skill). Idempotent either way - re-running upgrades cleanly.
 
   Claude: does NOT touch Claude config; it prints the marketplace commands to run (Claude owns that flow).
 
@@ -50,14 +54,31 @@ function Test-CodexInstall {
         throw "CodeCompass.Mcp.exe is running from this folder (pid $($running.Id -join ', ')). Close Codex threads using it, then re-run."
     }
 
-    if ($PSCmdlet.ShouldProcess("Codex", "register MCP server '$Name' -> $exeFull")) {
-        # Idempotent upsert: drop any prior entry (ignore if absent), then add the current absolute path.
+    # Prefer the native plugin marketplace (ships the MCP server AND the steering skill). Detect support
+    # by probing `codex plugin --help`; fall back to raw `codex mcp add` on older Codex builds.
+    & codex plugin --help *> $null
+    $hasPlugin = ($LASTEXITCODE -eq 0)
+
+    if ($hasPlugin) {
+        if ($PSCmdlet.ShouldProcess("Codex", "install plugin '$Name' from local marketplace '$root'")) {
+            # Idempotent: re-adding a marketplace / plugin already present is tolerated (Codex reports it).
+            & codex plugin marketplace add "$root" *> $null
+            & codex plugin add "$Name@codecompass" *> $null
+            if ($LASTEXITCODE -ne 0) { try { & codex plugin add $Name --marketplace codecompass *> $null } catch { } }
+            Write-Host "Installed Codex plugin '$Name' from $root (MCP server + skill)." -ForegroundColor Green
+            Write-Host "Verify:  codex plugin list    |    codex mcp list"
+            Write-Host "Note: the server serves Codex's working directory; open Codex in your project root."
+        }
+        return
+    }
+
+    if ($PSCmdlet.ShouldProcess("Codex", "register MCP server '$Name' -> $exeFull (fallback: no plugin subcommand)")) {
+        # Older Codex without `codex plugin`: idempotent upsert of the raw MCP server (no skill).
         try { & codex mcp remove $Name 2>$null | Out-Null } catch { }
         & codex mcp add $Name -- $exeFull
         if ($LASTEXITCODE -ne 0) { throw "codex mcp add failed (exit $LASTEXITCODE)." }
-        Write-Host "Registered '$Name' with Codex -> $exeFull" -ForegroundColor Green
+        Write-Host "Registered '$Name' with Codex -> $exeFull (raw MCP; upgrade Codex for the skill)." -ForegroundColor Green
         Write-Host "Verify:  codex mcp get $Name    |    codex mcp list"
-        Write-Host "Note: the server serves Codex's working directory; open Codex in your project root."
     }
 }
 
