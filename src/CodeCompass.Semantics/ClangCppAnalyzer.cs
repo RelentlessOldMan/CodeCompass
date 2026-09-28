@@ -189,24 +189,37 @@ public sealed class ClangCppAnalyzer : IDisposable
         // Stop parsing further candidates once the process has grown past a budget (or free commit runs low),
         // and disclose the partial coverage. This bounds peak regardless of candidate count.
         long baseWs = CurrentWorkingSetBytes();
+        long totalRam; try { totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { totalRam = 8L << 30; }
+        if (totalRam <= 0) totalRam = 8L << 30;
+
+        // Absolute session ceiling on total process working set from clang's (native, not-returned-to-OS) TU
+        // memory. Bounds the long-lived server ACROSS queries. Scales with total RAM and is env-overridable.
+        // (v1.0.175/176 clamped this to 3 GB regardless of box RAM; the real-tree field report 2026-09-28
+        // showed that on a 32 GB box the session crossed 3 GB after one or two broad queries and OverBudget()
+        // then returned true before parsing a SINGLE candidate - a near-total downgrade to lexical-only.
+        // Scale with RAM instead; the free-commit Floor below is the real hard OOM guard, this is the coarse cap.)
+        long absCeiling;
+        var sessMb = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB");
+        if (long.TryParse(sessMb, out var sm) && sm > 0) absCeiling = sm * 1024 * 1024;
+        else absCeiling = Math.Clamp(totalRam / 2, 2L << 30, 32L << 30);
+
+        // Per-QUERY growth cap: bounds how much ONE query may grow the working set, so a single broad sweep
+        // can't consume the whole session ceiling and starve later queries. Scales with free commit; env-
+        // overridable. Upper bound tracks the session ceiling (was a flat 1.5 GB, which on a big box limited
+        // even the FIRST cold query to ~14 of 881 candidates).
         long growthBudget;
         var envMb = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB");
         if (long.TryParse(envMb, out var mb) && mb > 0) growthBudget = mb * 1024 * 1024;
-        else growthBudget = Math.Clamp(SystemMemory.AvailableCommitBytes() / 4, 512L * 1024 * 1024, 1536L * 1024 * 1024);
-        const long Floor = 1536L * 1024 * 1024; // never drive free commit below this (hard OOM guard)
-        // Absolute working-set ceiling: bounds the SESSION, not just this query. clang's native TU memory is
-        // not returned to the OS between queries, so a per-query growth cap alone could ratchet upward across
-        // queries in a long-lived server; this caps total process working set from clang work regardless of history.
-        long totalRam; try { totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { totalRam = 8L << 30; }
-        if (totalRam <= 0) totalRam = 8L << 30;
-        long absCeiling = Math.Clamp(totalRam / 4, 1L << 30, 3L << 30);
+        else growthBudget = Math.Clamp(SystemMemory.AvailableCommitBytes() / 4, 512L << 20, absCeiling);
+
+        const long Floor = 1536L * 1024 * 1024; // never drive free commit below this (the true OOM guard)
         bool OverBudget()
         {
             long ws = CurrentWorkingSetBytes();
             if (ws - baseWs > growthBudget) return true;   // per-query growth cap
             if (ws > absCeiling) return true;               // absolute session cap (stops cross-query ratchet)
             long avail = SystemMemory.AvailableCommitBytes();
-            return avail > 0 && avail < Floor;
+            return avail > 0 && avail < Floor;              // real memory pressure at check-time (true OOM guard)
         }
 
         if (files.Count == 1)

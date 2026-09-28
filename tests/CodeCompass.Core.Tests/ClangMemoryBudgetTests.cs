@@ -34,4 +34,37 @@ public class ClangMemoryBudgetTests
         }
         finally { Environment.SetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB", prev); }
     }
+
+    // Regression guard from the 1.0.176 real-tree field report: the memory FIX must not silently degrade to
+    // lexical-only. v1.0.176's absolute session ceiling clamped to 3 GB regardless of box RAM, so on a big box
+    // the pass parsed 0 candidates and returned all-lexical while STILL keeping peak RSS flat - a flat-RSS check
+    // alone would have passed it. This asserts the complement: with a generous budget a cold pass parses ALL
+    // candidates (coverage stays high), so a future change can't regress coverage to 0/N unnoticed.
+    [Fact]
+    public void FindReferences_GenerousBudget_ParsesAllCandidates()
+    {
+        using var repo = new TempRepo();
+        repo.Write("hot.c", "int hot(int x){ return x + 1; }\n");
+        for (int i = 0; i < 12; i++)
+            repo.Write($"use_{i}.c", $"int hot(int);\nint use_{i}(int x){{ return hot(x); }}\n");
+
+        var prevQ = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB");
+        var prevS = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB");
+        try
+        {
+            // Generous per-query and per-session budgets: nothing should trip on 13 tiny TUs.
+            Environment.SetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB", "4000");
+            Environment.SetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB", "4000");
+            var r = new ClangCppAnalyzer(repo.Root).FindReferencesDetailed("hot");
+
+            Assert.True(r.CandidateTus >= 2, $"expected multiple candidate TUs, got {r.CandidateTus}");
+            Assert.False(r.MemoryStopped, "a generous budget must not stop the pass on tiny TUs");
+            Assert.Equal(r.CandidateTus, r.ParsedTus); // full coverage: every candidate parsed
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB", prevQ);
+            Environment.SetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB", prevS);
+        }
+    }
 }

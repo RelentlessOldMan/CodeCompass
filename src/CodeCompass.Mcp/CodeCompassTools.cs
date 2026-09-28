@@ -261,7 +261,7 @@ public static class CodeCompassTools
         {
             var bits = new List<string>();
             if (cppParsed < cppCand) bits.Add($"{cppParsed:N0}/{cppCand:N0} candidate C/C++ file(s) parsed");
-            if (cppMemStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_QUERY_MEM_MB for more)");
+            if (cppMemStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_SESSION_MEM_MB for the per-session ceiling or CODECOMPASS_CPP_QUERY_MEM_MB for a single query)");
             if (cppUnresolved.Count > 0)
             {
                 var shownH = string.Join(", ", cppUnresolved.Take(5));
