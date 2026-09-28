@@ -42,19 +42,38 @@ public sealed class ClangCppAnalyzer : IDisposable
     private bool _hasCompileDb;
     private bool _dbLoaded;
 
-    // How many candidate translation units to parse concurrently. Each giant-include TU can hold ~1 GB while
-    // parsing, so bound the degree so peak stays sane: ~half of available RAM divided by a ~1.2 GB per-TU
-    // reserve, capped at the core count and a modest ceiling. Env CODECOMPASS_CPP_PARSE_THREADS overrides.
+    // Max source-file size handed to clang for a semantic parse. A multi-MB C/C++ SOURCE file is
+    // generated/pathological, and its translation unit can balloon to GBs of AST - parsing several such TUs
+    // at once is what drove a broad find_references to ~16 GB (a token referenced across 200x 2-8 MB files,
+    // ~4 GB per TU x degree 4). Above this cap the file is left to the LEXICAL reference layer (still found,
+    // just not clang-confirmed), so memory stays bounded without dropping results. Env CODECOMPASS_CPP_MAX_TU_MB.
+    private static long MaxTuBytes()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_MAX_TU_MB");
+        if (long.TryParse(env, out var mb) && mb > 0) return mb * 1024 * 1024;
+        return 2L * 1024 * 1024;
+    }
+
+    // True if this source file is too large for a bounded semantic parse - skip clang, let the lexical
+    // reference layer (memory-bounded) handle it. Stat failure -> not skipped (let the parse attempt decide).
+    private static bool TooBigForClang(string full)
+    {
+        try { return new FileInfo(full).Length > MaxTuBytes(); } catch { return false; }
+    }
+
+    // How many candidate translation units to parse concurrently. Each parse can hold a large AST, so bound
+    // the degree by AVAILABLE memory (NOT total - a busy box has far less real headroom; total was the hole
+    // that let peak reach 16 GB) over a conservative per-TU reserve, capped at the core count and a modest
+    // ceiling. Combined with the per-TU size cap above, worst-case peak is (degree x capped-TU). Env
+    // CODECOMPASS_CPP_PARSE_THREADS overrides.
     private static int ParseDegree()
     {
         var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_PARSE_THREADS");
         if (int.TryParse(env, out var n) && n > 0) return n;
-        long avail;
-        try { avail = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { avail = 8L * 1024 * 1024 * 1024; }
-        int byMem = (int)Math.Max(1, (avail / 2) / (1200L * 1024 * 1024));
-        // Cap at 4 by default: memory was the reported bug, so keep worst-case peak modest (~4 giant TUs ~4 GB)
-        // while still giving a big speedup on many-includer queries. Raise via CODECOMPASS_CPP_PARSE_THREADS.
-        return Math.Clamp(Math.Min(Environment.ProcessorCount, byMem), 1, 4);
+        long avail = CodeCompass.Core.Diagnostics.SystemMemory.AvailableCommitBytes();
+        if (avail <= 0) { try { avail = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { avail = 8L * 1024 * 1024 * 1024; } }
+        int byMem = (int)Math.Max(1, (avail / 2) / (1500L * 1024 * 1024));
+        return Math.Clamp(Math.Min(Environment.ProcessorCount, byMem), 1, 3);
     }
 
     private readonly record struct Loc(string Full, int Line, int Column); // Full = absolute path
@@ -206,7 +225,7 @@ public sealed class ClangCppAnalyzer : IDisposable
                 try { full = Path.GetFullPath(f); } catch { continue; }
                 if (!SourceExtensions.Contains(Path.GetExtension(full))) continue; // headers are parsed via #include
                 if (OwnerOf(full) is null) continue;                               // must be under a root
-                if (seen.Add(full) && File.Exists(full)) yield return full;
+                if (seen.Add(full) && File.Exists(full) && !TooBigForClang(full)) yield return full;
             }
         }
         else
@@ -216,7 +235,7 @@ public sealed class ClangCppAnalyzer : IDisposable
                 foreach (var file in walker.Walk(root))
                 {
                     if (!SourceExtensions.Contains(Path.GetExtension(file.RelativePath))) continue;
-                    if (seen.Add(file.FullPath) && FileContains(file.FullPath, name)) yield return file.FullPath;
+                    if (seen.Add(file.FullPath) && !TooBigForClang(file.FullPath) && FileContains(file.FullPath, name)) yield return file.FullPath;
                 }
         }
     }
