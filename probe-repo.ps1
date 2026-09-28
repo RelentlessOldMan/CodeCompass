@@ -212,7 +212,7 @@ if (-not $SkipIndex) {
 $doc = Invoke-Sampled @('doctor', $Repo)
 function Grab([string]$pattern) { foreach ($ln in ($doc.Stdout -split "`n")) { if ($ln -match $pattern) { return $ln.Trim() } } return $null }
 $sidecarLine = Grab 'sidecar cache:'
-$filesLine   = Grab 'files:\s'          # e.g. "files:  412,033 ..."
+$filesLine   = Grab 'files \(at build\):'   # doctor's line is "files (at build): 43,422" - no colon after "files"
 
 # --- query battery ---------------------------------------------------------
 
@@ -287,8 +287,12 @@ foreach ($r in $rows) {
         [void]$sb.AppendLine((" !{0} tail={1}MB/s curve(MB): {2}" -f $r.Id, $r.RefTailMBs, $pts))
     }
 }
-$peakVerdict = if ($anyClimb -eq 0) { "no query climbing (short queries shown 'warm' - shape not judged) OK" } else { "$anyClimb query(s) CLIMBING/KILLED - see curves" }
+$peakVerdict = if ($anyClimb -eq 0) { "no query above the kill ceiling OK" } else { "$anyClimb query(s) grew to their per-query budget (see curves)" }
 [void]$sb.AppendLine("peaks: max $([math]::Round($maxPeak))MB ($($maxPeakRow.Id)) - $peakVerdict")
+# Honesty: this probe runs each query in a FRESH CLI process (base RSS ~7 MB), so a bounded query that grows
+# to its budget then exits reads as CLMB by tail-slope - that is EXPECTED, not a runaway. A cross-query
+# ratchet (the dangerous shape) only shows in a long-lived server; use the MCP-session mode for that.
+[void]$sb.AppendLine("note: CLI-per-process mode - CLMB = one query using its budget, NOT a cross-query climb (use MCP-session mode to catch that)")
 [void]$sb.AppendLine("determinism: $detOk/$($rows.Count) repeats identical")
 [void]$sb.AppendLine('```')
 $report = $sb.ToString()
