@@ -101,24 +101,32 @@ To allow `grep` again, set the environment variable `CODECOMPASS_ENFORCE=0`.
 
 ### Codex (OpenAI)
 
-The same MCP server works in Codex — the tools are identical; only the registration differs. From the
-unzipped plugin folder:
+This folder is **also a native Codex plugin** — same MCP tools, installed via Codex's own plugin
+marketplace, which registers the server **and** a short advisory skill that steers Codex toward the tools.
+From the unzipped plugin folder:
 
 ```powershell
 ./install-codecompass.ps1 -TargetHost Codex
 ```
 
-That runs `codex mcp add codecompass -- "<folder>\bin\CodeCompass.Mcp.exe"` with the **absolute** exe path
-resolved at install time (no copy step, no hardcoded location). Or register it by hand:
+That runs the Codex plugin flow. Or do it by hand:
 
 ```
-codex mcp add codecompass -- "C:\path\to\codecompass-plugin-<version>-win-x64\bin\CodeCompass.Mcp.exe"
+codex plugin marketplace add "C:\path\to\codecompass-plugin-<version>-win-x64"
+codex plugin add codecompass@codecompass
 ```
 
-No workspace argument is passed: the server indexes **Codex's working directory** (its cwd), so open Codex
-in your project root. It prints the resolved root to stderr at startup, visible in Codex's MCP log, so a
-wrong-directory launch is obvious. Verify with `codex mcp get codecompass`. Codex has no `PreToolUse`
-equivalent, so there's no grep-enforcement hook there — the tools are available for the agent to choose.
+The plugin's `mcp.json` uses `${CODEX_PLUGIN_ROOT}`, which Codex expands to the plugin folder — so no path
+is hardcoded and nothing is copied. No workspace argument is passed: the server indexes **Codex's working
+directory** (its cwd), so open Codex in your project root; it prints the resolved root to stderr at startup.
+Verify with `codex plugin list` and `codex mcp list`.
+
+Codex has no `PreToolUse` equivalent, so the skill is **advisory** (it can't hard-block grep the way the
+Claude hook does) — it nudges the agent to prefer the tools and complements Codex's native search.
+
+> **Older Codex** (no `codex plugin` subcommand)? The installer falls back to
+> `codex mcp add codecompass -- "<folder>\bin\CodeCompass.Mcp.exe"` (absolute path, no copy) — the server
+> works, just without the bundled skill.
 
 ## First use
 

@@ -191,17 +191,22 @@ ONE SESSION ONLY (no install) - launch Claude Code with:
 Then run  /mcp  to confirm the "codecompass" server is connected.
 
 --------------------------------------------------------------
-CODEX (OpenAI) - register the same MCP server:
+CODEX (OpenAI) - this folder is also a Codex plugin (marketplace + MCP + skill):
 
     ./install-codecompass.ps1 -TargetHost Codex
 
-That runs `codex mcp add codecompass -- "<this folder>\bin\CodeCompass.Mcp.exe"`
-(absolute path resolved at install time; no copy step). Or do it by hand:
+That runs the native Codex plugin flow (registers the MCP server AND a steering skill).
+Or do it by hand:
 
-    codex mcp add codecompass -- "<full path>\bin\CodeCompass.Mcp.exe"
+    codex plugin marketplace add "<full path to this folder>"
+    codex plugin add codecompass@codecompass
 
+The plugin resolves the server path automatically (nothing hardcoded, nothing copied).
 The server serves Codex's working directory, so open Codex in your project root.
-Verify with:  codex mcp get codecompass
+Verify with:  codex plugin list   and   codex mcp list
+
+(Older Codex without "codex plugin"? The installer falls back to
+ codex mcp add codecompass -- "<full path>\bin\CodeCompass.Mcp.exe" - server only, no skill.)
 
 Docs: open CodeCompass.html in this folder, or see
 https://github.com/RelentlessOldMan/CodeCompass
