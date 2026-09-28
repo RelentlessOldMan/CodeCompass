@@ -216,6 +216,7 @@ public static class CodeCompassTools
                 if (IsCppSourceFile(rel))
                     cppCandidates.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar))));
         int cppCand = 0, cppParsed = 0;
+        bool cppMemStopped = false;
         IReadOnlyList<string> cppUnresolved = System.Array.Empty<string>();
         if (cppCandidates.Count > 0)
         {
@@ -223,17 +224,28 @@ public static class CodeCompassTools
             foreach (var s in r.Locations)
                 hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
             cppCand = r.CandidateTus; cppParsed = r.ParsedTus; cppUnresolved = r.UnresolvedIncludes;
+            cppMemStopped = r.MemoryStopped;
         }
+        // When the C/C++ semantic pass stopped at its memory budget, the files it didn't parse would
+        // otherwise be dropped by the lexical layer (SemanticCoverage treats C/C++ files as "covered").
+        // So let lexical cover them, deduping against the semantic hits we already have by location.
+        var semKeys = new System.Collections.Generic.HashSet<string>(
+            hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
+            System.StringComparer.OrdinalIgnoreCase);
 
         if (hits.Count <= maxResults)
             foreach (var h in handles)
             {
                 foreach (var m in h.Text.Search(name, probe * 5))
                 {
-                    if (SemanticCoverage.IsCovered(m.Path)) continue;             // semantic files handled above
+                    // Normally skip semantic-covered files; but when the C/C++ semantic pass stopped for
+                    // memory, cover its (unparsed) files lexically so their references aren't lost.
+                    if (SemanticCoverage.IsCovered(m.Path) && !cppMemStopped) continue;
                     if (!IsCodeReferenceFile(m.Path)) continue;                  // a name in a CSV/JSON/log is not a code reference
                     if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
-                    hits.Add(($"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}: {m.LineText}", 'l'));
+                    var key = $"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}";
+                    if (!semKeys.Add(key)) continue;                             // already found semantically - don't double-count
+                    hits.Add(($"{key}: {m.LineText}", 'l'));
                     if (hits.Count > maxResults) break;                          // got the overflow row
                 }
                 if (hits.Count > maxResults) break;
@@ -249,6 +261,7 @@ public static class CodeCompassTools
         {
             var bits = new List<string>();
             if (cppParsed < cppCand) bits.Add($"{cppParsed:N0}/{cppCand:N0} candidate C/C++ file(s) parsed");
+            if (cppMemStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_QUERY_MEM_MB for more)");
             if (cppUnresolved.Count > 0)
             {
                 var shownH = string.Join(", ", cppUnresolved.Take(5));
