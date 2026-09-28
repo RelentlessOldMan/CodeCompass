@@ -1080,11 +1080,10 @@ static int CmdRefs(string[] args)
     // symbol with real hits (the CLI twin of the b5 lexical-fallback fix that shipped for the MCP tool in
     // 176; CmdRefs never got it). So when coverage is incomplete, let lexical cover C/C++ files too, deduped
     // by location against the semantic hits already emitted so nothing is double-counted.
-    // "Incomplete" = the semantic pass couldn't fully resolve, so a low/zero C/C++ count may be "couldn't
-    // look," not "no references": it stopped for memory, some TUs didn't parse, OR unresolved #includes left
-    // clang unable to see declarations (a TU can PARSE with errors - ParsedTus==CandidateTus - yet resolve
-    // nothing). Any of these => backfill lexical for C/C++ files so real references aren't dropped to a bare 0.
-    bool cppIncomplete = cppRes.MemoryStopped || cppRes.ParsedTus < cppRes.CandidateTus || cppRes.UnresolvedIncludes.Count > 0;
+    // Single source of truth (shared with the MCP path) for "the C/C++ pass was incomplete, so backfill
+    // lexical rather than treat these files as covered" - covers memory-stop, unparsed TUs, AND unresolved
+    // includes (a TU can PARSE with errors yet resolve nothing).
+    bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppRes.MemoryStopped, cppRes.ParsedTus, cppRes.CandidateTus, cppRes.UnresolvedIncludes.Count);
     var semKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var s in cs) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
     foreach (var s in cpp) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
