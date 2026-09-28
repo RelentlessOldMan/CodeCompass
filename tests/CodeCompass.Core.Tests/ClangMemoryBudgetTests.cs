@@ -67,4 +67,25 @@ public class ClangMemoryBudgetTests
             Environment.SetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB", prevS);
         }
     }
+
+    // A session ceiling below the 512 MB per-query growth floor must not throw: the growth budget's
+    // Clamp(value, floor, ceiling) would have floor > ceiling and throw ArgumentException. Guards the
+    // gbFloor = Min(512 MB, absCeiling) fix. (Regression: found validating the 179 CLI refs fix - a
+    // CODECOMPASS_CPP_SESSION_MEM_MB below 512 crashed find_references outright.)
+    [Fact]
+    public void FindReferences_TinySessionCeiling_DoesNotThrow()
+    {
+        using var repo = new TempRepo();
+        repo.Write("hot.c", "int hot(int x){ return x + 1; }\n");
+        repo.Write("use.c", "int hot(int);\nint use(int x){ return hot(x); }\n");
+
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB", "100"); // below the 512 MB floor
+            var ex = Record.Exception(() => new ClangCppAnalyzer(repo.Root).FindReferencesDetailed("hot"));
+            Assert.Null(ex); // must not throw; the pass may stop early, but it returns a result
+        }
+        finally { Environment.SetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB", prev); }
+    }
 }

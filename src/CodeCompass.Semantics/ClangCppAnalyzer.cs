@@ -210,7 +210,13 @@ public sealed class ClangCppAnalyzer : IDisposable
         long growthBudget;
         var envMb = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB");
         if (long.TryParse(envMb, out var mb) && mb > 0) growthBudget = mb * 1024 * 1024;
-        else growthBudget = Math.Clamp(SystemMemory.AvailableCommitBytes() / 4, 512L << 20, absCeiling);
+        else
+        {
+            // Floor is normally 512 MB, but never above the session ceiling - otherwise a small
+            // CODECOMPASS_CPP_SESSION_MEM_MB (< 512 MB) would make Clamp's min exceed its max and throw.
+            long gbFloor = Math.Min(512L << 20, absCeiling);
+            growthBudget = Math.Clamp(SystemMemory.AvailableCommitBytes() / 4, gbFloor, absCeiling);
+        }
 
         const long Floor = 1536L * 1024 * 1024; // never drive free commit below this (the true OOM guard)
         bool OverBudget()
