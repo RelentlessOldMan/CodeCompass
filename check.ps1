@@ -192,6 +192,30 @@ if ($Big -and (Test-Path $cli)) {
     Check "link add indexes a small fresh tree inline" ($laSmall.Out -match "indexed \d")
     Invoke-Cli @("link", "remove", $bigL,  $proj, "--keep") | Out-Null
     Invoke-Cli @("link", "remove", $smallL, $proj, "--purge") | Out-Null
+
+    # C/C++ find_references correctness - the path where every field bug this cycle lived, previously NOT
+    # exercised by the gate at all. Two crafted cases:
+    #   (1) resolvable symbol       => semantic refs found, NO lexical backfill (covered files, no double-count)
+    #   (2) unresolved-include symbol => the "false zero" case: 0 semantic but lexical BACKFILLS + discloses
+    Section "C/C++ find_references: complete coverage vs unresolved-include fallback"
+    $refDir = Join-Path $root ".corpus/_refscheck"
+    if (Test-Path $refDir) { Remove-Item $refDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $refDir | Out-Null
+    Set-Content (Join-Path $refDir "shared.h") "int foo(int);" -Encoding utf8
+    Set-Content (Join-Path $refDir "foo.c")    "#include `"shared.h`"`nint foo(int x){ return x + 1; }" -Encoding utf8
+    0..2 | ForEach-Object { Set-Content (Join-Path $refDir "use$_.c") "#include `"shared.h`"`nint u$_(void){ return foo($_); }" -Encoding utf8 }
+    # widget_reset is only declared in a MISSING header -> parses-with-errors, 0 semantic, real call sites.
+    0..2 | ForEach-Object { Set-Content (Join-Path $refDir "mod$_.c") "#include `"hwdefs_missing.h`"`nint m$_(void){ return widget_reset($_); }" -Encoding utf8 }
+    Invoke-Cli @("index", $refDir) | Out-Null
+
+    $rFoo = Invoke-Cli @("refs", $refDir, "foo")
+    Check "resolvable symbol resolves semantically" ($rFoo.Err -match "\+\s+[1-9]\d*\s+C/C\+\+ semantic")
+    Check "resolvable symbol does NOT double-count via lexical" ($rFoo.Err -match "semantic\s+\+\s+0\s+lexical")
+
+    $rW = Invoke-Cli @("refs", $refDir, "widget_reset")
+    Check "unresolved-include symbol discloses incomplete coverage" ($rW.Out -match "unresolved #include")
+    Check "unresolved-include symbol backfills lexical (no false zero)" ($rW.Err -match "\+\s+[1-9]\d*\s+lexical reference")
+    Remove-Item $refDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # ---- Tier 3: real-repo correctness bench --------------------------------------------------------

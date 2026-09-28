@@ -59,6 +59,32 @@ public class ClangRefsFallbackTests
         Assert.True(lexical > 0, $"CLI refs must backfill lexical on unresolved includes, not return a bare 0. Got {lexical}.\n{all}");
     }
 
+    // The complement: when coverage is COMPLETE (no missing includes), the C/C++ files are fully resolved
+    // semantically, so lexical must NOT backfill them (no double-counting, no comment/string noise). Guards
+    // against over-firing the fallback - refs should be semantic-only here, with 0 lexical.
+    [Fact]
+    public void Cli_Refs_ResolvableSymbol_SemanticOnly_NoLexicalDoubleCount()
+    {
+        var cli = FindCliExe();
+        if (cli is null) return;
+
+        using var repo = new TempRepo();
+        repo.Write("shared.h", "int foo(int);\n");
+        repo.Write("foo.c", "#include \"shared.h\"\nint foo(int x){ return x + 1; }\n");
+        for (int i = 0; i < 3; i++)
+            repo.Write($"use{i}.c", $"#include \"shared.h\"\nint u{i}(void){{ return foo({i}); }}\n");
+
+        Assert.Equal(0, RunCli(cli, "index", repo.Root, out _, out _));
+        Assert.Equal(0, RunCli(cli, "refs", repo.Root, out var stdout, out var stderr, "foo"));
+
+        var all = stdout + "\n" + stderr;
+        var m = System.Text.RegularExpressions.Regex.Match(all, @"(\d+)\s+C#\s+\+\s+(\d+)\s+C/C\+\+ semantic\s+\+\s+(\d+)\s+lexical");
+        Assert.True(m.Success, $"expected the refs summary; got:\n{all}");
+        int cpp = int.Parse(m.Groups[2].Value), lexical = int.Parse(m.Groups[3].Value);
+        Assert.True(cpp > 0, $"complete coverage should resolve C/C++ semantic refs to foo; got {cpp}.\n{all}");
+        Assert.Equal(0, lexical); // covered files fully resolved => no lexical backfill, no double-count
+    }
+
     private static int RunCli(string exe, string cmd, string repo, out string stdout, out string stderr, string? arg = null)
     {
         var psi = new ProcessStartInfo

@@ -242,7 +242,7 @@ public static class CodeCompassTools
         // does NOT mean "fully resolved"). In any of those cases the lexical layer would otherwise drop every
         // C/C++ file (SemanticCoverage treats them as "covered"), yielding a bare "0" on a symbol with real
         // hits. So when incomplete, let lexical cover C/C++ files too, deduped against the semantic hits.
-        bool cppIncomplete = cppMemStopped || cppParsed < cppCand || cppUnresolved.Count > 0;
+        bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppMemStopped, cppParsed, cppCand, cppUnresolved.Count);
         var semKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.OrdinalIgnoreCase);
