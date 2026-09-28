@@ -220,15 +220,29 @@ public static class CodeCompassTools
         IReadOnlyList<string> cppUnresolved = System.Array.Empty<string>();
         if (cppCandidates.Count > 0)
         {
-            var r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe);
+            // Parse the C/C++ candidates in a SHORT-LIVED CHILD PROCESS so libclang's native memory is
+            // reclaimed by the OS when the child exits - this long-lived server otherwise ratchets upward
+            // across broad C/C++ queries (native LLVM allocator never returns pages in-process). Falls back
+            // to the in-process analyzer on any subprocess failure, so correctness never regresses.
+            ClangCppAnalyzer.CppRefResult r;
+            var cppRoots = handles.Select(h => h.Root).ToList();
+            var worker = ClangSubprocess.WorkerExePath();
+            if (ClangSubprocess.Enabled && worker is not null &&
+                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, 300, out var sub))
+                r = sub;
+            else
+                r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe);
             foreach (var s in r.Locations)
                 hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
             cppCand = r.CandidateTus; cppParsed = r.ParsedTus; cppUnresolved = r.UnresolvedIncludes;
             cppMemStopped = r.MemoryStopped;
         }
-        // When the C/C++ semantic pass stopped at its memory budget, the files it didn't parse would
-        // otherwise be dropped by the lexical layer (SemanticCoverage treats C/C++ files as "covered").
-        // So let lexical cover them, deduping against the semantic hits we already have by location.
+        // The C/C++ semantic pass is INCOMPLETE when it stopped for memory, some TUs didn't parse, OR there
+        // were unresolved #includes (a TU can PARSE with errors yet resolve nothing, so cppParsed==cppCand
+        // does NOT mean "fully resolved"). In any of those cases the lexical layer would otherwise drop every
+        // C/C++ file (SemanticCoverage treats them as "covered"), yielding a bare "0" on a symbol with real
+        // hits. So when incomplete, let lexical cover C/C++ files too, deduped against the semantic hits.
+        bool cppIncomplete = cppMemStopped || cppParsed < cppCand || cppUnresolved.Count > 0;
         var semKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.OrdinalIgnoreCase);
@@ -238,9 +252,9 @@ public static class CodeCompassTools
             {
                 foreach (var m in h.Text.Search(name, probe * 5))
                 {
-                    // Normally skip semantic-covered files; but when the C/C++ semantic pass stopped for
-                    // memory, cover its (unparsed) files lexically so their references aren't lost.
-                    if (SemanticCoverage.IsCovered(m.Path) && !cppMemStopped) continue;
+                    // Normally skip semantic-covered files; but when the C/C++ semantic pass was incomplete
+                    // (memory, unparsed TUs, or unresolved includes), cover them lexically so refs aren't lost.
+                    if (SemanticCoverage.IsCovered(m.Path) && !cppIncomplete) continue;
                     if (!IsCodeReferenceFile(m.Path)) continue;                  // a name in a CSV/JSON/log is not a code reference
                     if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
                     var key = $"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}";
