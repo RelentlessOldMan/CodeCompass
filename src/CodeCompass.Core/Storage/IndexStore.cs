@@ -14,6 +14,11 @@ public static class IndexStore
     /// caches and the shared <c>logs</c> folder. One place to manage or clear everything.</summary>
     public static string BaseDir()
     {
+        // Explicit override (used by the test suite to keep index caches out of the real
+        // %LOCALAPPDATA%\CodeCompass, and available to anyone who wants the cache on another drive).
+        var overrideDir = Environment.GetEnvironmentVariable("CODECOMPASS_CACHE_DIR");
+        if (!string.IsNullOrWhiteSpace(overrideDir))
+            return overrideDir;
         var baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrEmpty(baseDir))
             baseDir = Path.Combine(Path.GetTempPath(), "CodeCompass-cache");
