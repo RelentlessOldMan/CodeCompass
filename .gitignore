@@ -506,3 +506,7 @@ plugin/INSTALL.txt
 # hold tokens/channel ids; never commit it. Root-anchored so it does NOT ignore plugin/.mcp.json, which
 # is CodeCompass's own plugin server registration and IS tracked.
 /.mcp.json
+
+# probe-repo.ps1 report artifacts (local, may contain repo paths/symbols)
+probe-*.json
+probe-*.txt
