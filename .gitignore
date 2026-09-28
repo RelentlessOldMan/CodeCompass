@@ -510,3 +510,4 @@ plugin/INSTALL.txt
 # probe-repo.ps1 report artifacts (local, may contain repo paths/symbols)
 probe-*.json
 probe-*.txt
+sweep-*.json
