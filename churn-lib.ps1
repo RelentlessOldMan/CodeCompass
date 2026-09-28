@@ -65,6 +65,23 @@ function Merge-Delta {
     return $out
 }
 
+# Load a manifest's `.symbols` (PSCustomObject from ConvertFrom-Json) into the truth hashtable shape that
+# Get-TruthDigest / Merge-Delta use. The composed base truth's digest must equal delta_1's prevTruthSha.
+function ConvertTo-Truth {
+    param([Parameter(Mandatory)]$ManifestSymbols)
+    $t = @{}
+    foreach ($p in $ManifestSymbols.PSObject.Properties) {
+        $em = ($p.Value.PSObject.Properties.Name -contains 'expectedMiss') -and [bool]$p.Value.expectedMiss
+        $t[$p.Name] = @{
+            def          = [string]$p.Value.def
+            refs         = @($p.Value.refs)
+            edges        = @($p.Value.edges)
+            expectedMiss = $em
+        }
+    }
+    return $t
+}
+
 if ($SelfTest) {
     $ErrorActionPreference = 'Stop'
     $fail = 0
