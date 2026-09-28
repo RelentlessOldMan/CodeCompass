@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using ClangSharp;
 using ClangSharp.Interop;
 using CodeCompass.Core.Config;
+using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Ignore;
 using CodeCompass.Core.Storage;
 using CodeCompass.Core.Walking;
@@ -90,6 +91,7 @@ public sealed class ClangCppAnalyzer : IDisposable
         // - the case where a bare "0 references" is really "couldn't look," not "no callers").
         public int Candidates;
         public int Parsed;
+        public bool MemoryStopped; // the semantic pass hit its memory budget and stopped before parsing every candidate
         public readonly HashSet<string> UnresolvedIncludes = new(StringComparer.OrdinalIgnoreCase);
     }
 
@@ -97,7 +99,8 @@ public sealed class ClangCppAnalyzer : IDisposable
     /// names headers clang couldn't find (missing from the tree - unfixable by any -I/compile DB), so a
     /// partial or empty result can be disclosed honestly instead of read as a confident zero.</summary>
     public readonly record struct CppRefResult(
-        IReadOnlyList<SemanticLocation> Locations, int CandidateTus, int ParsedTus, IReadOnlyList<string> UnresolvedIncludes);
+        IReadOnlyList<SemanticLocation> Locations, int CandidateTus, int ParsedTus, IReadOnlyList<string> UnresolvedIncludes,
+        bool MemoryStopped = false);
 
     public ClangCppAnalyzer(string root) : this(new[] { root }) { }
 
@@ -151,7 +154,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     }
 
     private static CppRefResult Cover(Model m, List<SemanticLocation> locs) =>
-        new(locs, m.Candidates, m.Parsed, m.UnresolvedIncludes.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList());
+        new(locs, m.Candidates, m.Parsed, m.UnresolvedIncludes.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(), m.MemoryStopped);
 
     /// <summary>Definitions of the C/C++ symbol <paramref name="name"/>. See <see cref="FindReferences"/>
     /// for <paramref name="candidateFiles"/>.</summary>
@@ -179,14 +182,61 @@ public sealed class ClangCppAnalyzer : IDisposable
         var files = ResolveFiles(name, candidateFiles).ToList();
         var model = new Model { Candidates = files.Count };
         if (files.Count == 0) return model;
-        if (files.Count == 1) { try { ParseInto(files[0], model); } catch { } return model; }
+
+        // Per-QUERY memory budget. clang TU memory is NATIVE and, empirically, is not returned to the OS as we
+        // parse successive candidate TUs - so a broad query over many ordinary sources grows ~linearly and
+        // would eventually exhaust RAM (a common symbol across 800+ files climbed past 9 GB on a real tree).
+        // Stop parsing further candidates once the process has grown past a budget (or free commit runs low),
+        // and disclose the partial coverage. This bounds peak regardless of candidate count.
+        long baseWs = CurrentWorkingSetBytes();
+        long growthBudget;
+        var envMb = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB");
+        if (long.TryParse(envMb, out var mb) && mb > 0) growthBudget = mb * 1024 * 1024;
+        else growthBudget = Math.Clamp(SystemMemory.AvailableCommitBytes() / 4, 512L * 1024 * 1024, 1536L * 1024 * 1024);
+        const long Floor = 1536L * 1024 * 1024; // never drive free commit below this (hard OOM guard)
+        // Absolute working-set ceiling: bounds the SESSION, not just this query. clang's native TU memory is
+        // not returned to the OS between queries, so a per-query growth cap alone could ratchet upward across
+        // queries in a long-lived server; this caps total process working set from clang work regardless of history.
+        long totalRam; try { totalRam = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { totalRam = 8L << 30; }
+        if (totalRam <= 0) totalRam = 8L << 30;
+        long absCeiling = Math.Clamp(totalRam / 4, 1L << 30, 3L << 30);
+        bool OverBudget()
+        {
+            long ws = CurrentWorkingSetBytes();
+            if (ws - baseWs > growthBudget) return true;   // per-query growth cap
+            if (ws > absCeiling) return true;               // absolute session cap (stops cross-query ratchet)
+            long avail = SystemMemory.AvailableCommitBytes();
+            return avail > 0 && avail < Floor;
+        }
+
+        if (files.Count == 1)
+        {
+            if (OverBudget()) model.MemoryStopped = true;
+            else { try { ParseInto(files[0], model); } catch { } }
+            return model;
+        }
 
         var opts = new ParallelOptions { MaxDegreeOfParallelism = ParseDegree() };
+        bool stopped = false; // set (idempotently) when the budget trips; read after the loop joins
         Parallel.ForEach(files, opts,
             () => new Model(),                                         // thread-local model
-            (full, _, local) => { try { ParseInto(full, local); } catch { } return local; },
+            (full, loopState, local) =>
+            {
+                if (loopState.ShouldExitCurrentIteration) return local;
+                if (OverBudget()) { stopped = true; loopState.Stop(); return local; } // stop scheduling more TUs
+                try { ParseInto(full, local); } catch { }
+                return local;
+            },
             local => { lock (_mergeLock) { MergeInto(model, local); } });
+        if (stopped) model.MemoryStopped = true;
         return model;
+    }
+
+    // Current process working set (native + managed) - the signal that actually reflects clang's native TU
+    // memory, which GC.GetGCMemoryInfo does not see. Snapshot; cheap enough to poll per candidate TU.
+    private static long CurrentWorkingSetBytes()
+    {
+        try { return Environment.WorkingSet; } catch { return 0; }
     }
 
     // Merge a thread-local model into the shared one (caller holds _mergeLock).
