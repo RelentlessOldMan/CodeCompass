@@ -111,6 +111,28 @@ public class ClangSubprocessTests
         Assert.True(sub.Locations.Count > 0);
     }
 
+    // The parent must decode the child's stdout as UTF-8 (pinned via StandardOutputEncoding), not the console
+    // codepage - otherwise non-ASCII in a returned LineText/path is mojibake (and a corrupted path breaks the
+    // lexical dedup key). Round-trips a non-ASCII source line through the real child and asserts it survives.
+    [Fact]
+    public void RealSubprocess_NonAscii_RoundTripsIntact()
+    {
+        var cli = FindCliExe();
+        if (cli is null) return;
+
+        using var repo = new TempRepo();
+        repo.Write("hot.c", "int hot(int x){ return x + 1; }\n");
+        // A reference to hot() on a line carrying non-ASCII text (accented + a non-Latin glyph).
+        repo.Write("use.c", "int hot(int);\nint use(int x){ return hot(x); } // café ☃ éü\n");
+
+        var ok = ClangSubprocess.TryFindReferences(cli, new[] { repo.Root }, "hot", candidates: null, 200, 120, out var sub);
+        Assert.True(ok);
+        var useHit = sub.Locations.FirstOrDefault(l => l.RelativePath.EndsWith("use.c"));
+        Assert.False(string.IsNullOrEmpty(useHit.RelativePath), "expected a hit in use.c");
+        Assert.Contains("café", useHit.LineText);
+        Assert.Contains("☃", useHit.LineText); // snowman survived (not mojibake)
+    }
+
     private static string? FindCliExe()
     {
         // Walk up from the test's output dir to the repo root, then find the built CLI exe.
