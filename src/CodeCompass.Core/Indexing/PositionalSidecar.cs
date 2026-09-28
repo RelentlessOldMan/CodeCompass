@@ -68,7 +68,7 @@ public static class PositionalSidecar
     /// query still uses the block index instead of reading the whole multi-GB file. Returns true if the
     /// sidecar was present and usable (results filled up to maxResults); false => caller whole-file scans.</summary>
     public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults, bool caseSensitive = true)
-        => TryScan(dir, root, rel, query, results, maxResults, caseSensitive, out _);
+        => TryScan(dir, root, rel, query, results, maxResults, caseSensitive, out _, out _);
 
     /// <summary>As <see cref="TryScan(string,string,string,string,List{SearchMatch},int,bool)"/>, also
     /// reporting how many bytes were read from the (possibly networked) source file - the sum of the
@@ -76,54 +76,37 @@ public static class PositionalSidecar
     /// reads a few ~1 MB blocks, not the whole multi-GB file. Tests assert it stays tiny relative to the
     /// file (verifying the network-cost win without needing a real share).</summary>
     public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults, out long bytesRead)
-        => TryScan(dir, root, rel, query, results, maxResults, caseSensitive: true, out bytesRead);
+        => TryScan(dir, root, rel, query, results, maxResults, caseSensitive: true, out bytesRead, out _);
 
     public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults, bool caseSensitive, out long bytesRead)
+        => TryScan(dir, root, rel, query, results, maxResults, caseSensitive, out bytesRead, out _);
+
+    /// <param name="bytesRead">bytes pulled from the (possibly networked) SOURCE file - the candidate blocks.</param>
+    /// <param name="sidecarBytesRead">LOCAL sidecar bytes read to pick those blocks THIS call: the sidecar's
+    /// size on a cold read, 0 when the parsed sidecar was already cached in-process (see <see cref="SidecarCache"/>).</param>
+    public static bool TryScan(string dir, string root, string rel, string query, List<SearchMatch> results, int maxResults, bool caseSensitive, out long bytesRead, out long sidecarBytesRead)
     {
         bytesRead = 0;
-        var scPath = Path.Combine(dir, SidecarName(rel));
-        if (!File.Exists(scPath)) return false;
+        sidecarBytesRead = 0;
 
         // Per-position trigram groups: one exact key each (case-sensitive) or all case variants (case-
         // insensitive). A block is admitted only if EVERY position has some variant in its Bloom.
         var groups = TrigramIndex.QueryTrigramGroups(query, caseSensitive);
         if (groups.Count == 0) return false; // query < 3 chars: no trigrams to filter on -> whole-file scan
-        var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
 
-        int bloomK, bomLen, count;
-        int[] startLine;
-        long[] startByte, endByte;
-        byte[][] blooms;
-        try
-        {
-            using var r = new BinaryReader(File.OpenRead(scPath), Encoding.UTF8, leaveOpen: false);
-            if (r.ReadInt32() != Magic) return false;
-            if (r.ReadString() != rel) return false; // hash collision guard
-            int bloomBytes = r.ReadInt32();
-            bloomK = r.ReadInt32();
-            bomLen = r.ReadInt32();
-            count = r.ReadInt32();
-            // Validate every trusted header field before use: a corrupt bloomK would make MayContain loop
-            // billions of times (effective hang), and a bad bomLen would make GetString throw. The sidecar
-            // is a pure optimization, so on any bad header just bail to the whole-file fallback.
-            if (count < 0 || bloomBytes <= 0 || bloomBytes > (16 << 20) || bloomK < 1 || bloomK > 64 || bomLen < 0 || bomLen > 4)
-                return false;
-            startLine = new int[count];
-            startByte = new long[count];
-            endByte = new long[count];
-            for (int i = 0; i < count; i++) { startLine[i] = r.ReadInt32(); startByte[i] = r.ReadInt64(); endByte[i] = r.ReadInt64(); }
-            blooms = new byte[count][];
-            for (int i = 0; i < count; i++) blooms[i] = r.ReadBytes(bloomBytes);
-        }
-        catch { return false; }
+        // The parsed block table + Blooms, cached in-process so the long-lived server doesn't re-read the
+        // whole (~tens of MB) Bloom payload on every query. Missing/invalid/other-path sidecar -> whole-file fallback.
+        var sc = SidecarCache.Get(Path.Combine(dir, SidecarName(rel)), rel, out sidecarBytesRead);
+        if (sc is null) return false;
+        var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
 
         var full = Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar));
         FileStream? src = null;
         try
         {
-            for (int i = 0; i < count && results.Count < maxResults; i++)
+            for (int i = 0; i < sc.Count && results.Count < maxResults; i++)
             {
-                var bloom = new BloomFilter(blooms[i], bloomK);
+                var bloom = new BloomFilter(sc.Blooms[i], sc.BloomK);
                 bool all = true;
                 foreach (var group in groups)
                 {
@@ -133,16 +116,16 @@ public static class PositionalSidecar
                 }
                 if (!all) continue;
 
-                long blockLen = endByte[i] - startByte[i];
+                long blockLen = sc.EndByte[i] - sc.StartByte[i];
                 if (blockLen <= 0 || blockLen > int.MaxValue) continue;
                 src ??= new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read);
                 var bytes = new byte[(int)blockLen];
-                src.Seek(startByte[i], SeekOrigin.Begin);
+                src.Seek(sc.StartByte[i], SeekOrigin.Begin);
                 if (!ReadFull(src, bytes)) break;
                 bytesRead += blockLen; // bytes pulled from the (possibly networked) source
-                int skip = startByte[i] == 0 ? bomLen : 0;
+                int skip = sc.StartByte[i] == 0 ? sc.BomLen : 0;
                 var text = Encoding.UTF8.GetString(bytes, skip, bytes.Length - skip);
-                FileScanner.ScanText(rel, text, query, results, maxResults, lineOffset: startLine[i] - 1, comparison);
+                FileScanner.ScanText(rel, text, query, results, maxResults, lineOffset: sc.StartLine[i] - 1, comparison);
             }
         }
         catch { /* partial results are acceptable; we still "handled" the file */ }
