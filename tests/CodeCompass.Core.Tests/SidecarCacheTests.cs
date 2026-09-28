@@ -62,4 +62,46 @@ public class SidecarCacheTests
             SidecarCache.Clear();
         }
     }
+
+    [Fact]
+    public void TryScan_ScanResistant_KeepsResidentEntry_WhenWorkingSetExceedsBudget()
+    {
+        using var repo = new TempRepo();
+        repo.Write("reg/a.h", MidText());
+        repo.Write("reg/b.h", MidText());
+
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+            var (t, s, _) = RepositoryIndexer.Build(repo.Root);
+            t.Dispose(); s.Dispose();
+            var dir = IndexStore.GetCacheDir(repo.Root);
+            Assert.True(PositionalSidecar.HasSidecar(dir, "reg/a.h"));
+            Assert.True(PositionalSidecar.HasSidecar(dir, "reg/b.h"));
+
+            // Budget holds exactly ONE of the two sidecars (sized off the real sidecar length so it's robust
+            // to block count). This is the field-report pathology in miniature: a working set bigger than the
+            // budget. A plain LRU would evict A to admit B, then thrash to 0 hits on the repeat; skip-when-full
+            // keeps A resident so it still hits.
+            long scLen = PositionalSidecar.SidecarLength(dir, "reg/a.h");
+            Assert.True(scLen > 0, "the mid-size file should have a sidecar on disk");
+            SidecarCache.ResetForTest((long)(scLen * 1.5)); // fits one (~1.0x), not two (~2.0x)
+            try
+            {
+                var r1 = new List<SearchMatch>();
+                PositionalSidecar.TryScan(dir, repo.Root, "reg/a.h", "HWIO", r1, 50, caseSensitive: true, out _, out long a1); // miss -> cached
+                var rb = new List<SearchMatch>();
+                PositionalSidecar.TryScan(dir, repo.Root, "reg/b.h", "HWIO", rb, 50, caseSensitive: true, out _, out long bb); // miss -> over budget, NOT cached
+                var r2 = new List<SearchMatch>();
+                PositionalSidecar.TryScan(dir, repo.Root, "reg/a.h", "HWIO", r2, 50, caseSensitive: true, out _, out long a2); // A still resident -> HIT
+
+                Assert.True(a1 > 0, "first scan of A reads its sidecar");
+                Assert.True(bb > 0, "B is read from disk (it didn't fit the cache)");
+                Assert.Equal(0, a2); // scan-resistant: A survived B's oversized scan and hits (LRU would miss here)
+            }
+            finally { SidecarCache.ResetForTest(256L * 1024 * 1024); } // restore a sane budget for other tests
+        }
+        finally { Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prev); }
+    }
 }

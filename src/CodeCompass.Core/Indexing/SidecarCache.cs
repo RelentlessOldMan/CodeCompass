@@ -16,46 +16,58 @@ internal sealed class ParsedSidecar
     public required long[] StartByte;
     public required long[] EndByte;
     public required byte[][] Blooms;       // per-block Bloom bytes
-    public long ApproxBytes;               // resident cost, for the LRU budget
+    public long ApproxBytes;               // resident cost, for the budget
     public long Length;                    // sidecar file length + mtime = the validity key
     public long MtimeTicks;
 }
 
 /// <summary>
-/// A bounded, process-wide LRU cache of parsed positional sidecars, keyed by sidecar path and validated by
+/// A bounded, process-wide cache of parsed positional sidecars, keyed by sidecar path and validated by
 /// (length, mtime). The long-lived MCP server otherwise re-reads and re-parses the ENTIRE Bloom payload of
 /// every large-file candidate on every query - the field report measured ~695 MB of local sidecar reads
-/// per broad query, 65% of all bytes, dominated by a few dozen big sidecars (a 1.2 GB file carries ~19 MB
-/// of Blooms). Caching turns that into read-once: the first query pays one sequential read per sidecar,
-/// every subsequent query reuses the parsed Blooms with zero I/O. Keyed by (length, mtime) so a rebuild /
-/// incremental update that rewrites a sidecar is picked up automatically. Bounded so a huge repo can't grow
-/// the cache without limit; least-recently-used sidecars are evicted past the budget.
+/// per broad query, 65% of all bytes. Caching turns that into read-once.
+///
+/// <para><b>Admission is scan-resistant (skip-when-full), NOT LRU-evict.</b> A single broad query's Bloom
+/// working set can exceed the budget; a plain LRU filled by a scan bigger than its budget evicts every
+/// entry before it is reused, so a repeated query hits NOTHING (the 1.0.169 default-budget bug: 256 MB
+/// budget vs ~690 MB working set = 0 hits). Instead, once the cache is full we KEEP what is resident and
+/// simply skip caching the overflow: a repeated oversized scan then hits whatever fit (stable resident set)
+/// rather than thrashing to zero. Entries are only dropped when their file's (length,mtime) changes.</para>
+///
+/// <para>The default budget is RAM-scaled (RAM/16, clamped 256 MB..2 GB) so a normal repo's whole sidecar
+/// set fits and every repeat query fully hits out of the box; <c>CODECOMPASS_SIDECAR_CACHE_MB</c> overrides.
+/// <c>doctor</c> compares this budget to the index's total sidecar bytes so an over-budget repo is visible
+/// (raise the env var) instead of silently under-caching. Tradeoff of skip-when-full: after the cache fills
+/// it does not adapt to a shifted working set within one process; acceptable because the RAM-scaled default
+/// holds typical repos whole, and it never regresses to the 0-hit thrash. A frequency policy (S3-FIFO) is
+/// the upgrade if a >budget single working set with set-shift ever matters.</para>
 /// </summary>
 internal static class SidecarCache
 {
     private const int Magic = 0x43435031; // "CCP1" - must match PositionalSidecar
 
-    // Resident budget for cached Bloom payloads. The big sidecars that dominate the cost are a few dozen
-    // files; a few hundred MB holds them. Override for tests / tuning via CODECOMPASS_SIDECAR_CACHE_MB.
-    private static readonly long BudgetBytes = ResolveBudget();
+    private static long _budget = ResolveBudget();
 
     private static long ResolveBudget()
     {
         var env = Environment.GetEnvironmentVariable("CODECOMPASS_SIDECAR_CACHE_MB");
         if (long.TryParse(env, out var mb) && mb >= 0) return mb * 1024 * 1024;
-        return 256L * 1024 * 1024;
+        long total;
+        try { total = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { total = 8L * 1024 * 1024 * 1024; }
+        if (total <= 0) total = 8L * 1024 * 1024 * 1024;
+        // RAM/16, floor 256 MB, cap 2 GB. On a 32 GB box -> 2 GB, which holds a typical repo's whole sidecar
+        // set (the field-report tree was ~1.4 GB) so repeat broad queries fully hit; small boxes stay modest.
+        return Math.Clamp(total / 16, 256L * 1024 * 1024, 2L * 1024 * 1024 * 1024);
     }
 
-    private sealed class Slot
-    {
-        public required string Key;         // sidecar path
-        public required ParsedSidecar Sidecar;
-    }
+    /// <summary>The resolved resident budget in bytes (for doctor / diagnostics).</summary>
+    internal static long BudgetBytes => Interlocked.Read(ref _budget);
 
     private static readonly object _gate = new();
-    private static readonly Dictionary<string, LinkedListNode<Slot>> _map = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly LinkedList<Slot> _lru = new(); // most-recently-used at the front
+    private static readonly Dictionary<string, ParsedSidecar> _map = new(StringComparer.OrdinalIgnoreCase);
     private static long _residentBytes;
+
+    internal static long ResidentBytes { get { lock (_gate) return _residentBytes; } }
 
     /// <summary>Parsed sidecar for <paramref name="scPath"/>, or null if it's missing/invalid/for another
     /// path. <paramref name="bytesRead"/> is the sidecar bytes actually read from disk THIS call: the file
@@ -76,16 +88,9 @@ internal static class SidecarCache
         // Fast path: a valid cached entry (same file bytes + mtime + intended path).
         lock (_gate)
         {
-            if (_map.TryGetValue(scPath, out var node))
-            {
-                var sc = node.Value.Sidecar;
-                if (sc.Length == len && sc.MtimeTicks == mtime && string.Equals(sc.Rel, rel, StringComparison.Ordinal))
-                {
-                    _lru.Remove(node);
-                    _lru.AddFirst(node);
-                    return sc; // cache hit: no bytes read
-                }
-            }
+            if (_map.TryGetValue(scPath, out var sc) &&
+                sc.Length == len && sc.MtimeTicks == mtime && string.Equals(sc.Rel, rel, StringComparison.Ordinal))
+                return sc; // cache hit: no bytes read
         }
 
         // Miss: read + parse OUTSIDE the lock so concurrent first-queries don't serialize on I/O.
@@ -95,37 +100,23 @@ internal static class SidecarCache
 
         lock (_gate)
         {
-            // Another thread may have inserted a valid entry meanwhile; prefer the existing one.
+            // Drop a stale entry for this path (file changed) before deciding whether to admit the fresh parse.
             if (_map.TryGetValue(scPath, out var existing))
             {
-                var esc = existing.Value.Sidecar;
-                if (esc.Length == len && esc.MtimeTicks == mtime)
-                {
-                    _lru.Remove(existing); _lru.AddFirst(existing);
-                    return esc;
-                }
-                // stale entry for this path - drop it before inserting the fresh parse
-                _residentBytes -= esc.ApproxBytes;
-                _lru.Remove(existing);
+                if (existing.Length == len && existing.MtimeTicks == mtime)
+                    return existing; // another thread parsed it meanwhile
+                _residentBytes -= existing.ApproxBytes;
                 _map.Remove(scPath);
             }
-            var slot = new LinkedListNode<Slot>(new Slot { Key = scPath, Sidecar = parsed });
-            _lru.AddFirst(slot);
-            _map[scPath] = slot;
-            _residentBytes += parsed.ApproxBytes;
-            EvictToBudget();
+            // Scan-resistant admission: cache ONLY if it fits without evicting live entries. Overflow is
+            // returned to the caller uncached - never evicted-to-admit (which would thrash an oversized scan
+            // to zero hits). Keeps a stable resident set that repeat queries hit.
+            if (_residentBytes + parsed.ApproxBytes <= _budget)
+            {
+                _map[scPath] = parsed;
+                _residentBytes += parsed.ApproxBytes;
+            }
             return parsed;
-        }
-    }
-
-    private static void EvictToBudget()
-    {
-        // caller holds _gate
-        while (_residentBytes > BudgetBytes && _lru.Last is { } last)
-        {
-            _residentBytes -= last.Value.Sidecar.ApproxBytes;
-            _map.Remove(last.Value.Key);
-            _lru.RemoveLast();
         }
     }
 
@@ -161,9 +152,16 @@ internal static class SidecarCache
         catch { return null; }
     }
 
-    /// <summary>Drop everything (tests, or a cache-clear).</summary>
+    /// <summary>Drop everything (a cache-clear).</summary>
     public static void Clear()
     {
-        lock (_gate) { _map.Clear(); _lru.Clear(); _residentBytes = 0; }
+        lock (_gate) { _map.Clear(); _residentBytes = 0; }
+    }
+
+    /// <summary>Test hook: reset the cache to empty with an explicit budget so a working-set-larger-than-budget
+    /// scenario is deterministic without allocating gigabytes.</summary>
+    internal static void ResetForTest(long budgetBytes)
+    {
+        lock (_gate) { _map.Clear(); _residentBytes = 0; Interlocked.Exchange(ref _budget, budgetBytes); }
     }
 }
