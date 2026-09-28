@@ -133,6 +133,25 @@ public static class RepoDiagnostics
                         (meta.SidecarThresholdBytes < RepoLandscape.DefaultSidecarThreshold
                             ? "  (lowered from 8 MB - network path with a mid-size tail, so 2-8 MB files get block-selective reads)"
                             : ""));
+            // Total sidecar bytes vs the in-process cache budget: if the sidecars exceed the budget, a broad
+            // query re-reads Blooms it can't keep cached (the search is slower but still correct). Surface it
+            // so a user can raise CODECOMPASS_SIDECAR_CACHE_MB rather than wonder why repeats aren't faster.
+            try
+            {
+                long scTotal = 0; int scCount = 0;
+                if (Directory.Exists(cacheDir))
+                    foreach (var f in Directory.EnumerateFiles(cacheDir, PositionalSidecar.Pattern))
+                    { scTotal += new FileInfo(f).Length; scCount++; }
+                if (scCount > 0)
+                {
+                    double totMb = scTotal / (1024.0 * 1024), budMb = SidecarCache.BudgetBytes / (1024.0 * 1024);
+                    w.WriteLine($"sidecar cache:    {scCount:N0} file(s), {totMb:F0} MB total; in-process budget {budMb:F0} MB" +
+                        (scTotal > SidecarCache.BudgetBytes
+                            ? $"  (EXCEEDS budget - broad queries re-read some Blooms; set CODECOMPASS_SIDECAR_CACHE_MB >= {Math.Ceiling(totMb)} to fully cache)"
+                            : "  (fits - repeat queries hit the cache)"));
+                }
+            }
+            catch { /* diagnostics only */ }
             if (!string.Equals(Path.GetFullPath(meta.Root), root, StringComparison.OrdinalIgnoreCase))
                 w.WriteLine($"[!] meta root differs: {meta.Root}");
         }
