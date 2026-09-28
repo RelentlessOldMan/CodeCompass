@@ -66,8 +66,9 @@ self-marketplace):
 …or load it for just one session by launching `claude --plugin-dir "C:\path\to\codecompass-plugin-<version>-win-x64"`.
 The binaries are self-contained Windows x64. Run `/mcp` to confirm the **codecompass** server connected.
 
-**Option B — build from source.** Requires the .NET 8 SDK to *build*; the produced binaries are
-self-contained.
+**Option B — build from source.** Requires the **.NET 10 SDK** to *build* (the CLI and MCP server target
+`net10.0`; the core libraries target `net8.0`). A `global.json` pins the SDK major so the build fails with
+a clear message on an older SDK. The produced binaries are self-contained.
 
 ```powershell
 pwsh ./build-plugin.ps1      # publishes self-contained binaries into plugin/bin
