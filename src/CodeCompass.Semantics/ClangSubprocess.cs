@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
+using CodeCompass.Core.Diagnostics;
 
 namespace CodeCompass.Semantics;
 
@@ -98,11 +100,18 @@ public static class ClangSubprocess
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                // The child emits UTF-8 (JsonSerializer to the raw stdout stream). Pin the parent's decoders
+                // to UTF-8 (no BOM) so a non-UTF-8 console codepage can't mojibake non-ASCII paths/line text
+                // (which would also break the lexical dedup key -> double-counted refs). stdin is written as
+                // raw bytes below, but pin its encoding too so the contract is explicit either way.
+                StandardOutputEncoding = new UTF8Encoding(false),
+                StandardErrorEncoding = new UTF8Encoding(false),
+                StandardInputEncoding = new UTF8Encoding(false),
             };
             psi.ArgumentList.Add("clang-refs-worker");
 
             p = Process.Start(psi);
-            if (p is null) return false;
+            if (p is null) { Log.Global.Warn("clang subprocess: Process.Start returned null; using in-process fallback"); return false; }
 
             // Drain stdout/stderr asynchronously BEFORE waiting, so a large result set can't deadlock the
             // child on a full pipe buffer.
@@ -117,12 +126,18 @@ public static class ClangSubprocess
             if (!p.WaitForExit(timeoutSeconds * 1000))
             {
                 try { p.Kill(entireProcessTree: true); } catch { }
+                Log.Global.Warn($"clang subprocess: timed out after {timeoutSeconds}s on '{name}' ({req.Candidates.Count} candidates); using in-process fallback (raise CODECOMPASS_CPP_WORKER_TIMEOUT_SEC)");
                 return false;
             }
-            if (p.ExitCode != 0) return false;
-
+            p.WaitForExit(); // parameterless: ensures the async stdout/stderr readers have fully flushed
             var payload = outTask.GetAwaiter().GetResult();
-            if (string.IsNullOrWhiteSpace(payload)) return false;
+            var errText = errTask.GetAwaiter().GetResult(); // observe stderr so it's never an unobserved task
+            if (p.ExitCode != 0)
+            {
+                Log.Global.Warn($"clang subprocess: exit {p.ExitCode} on '{name}'; using in-process fallback. stderr: {Tail(errText)}");
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(payload)) { Log.Global.Warn($"clang subprocess: empty output on '{name}'; using in-process fallback. stderr: {Tail(errText)}"); return false; }
             var resp = JsonSerializer.Deserialize<RefResponse>(payload, Json);
             if (resp is null) return false;
 
@@ -133,11 +148,27 @@ public static class ClangSubprocess
                 resp.UnresolvedIncludes ?? new List<string>(), resp.MemoryStopped);
             return true;
         }
-        catch
+        catch (Exception ex)
         {
             try { if (p is { HasExited: false }) p.Kill(entireProcessTree: true); } catch { }
+            Log.Global.Warn($"clang subprocess: {ex.GetType().Name} on '{name}'; using in-process fallback: {ex.Message}");
             return false;
         }
+    }
+
+    private static string Tail(string? s, int max = 300)
+    {
+        if (string.IsNullOrEmpty(s)) return "(none)";
+        s = s.Replace("\r", " ").Replace("\n", " ").Trim();
+        return s.Length <= max ? s : "..." + s[^max..];
+    }
+
+    /// <summary>Per-query worker timeout in seconds (env CODECOMPASS_CPP_WORKER_TIMEOUT_SEC, default 300),
+    /// clamped to a sane range.</summary>
+    public static int TimeoutSeconds()
+    {
+        var v = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_WORKER_TIMEOUT_SEC");
+        return int.TryParse(v, out var s) && s > 0 ? Math.Clamp(s, 5, 3600) : 300;
     }
 
     /// <summary>Worker entry point (invoked as `CodeCompass.Cli.exe clang-refs-worker`). Reads a RefRequest

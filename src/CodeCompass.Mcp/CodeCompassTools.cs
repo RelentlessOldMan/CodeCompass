@@ -226,9 +226,11 @@ public static class CodeCompassTools
             // to the in-process analyzer on any subprocess failure, so correctness never regresses.
             ClangCppAnalyzer.CppRefResult r;
             var cppRoots = handles.Select(h => h.Root).ToList();
-            var worker = ClangSubprocess.WorkerExePath();
-            if (ClangSubprocess.Enabled && worker is not null &&
-                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, 300, out var sub))
+            var worker = ClangSubprocess.Enabled ? ClangSubprocess.WorkerExePath() : null;
+            if (ClangSubprocess.Enabled && worker is null)
+                CodeCompass.Core.Diagnostics.Log.Global.Warn("clang subprocess enabled but worker exe (CodeCompass.Cli) not found next to the server; using in-process (memory may grow across broad C/C++ queries)");
+            if (worker is not null &&
+                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, ClangSubprocess.TimeoutSeconds(), out var sub))
                 r = sub;
             else
                 r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe);
