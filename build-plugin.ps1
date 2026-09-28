@@ -53,6 +53,16 @@ $pj = [regex]::Replace($pj, '("version"\s*:\s*")[^"]*(")', "`${1}$manifestVer`${
 [System.IO.File]::WriteAllText($pjPath, $pj, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "Stamped plugin.json version = $manifestVer"
 
+# Same stamp for the portable Codex/agent-plugins manifest (plugin/plugin.json), so `codex plugin list`
+# and `codecompass version` agree. No-BOM UTF-8 for the same parser reason.
+$codexPj = Join-Path $root "plugin/plugin.json"
+if (Test-Path $codexPj) {
+    $cp = Get-Content $codexPj -Raw
+    $cp = [regex]::Replace($cp, '("version"\s*:\s*")[^"]*(")', "`${1}$manifestVer`${2}")
+    [System.IO.File]::WriteAllText($codexPj, $cp, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "Stamped codex plugin.json version = $manifestVer"
+}
+
 Write-Host ""
 Write-Host "Plugin ready: $(Join-Path $root 'plugin')  ($version, bin is $size MB)"
 Write-Host "Install for one session:   claude --plugin-dir `"$(Join-Path $root 'plugin')`""
