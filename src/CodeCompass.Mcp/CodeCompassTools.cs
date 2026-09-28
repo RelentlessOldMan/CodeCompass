@@ -254,11 +254,9 @@ public static class CodeCompassTools
             {
                 foreach (var m in h.Text.Search(name, probe * 5))
                 {
-                    // Normally skip semantic-covered files; but when the C/C++ semantic pass was incomplete
-                    // (memory, unparsed TUs, or unresolved includes), cover them lexically so refs aren't lost.
-                    if (SemanticCoverage.IsCovered(m.Path) && !cppIncomplete) continue;
-                    if (!IsCodeReferenceFile(m.Path)) continue;                  // a name in a CSV/JSON/log is not a code reference
-                    if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
+                    // Shared filter (same as the CLI): skip semantic-covered files unless the C/C++ pass was
+                    // incomplete, skip build noise, require a whole-word match.
+                    if (!ReferenceMerge.IsLexicalReference(m.Path, m.LineText, m.Column, name.Length, cppIncomplete)) continue;
                     var key = $"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}";
                     if (!semKeys.Add(key)) continue;                             // already found semantically - don't double-count
                     hits.Add(($"{key}: {m.LineText}", 'l'));
@@ -275,15 +273,7 @@ public static class CodeCompassTools
         string cppNote = "";
         if (cppCandidates.Count > 0)
         {
-            var bits = new List<string>();
-            if (cppParsed < cppCand) bits.Add($"{cppParsed:N0}/{cppCand:N0} candidate C/C++ file(s) parsed");
-            if (cppMemStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_SESSION_MEM_MB for the per-session ceiling or CODECOMPASS_CPP_QUERY_MEM_MB for a single query)");
-            if (cppUnresolved.Count > 0)
-            {
-                var shownH = string.Join(", ", cppUnresolved.Take(5));
-                if (cppUnresolved.Count > 5) shownH += $", +{cppUnresolved.Count - 5} more";
-                bits.Add($"{cppUnresolved.Count} unresolved #include(s): {shownH}");
-            }
+            var bits = ReferenceMerge.CppCoverageBits(cppParsed, cppCand, cppMemStopped, cppUnresolved);
             if (bits.Count > 0)
                 cppNote = " (Note: C/C++ coverage INCOMPLETE - " + string.Join("; ", bits) +
                           ". Missing headers aren't in the tree (no -I/compile DB can fix that), so a low or zero " +

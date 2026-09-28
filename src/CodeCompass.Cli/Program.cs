@@ -1092,9 +1092,7 @@ static int CmdRefs(string[] args)
     {
         foreach (var m in index!.Search(name, 1000))
         {
-            if (SemanticCoverage.IsCovered(m.Path) && !cppIncomplete) continue;
-            if (!CodeCompass.Core.Text.ReferenceFileFilter.IsCodeReference(m.Path)) continue; // skip .lst/.bak/.o/... build noise
-            if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
+            if (!ReferenceMerge.IsLexicalReference(m.Path, m.LineText, m.Column, name.Length, cppIncomplete)) continue;
             if (!semKeys.Add($"{m.Path}:{m.Line}:{m.Column}")) continue;                       // already found semantically
             Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
             lexical++;
@@ -1108,15 +1106,7 @@ static int CmdRefs(string[] args)
     // the same note in its returned result.
     if ((cppCandidates?.Count ?? 0) > 0)
     {
-        var bits = new List<string>();
-        if (cppRes.ParsedTus < cppRes.CandidateTus) bits.Add($"{cppRes.ParsedTus}/{cppRes.CandidateTus} candidate C/C++ file(s) parsed");
-        if (cppRes.MemoryStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_SESSION_MEM_MB for the per-session ceiling or CODECOMPASS_CPP_QUERY_MEM_MB for a single query)");
-        if (cppRes.UnresolvedIncludes.Count > 0)
-        {
-            var shownH = string.Join(", ", cppRes.UnresolvedIncludes.Take(5));
-            if (cppRes.UnresolvedIncludes.Count > 5) shownH += $", +{cppRes.UnresolvedIncludes.Count - 5} more";
-            bits.Add($"{cppRes.UnresolvedIncludes.Count} unresolved #include(s): {shownH}");
-        }
+        var bits = ReferenceMerge.CppCoverageBits(cppRes.ParsedTus, cppRes.CandidateTus, cppRes.MemoryStopped, cppRes.UnresolvedIncludes);
         if (bits.Count > 0)
             Console.Out.WriteLine("-- C/C++ coverage INCOMPLETE: " + string.Join("; ", bits) +
                 " (missing headers aren't in the tree - a low/zero C/C++ count may mean 'couldn't parse', not 'no references').");
