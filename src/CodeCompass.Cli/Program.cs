@@ -22,7 +22,7 @@ CodeCompass.Core.Diagnostics.DiagnosticsSession.Start("cli", trackSession: false
 
 // Record the version + argv on every run so a user's log pins the exact build behind any report.
 // (Hook subcommands stay silent - their stdout is a protocol channel Claude Code parses.)
-if (args.Length > 0 && args[0] is not ("hook-block" or "hook-context"))
+if (args.Length > 0 && args[0] is not ("hook-block" or "hook-context" or "clang-refs-worker"))
     Log.Global.Info($"cli v{BuildInfo.Version}: {string.Join(' ', args)}");
 
 return args.Length == 0
@@ -51,6 +51,7 @@ return args.Length == 0
         "help" or "--help" or "-h" or "-?" or "/?" => Help(),
         "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
         "hook-context" => CmdHookContext(), // SessionStart hook: inject guidance
+        "clang-refs-worker" => ClangSubprocess.RunWorkerMain(), // internal: one-shot C/C++ refs child (stdout = JSON protocol)
         _ => Usage(),
     };
 
@@ -1079,7 +1080,11 @@ static int CmdRefs(string[] args)
     // symbol with real hits (the CLI twin of the b5 lexical-fallback fix that shipped for the MCP tool in
     // 176; CmdRefs never got it). So when coverage is incomplete, let lexical cover C/C++ files too, deduped
     // by location against the semantic hits already emitted so nothing is double-counted.
-    bool cppIncomplete = cppRes.MemoryStopped || cppRes.ParsedTus < cppRes.CandidateTus;
+    // "Incomplete" = the semantic pass couldn't fully resolve, so a low/zero C/C++ count may be "couldn't
+    // look," not "no references": it stopped for memory, some TUs didn't parse, OR unresolved #includes left
+    // clang unable to see declarations (a TU can PARSE with errors - ParsedTus==CandidateTus - yet resolve
+    // nothing). Any of these => backfill lexical for C/C++ files so real references aren't dropped to a bare 0.
+    bool cppIncomplete = cppRes.MemoryStopped || cppRes.ParsedTus < cppRes.CandidateTus || cppRes.UnresolvedIncludes.Count > 0;
     var semKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var s in cs) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
     foreach (var s in cpp) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
