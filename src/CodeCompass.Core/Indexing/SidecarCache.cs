@@ -1,4 +1,5 @@
 using System.Text;
+using CodeCompass.Core.Diagnostics;
 
 namespace CodeCompass.Core.Indexing;
 
@@ -63,6 +64,39 @@ internal static class SidecarCache
     /// <summary>The resolved resident budget in bytes (for doctor / diagnostics).</summary>
     internal static long BudgetBytes => Interlocked.Read(ref _budget);
 
+    // Below this much free commit the cache is not worth its bytes: it's a read accelerator, not a
+    // correctness requirement, so under pressure it hands the resident set back (up to the full ~2 GB
+    // budget) and stops admitting until pressure clears. Kept under the clang query budget's 1.5 GB
+    // free-commit floor so the two don't fight for the same headroom - the cache releases FIRST, leaving
+    // that floor for the semantic pass rather than competing with it.
+    private const long PressureFloorBytes = 1024L * 1024 * 1024; // 1 GB free commit
+
+    // Test seam: force the pressure verdict deterministically without allocating gigabytes.
+    internal static Func<bool>? PressureProbeForTest;
+
+    // Number of times the cache released its resident set under pressure (diagnostics / tests).
+    private static long _releaseCount;
+    internal static long ReleaseCount => Interlocked.Read(ref _releaseCount);
+
+    /// <summary>True when the machine is tight enough that holding the sidecar cache costs more than it
+    /// saves - either the managed heap is over the GC's high-memory-load threshold, or free commit has
+    /// dropped below <see cref="PressureFloorBytes"/>. Probed on the miss/admission path only (never on the
+    /// hot cache-hit path), where the cost is hidden behind the sidecar read we just did.</summary>
+    private static bool UnderMemoryPressure()
+    {
+        var probe = PressureProbeForTest;
+        if (probe is not null) return probe();
+        try
+        {
+            var gi = GC.GetGCMemoryInfo();
+            if (gi.HighMemoryLoadThresholdBytes > 0 && gi.MemoryLoadBytes >= gi.HighMemoryLoadThresholdBytes)
+                return true;
+        }
+        catch { /* GC info unavailable - fall through to commit probe */ }
+        long avail = SystemMemory.AvailableCommitBytes();
+        return avail > 0 && avail < PressureFloorBytes;
+    }
+
     private static readonly object _gate = new();
     private static readonly Dictionary<string, ParsedSidecar> _map = new(StringComparer.OrdinalIgnoreCase);
     private static long _residentBytes;
@@ -107,6 +141,26 @@ internal static class SidecarCache
                     return existing; // another thread parsed it meanwhile
                 _residentBytes -= existing.ApproxBytes;
                 _map.Remove(scPath);
+            }
+            // Pressure-release: when the machine is tight, give the resident bytes back (callers already
+            // hold references to anything in flight, so dropping the map is safe) and serve this parse
+            // uncached. Stops the RAM-scaled cache from being dead weight - up to ~2 GB - while something
+            // else (a concurrent build, a clang semantic pass) needs the headroom. Checked on the miss path
+            // so the probe cost hides behind the sidecar read we just did.
+            if (UnderMemoryPressure())
+            {
+                if (_residentBytes > 0)
+                {
+                    long freed = _residentBytes;
+                    _map.Clear();
+                    _residentBytes = 0;
+                    Interlocked.Increment(ref _releaseCount);
+                    // Only fires on a pressure transition (once released we stop admitting, so residentBytes
+                    // stays 0 until pressure clears), so this can't spam the log on a sustained-pressure query.
+                    try { Log.Global.Info($"sidecar cache: released {freed / (1024 * 1024)} MB under memory pressure (will re-cache when pressure clears)"); }
+                    catch { /* logging must never break a query */ }
+                }
+                return parsed;
             }
             // Scan-resistant admission: cache ONLY if it fits without evicting live entries. Overflow is
             // returned to the caller uncached - never evicted-to-admit (which would thrash an oversized scan
@@ -163,5 +217,7 @@ internal static class SidecarCache
     internal static void ResetForTest(long budgetBytes)
     {
         lock (_gate) { _map.Clear(); _residentBytes = 0; Interlocked.Exchange(ref _budget, budgetBytes); }
+        PressureProbeForTest = null;
+        Interlocked.Exchange(ref _releaseCount, 0);
     }
 }
