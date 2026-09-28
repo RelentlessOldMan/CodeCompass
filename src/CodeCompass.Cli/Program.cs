@@ -1071,20 +1071,31 @@ static int CmdRefs(string[] args)
     foreach (var s in cppRes.Locations)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
-    // Lexical whole-word references for languages without a semantic analyzer.
+    var cpp = cppRes.Locations;
+
+    // Lexical whole-word references for languages without a semantic analyzer. When the C/C++ semantic pass
+    // did NOT fully cover its candidates (its memory budget stopped it early, or some TUs failed to parse),
+    // SemanticCoverage would otherwise drop those files' references entirely - reporting a bare "0" on a
+    // symbol with real hits (the CLI twin of the b5 lexical-fallback fix that shipped for the MCP tool in
+    // 176; CmdRefs never got it). So when coverage is incomplete, let lexical cover C/C++ files too, deduped
+    // by location against the semantic hits already emitted so nothing is double-counted.
+    bool cppIncomplete = cppRes.MemoryStopped || cppRes.ParsedTus < cppRes.CandidateTus;
+    var semKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var s in cs) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
+    foreach (var s in cpp) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
     int lexical = 0;
     if (haveIndex)
     {
         foreach (var m in index!.Search(name, 1000))
         {
-            if (SemanticCoverage.IsCovered(m.Path)) continue;
+            if (SemanticCoverage.IsCovered(m.Path) && !cppIncomplete) continue;
             if (!CodeCompass.Core.Text.ReferenceFileFilter.IsCodeReference(m.Path)) continue; // skip .lst/.bak/.o/... build noise
             if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1, name.Length)) continue;
+            if (!semKeys.Add($"{m.Path}:{m.Line}:{m.Column}")) continue;                       // already found semantically
             Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
             lexical++;
         }
     }
-    var cpp = cppRes.Locations;
 
     // Honest disclosure (same as MCP): if candidate C/C++ TUs failed to parse or had unresolved #includes,
     // a low/zero C/C++ count means "couldn't look," not "no references." Name the missing headers. This is a
@@ -1095,6 +1106,7 @@ static int CmdRefs(string[] args)
     {
         var bits = new List<string>();
         if (cppRes.ParsedTus < cppRes.CandidateTus) bits.Add($"{cppRes.ParsedTus}/{cppRes.CandidateTus} candidate C/C++ file(s) parsed");
+        if (cppRes.MemoryStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_SESSION_MEM_MB for the per-session ceiling or CODECOMPASS_CPP_QUERY_MEM_MB for a single query)");
         if (cppRes.UnresolvedIncludes.Count > 0)
         {
             var shownH = string.Join(", ", cppRes.UnresolvedIncludes.Take(5));
