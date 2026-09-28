@@ -20,19 +20,23 @@ public class ClangMemoryBudgetTests
         for (int i = 0; i < 12; i++)
             repo.Write($"use_{i}.c", $"int hot(int);\nint use_{i}(int x){{ return hot(x); }}\n");
 
-        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB");
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB");
         try
         {
-            // 1 MB budget: the working set grows past it within the first parse or two, so the pass stops
-            // long before all candidates are parsed.
-            Environment.SetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB", "1");
+            // Drive the stop off the ABSOLUTE session ceiling (ws > absCeiling), not the growth budget: a
+            // 1 MB ceiling is always below the real process working set, so OverBudget() trips on the first
+            // check and the pass stops before parsing any candidate - deterministically, regardless of
+            // whether libclang is cold or already warm from earlier tests. (Using the 1 MB GROWTH budget was
+            // flaky: when libclang was already warm, tiny TUs didn't grow the working set past 1 MB, so the
+            // pass parsed everything and the assertion failed only under the full suite.)
+            Environment.SetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB", "1");
             var r = new ClangCppAnalyzer(repo.Root).FindReferencesDetailed("hot");
 
             Assert.True(r.CandidateTus >= 2, $"expected multiple candidate TUs, got {r.CandidateTus}");
-            Assert.True(r.MemoryStopped, "the semantic pass should stop at the 1 MB budget");
+            Assert.True(r.MemoryStopped, "the semantic pass should stop at the 1 MB session ceiling");
             Assert.True(r.ParsedTus < r.CandidateTus, $"a stopped pass parses fewer TUs than candidates ({r.ParsedTus} < {r.CandidateTus})");
         }
-        finally { Environment.SetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB", prev); }
+        finally { Environment.SetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB", prev); }
     }
 
     // Regression guard from the 1.0.176 real-tree field report: the memory FIX must not silently degrade to
