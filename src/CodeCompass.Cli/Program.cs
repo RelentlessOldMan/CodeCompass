@@ -1029,7 +1029,10 @@ static int CmdRefs(string[] args)
     int lexical = 0;
     if (haveIndex)
     {
-        foreach (var m in index!.Search(name, 1000))
+        // Reference mode: canonical candidate order (build-order-independent, so a local and a UNC index
+        // return the same set) + a per-file cap (no single high-hit file starves the budget). This is the
+        // fix for the deterministic local-vs-UNC refs-count gap - see ReferenceMerge.MaxLexicalHitsPerFile.
+        foreach (var m in index!.Search(name, 1000, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true))
         {
             if (!ReferenceMerge.IsLexicalReference(m.Path, m.LineText, m.Column, name.Length, cppIncomplete)) continue;
             if (!semKeys.Add($"{m.Path}:{m.Line}:{m.Column}")) continue;                       // already found semantically

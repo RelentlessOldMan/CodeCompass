@@ -155,8 +155,20 @@ public sealed class SegmentedIndex : IDisposable
     /// the trace can attribute the true cost (block reads vs whole-file reads vs sidecar overhead).</summary>
     public readonly record struct CandidateTrace(string Path, bool HasSidecar, long BytesRead, long SidecarBytes, int Hits);
 
+    /// <param name="maxPerFile">When &gt; 0, cap how many matches any SINGLE file may contribute. The
+    /// global <paramref name="maxResults"/> still bounds the total; this just stops one high-hit file from
+    /// consuming the whole budget and starving other matching files. Used by find_references' lexical
+    /// backfill: a common macro echoed hundreds of times in one giant build-log file must not crowd out the
+    /// real references in ordinary source files. 0 (default) keeps the plain behaviour for search_code.</param>
+    /// <param name="orderByPath">When true, verify candidates in canonical (ordinal path) order instead of
+    /// index build/crawl order, and dedup paths that span segments. Makes the returned SET independent of how
+    /// the index was built - a local disk and a UNC share indexed in separate runs enumerate files in
+    /// different orders, which (combined with a cap) made find_references disagree local-vs-UNC. References
+    /// want a build-order-independent answer; search_code leaves this off (its ordering is already stable
+    /// within a build and canonical sorting would add cost for no correctness gain).</param>
     public IReadOnlyList<SearchMatch> Search(string query, int maxResults = 200, bool caseSensitive = true,
-                                             List<CandidateTrace>? trace = null)
+                                             List<CandidateTrace>? trace = null, int maxPerFile = 0,
+                                             bool orderByPath = false)
     {
         if (string.IsNullOrEmpty(query)) return new List<SearchMatch>();
         if (_pending is { DocCount: > 0 }) FlushPending();
@@ -174,13 +186,25 @@ public sealed class SegmentedIndex : IDisposable
         var candidates = CollectCandidates(groups);
         if (candidates.Count == 0) return new List<SearchMatch>();
 
+        // Reference mode: canonicalize the candidate order so the answer doesn't depend on build/crawl
+        // order (the local-vs-UNC divergence), deduping any path that appears in more than one segment so
+        // its hits aren't counted twice.
+        if (orderByPath)
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var uniq = new List<string>(candidates.Count);
+            foreach (var c in candidates) if (seen.Add(c)) uniq.Add(c);
+            uniq.Sort(StringComparer.Ordinal);
+            candidates = uniq;
+        }
+
         // Over a network share, each verify is a whole-file read whose wall-clock is dominated by
         // round-trip latency; reading candidates one at a time stacks that latency linearly. Overlap it
         // with a bounded-parallel verify (SMB2 credits let many reads share one connection). Locally,
         // reads are fast and the serial early-exit is already optimal, so keep the simple path.
         return _rootIsNetwork
-            ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults, trace)
-            : VerifySerial(candidates, query, comparison, caseSensitive, maxResults, trace);
+            ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile)
+            : VerifySerial(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile);
     }
 
     /// <summary>
@@ -256,13 +280,19 @@ public sealed class SegmentedIndex : IDisposable
         return candidates;
     }
 
+    // Per-file scan cap: how many matches a single file may contribute. maxPerFile>0 bounds it (reference
+    // mode, anti-starvation); otherwise a file may fill the whole global budget (plain search_code).
+    private static int PerFileCap(int maxResults, int maxPerFile)
+        => maxPerFile > 0 ? Math.Min(maxResults, maxPerFile) : maxResults;
+
     // Serial verify (local repos): read candidates in order, stopping the instant we have enough.
-    private List<SearchMatch> VerifySerial(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace)
+    private List<SearchMatch> VerifySerial(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile)
     {
         var results = new List<SearchMatch>();
+        int perFile = PerFileCap(maxResults, maxPerFile);
         foreach (var rel in candidates)
         {
-            results.AddRange(ScanCandidate(rel, query, comparison, caseSensitive, maxResults, network: false, trace));
+            results.AddRange(ScanCandidate(rel, query, comparison, caseSensitive, perFile, network: false, trace));
             if (results.Count >= maxResults) return Cap(results, maxResults);
         }
         return Cap(results, maxResults);
@@ -272,9 +302,10 @@ public sealed class SegmentedIndex : IDisposable
     // without speculatively reading the whole candidate set. Results are merged in candidate order, so
     // the output is byte-identical to the serial path; we just reach it faster. A window's worth of
     // reads may be wasted once we have enough matches - a good trade when latency dwarfs a few reads.
-    private List<SearchMatch> VerifyParallel(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace)
+    private List<SearchMatch> VerifyParallel(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile)
     {
         var results = new List<SearchMatch>();
+        int perFile = PerFileCap(maxResults, maxPerFile);
         int degree = Math.Max(1, CodeCompassConfig.WalkThreads(Environment.ProcessorCount));
         int window = Math.Max(degree, degree * 4); // speculation bound: never more than one window ahead
         var opts = new ParallelOptions { MaxDegreeOfParallelism = degree };
@@ -282,11 +313,11 @@ public sealed class SegmentedIndex : IDisposable
         for (int start = 0; start < candidates.Count && results.Count < maxResults; start += window)
         {
             int count = Math.Min(window, candidates.Count - start);
-            var perFile = new List<SearchMatch>[count];
+            var perFileHits = new List<SearchMatch>[count];
             Parallel.For(0, count, opts, j =>
-                perFile[j] = ScanCandidate(candidates[start + j], query, comparison, caseSensitive, maxResults, network: true, trace));
+                perFileHits[j] = ScanCandidate(candidates[start + j], query, comparison, caseSensitive, perFile, network: true, trace));
 
-            foreach (var list in perFile)
+            foreach (var list in perFileHits)
             {
                 results.AddRange(list);
                 if (results.Count >= maxResults) break;

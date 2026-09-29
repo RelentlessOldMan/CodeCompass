@@ -99,4 +99,34 @@ public class SegmentedIndexEdgeTests
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    // Regression for the UNC find_references count gap (the "744f" field report): a common macro-like
+    // name appears in a handful of GIANT files (build-log / disassembly echoes) hundreds of times each,
+    // plus a few real references in ordinary source files. The lexical backfill searched with a single
+    // GLOBAL result cap applied in candidate order, so the noisy files consumed the whole budget and the
+    // real reference was dropped entirely. Worse, candidate order was the index's build/crawl order, which
+    // differs between a local disk and a UNC share indexed in separate runs - so a local index returned the
+    // real reference (4 hits) while a separately-built UNC index returned 0, with no network read at fault.
+    [Fact]
+    public void ReferenceSearch_PerFileCap_RescuesFileStarvedByANoisyHighHitFile()
+    {
+        using var repo = new TempRepo();
+        repo.Write("aaa_noise.cpp", string.Concat(Enumerable.Repeat("USE_MACRO(x);\n", 300))); // sorts first
+        repo.Write("zzz_real.cpp", "int y = USE_MACRO(k);\n");                                 // sorts last
+        var b = RepositoryIndexer.Build(repo.Root);
+        using var text = b.Text;
+        b.Symbols.Dispose();
+
+        // orderByPath makes the candidate SET build-order-independent (a local and a UNC index agree), which
+        // is half the fix. But canonical order alone doesn't rescue the hit: a small global cap is still
+        // exhausted by the first (noisy) file, so the real reference in the later file is starved. The bug.
+        var starved = text.Search("USE_MACRO", maxResults: 50, orderByPath: true);
+        Assert.DoesNotContain(starved, m => m.Path == "zzz_real.cpp");
+
+        // The per-file cap bounds any single file's contribution, leaving budget for every file that
+        // references the symbol - so the real reference survives regardless of how noisy its neighbours are.
+        var fair = text.Search("USE_MACRO", maxResults: 50, maxPerFile: 8, orderByPath: true);
+        Assert.Contains(fair, m => m.Path == "zzz_real.cpp");
+        Assert.True(fair.Count(m => m.Path == "aaa_noise.cpp") <= 8, "noisy file must not exceed the per-file cap");
+    }
 }

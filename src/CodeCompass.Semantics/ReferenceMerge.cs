@@ -12,6 +12,16 @@ namespace CodeCompass.Semantics;
 /// </summary>
 public static class ReferenceMerge
 {
+    /// <summary>Max lexical hits any ONE file may contribute to the reference backfill. A common macro-like
+    /// name can appear hundreds of times in a single giant build-log / disassembly-echo file; without a
+    /// per-file bound those crowd out the whole result cap and starve the real references in ordinary source
+    /// files (the UNC refs-gap). Deliberately a small fraction of typical result budgets (MCP find_references
+    /// defaults to 100, the CLI backfill to 1000): with a handful of noisy files each bounded to this, the
+    /// budget still reaches the real references. Also generous enough that a normal source file - which rarely
+    /// holds more than a handful of references to one symbol - is never truncated; it only reins in
+    /// pathological high-hit files. Passed to <c>SegmentedIndex.Search(..., maxPerFile:)</c> by both paths.</summary>
+    public const int MaxLexicalHitsPerFile = 16;
+
     /// <summary>A trigram hit qualifies as a LEXICAL reference to a symbol of length <paramref name="nameLength"/>
     /// when: it is NOT in a semantically-covered file (unless the C/C++ pass was incomplete - then cover those
     /// too, so a symbol whose semantic resolution failed isn't dropped to a bare zero), it is a code file (not
