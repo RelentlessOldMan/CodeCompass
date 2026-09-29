@@ -27,6 +27,9 @@ param(
     [int]$IntervalMs = 200,                    # RSS sample cadence (also the response poll granularity)
     [int]$QueryTimeoutSec = 240,               # per-call hang guard
     [int]$IdleGapSec = 0,                      # sleep between queries (>= CODECOMPASS_SEMANTIC_IDLE_MIN window => tests eviction)
+    [int]$RepeatFirst = 3,                     # re-run the first symbol this many times at the end: an IDENTICAL
+                                               # query re-parses the SAME files, so if RSS keeps climbing across
+                                               # the repeats it's a real leak; if it plateaus it was warm-up.
     [switch]$KeepNames,
     [string]$OutDir
 )
@@ -36,7 +39,10 @@ if (-not $Exe)    { $Exe = Join-Path $scriptDir 'plugin\bin\CodeCompass.Mcp.exe'
 if (-not $OutDir) { $OutDir = $scriptDir }
 if (-not (Test-Path $Exe))  { throw "MCP exe not found: $Exe" }
 if (-not (Test-Path $Repo)) { throw "repo not found: $Repo" }
-$Repo = (Resolve-Path $Repo).Path
+# .ProviderPath, not .Path: on a UNC path .Path returns the provider-qualified form
+# (Microsoft.PowerShell.Core\FileSystem::\\server\share) which .NET Process.Start rejects as a
+# WorkingDirectory ("directory name is invalid"), so the probe couldn't run against a network repo at all.
+$Repo = (Resolve-Path $Repo).ProviderPath
 if ($CeilMB -le 0) { $CeilMB = [int]([math]::Floor(((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB) * 0.70)) }
 
 $symbolSet = @()
@@ -152,28 +158,42 @@ $rows = foreach ($sym in $symbolSet) {
     if ($script:killed) { break }
 }
 
-# repeat the FIRST symbol at the end of the session (determinism + warm-cache + does baseline hold?)
-$repeat = $null
-if (-not $script:killed) {
-    $sym = $symbolSet[0]; $before = Cur-RSS; $t0 = $sw.Elapsed.TotalSeconds
-    $args = '{"name":"' + ($sym -replace '"', '\"') + '","maxResults":' + $MaxResults + '}'
-    $resp = Send-Rpc ('{"jsonrpc":"2.0","id":' + $id + ',"method":"tools/call","params":{"name":"find_references","arguments":' + $args + '}}') $id $QueryTimeoutSec
-    $txt = Refs-Text $resp
-    $repeat = [pscustomobject]@{ Id = $(if ($KeepNames) { $sym } else { Get-Hash4 $sym }); Refs = $(if ($txt) { @([regex]::Matches($txt, ':\d+:\d+:')).Count } else { 0 }); Ms = [int](($sw.Elapsed.TotalSeconds - $t0) * 1000); BeforeMB = $before; AfterMB = (Cur-RSS) }
+# Re-run the FIRST symbol RepeatFirst times at the end. Identical query => same candidate files re-parsed;
+# if RSS keeps climbing across these repeats, native memory isn't being reclaimed (a real leak); if it
+# plateaus, the earlier baseline climb was warm-up / distinct-query cost, not a ratchet.
+$repeats = New-Object System.Collections.Generic.List[object]
+if (-not $script:killed -and $symbolSet.Count -ge 1) {
+    $sym = $symbolSet[0]
+    for ($k = 0; $k -lt [math]::Max(1, $RepeatFirst); $k++) {
+        if ($script:killed) { break }
+        $before = Cur-RSS; $t0 = $sw.Elapsed.TotalSeconds
+        $rargs = '{"name":"' + ($sym -replace '"', '\"') + '","maxResults":' + $MaxResults + '}'
+        $resp = Send-Rpc ('{"jsonrpc":"2.0","id":' + $id + ',"method":"tools/call","params":{"name":"find_references","arguments":' + $rargs + '}}') $id $QueryTimeoutSec
+        $txt = Refs-Text $resp
+        $repeats.Add([pscustomobject]@{ Id = $(if ($KeepNames) { $sym } else { Get-Hash4 $sym }); Refs = $(if ($txt) { @([regex]::Matches($txt, ':\d+:\d+:')).Count } else { 0 }); Ms = [int](($sw.Elapsed.TotalSeconds - $t0) * 1000); BeforeMB = $before; AfterMB = (Cur-RSS) })
+        $id++
+    }
 }
+$repeat = if ($repeats.Count -gt 0) { $repeats[0] } else { $null }  # first repeat (back-compat for the report/JSON)
 
 # --- shut the server down cleanly ---
 try { $proc.StandardInput.Close() } catch {}
 if (-not $proc.WaitForExit(5000)) { try { $proc.Kill() } catch {} }
 $sw.Stop()
 
-# --- cross-query ratchet analysis: does baseline RSS climb query-over-query, or plateau? ---
+# --- leak analysis: does an IDENTICAL re-query keep growing RSS, or plateau? ---
+# The whole-battery climb mixes distinct-query cost + sidecar-cache warm-up (bounded by the cache budget)
+# with any real leak, so it over-triggers (a few hundred MB of cache warm-up looks like a ratchet). The
+# clean signal is the baseline drift ACROSS the identical repeats of the FIRST symbol: same candidate files
+# re-parsed each time, so if the baseline keeps climbing the native memory isn't being reclaimed (a real
+# leak); if it plateaus, the earlier climb was warm-up.
 $befores = @($rows | Where-Object { $null -ne $_.BeforeMB } | ForEach-Object { $_.BeforeMB })
 $baseFirst = if ($befores.Count -ge 1) { $befores[0] } else { 0 }
 $baseLast = if ($befores.Count -ge 1) { $befores[-1] } else { 0 }
 $baseClimb = [math]::Round($baseLast - $baseFirst, 0)
-# Ratchet = baseline crept up materially across queries AND didn't fall back on the repeat.
-$ratchet = ($baseClimb -gt 500) -and ($repeat -and $repeat.BeforeMB -ge ($baseLast - 100))
+$repBefore = @($repeats | ForEach-Object { $_.BeforeMB })
+$repeatClimb = if ($repBefore.Count -ge 2) { [math]::Round($repBefore[-1] - $repBefore[0], 0) } else { $null }
+$ratchet = ($null -ne $repeatClimb) -and ($repeatClimb -gt 100) # identical re-query still growing => not reclaimed
 
 # --- report (anonymized, Discord-sized) ---
 $version = ((& (Join-Path (Split-Path $Exe) 'CodeCompass.Cli.exe') version) 2>$null)
@@ -187,17 +207,20 @@ foreach ($r in $rows) {
     $note = @(); if ($r.MemStop) { $note += 'memstop' }; if ($r.Lexical) { $note += 'lex' }; if ($r.TimedOut) { $note += 'TIMEOUT' }
     [void]$sb.AppendLine(("{0} {1,5} {2,6} {3,8} {4,7} {5,-7} {6}" -f $r.Id, $r.Refs, $r.Ms, $r.BeforeMB, $r.AfterMB, $(if($r.Cov){$r.Cov}else{'-'}), ($note -join ',')))
 }
-if ($repeat) { [void]$sb.AppendLine(("{0} {1,5} {2,6} {3,8} {4,7} {5,-7} repeat-of-first" -f $repeat.Id, $repeat.Refs, $repeat.Ms, $repeat.BeforeMB, $repeat.AfterMB, '-')) }
+foreach ($rp in $repeats) { [void]$sb.AppendLine(("{0} {1,5} {2,6} {3,8} {4,7} {5,-7} repeat-of-first" -f $rp.Id, $rp.Refs, $rp.Ms, $rp.BeforeMB, $rp.AfterMB, '-')) }
 [void]$sb.AppendLine("session peak RSS: $([int]$script:peakMB)MB$(if($script:killed){' - KILLED at ceiling'})")
-$verdict = if ($script:killed) { 'KILLED - exceeded ceiling' } elseif ($ratchet) { "RATCHET: baseline climbed ${baseClimb}MB across queries and held (investigate)" } else { "no ratchet: baseline $([int]$baseFirst)->$([int]$baseLast)MB (bounded across the session)" }
-[void]$sb.AppendLine("cross-query: $verdict")
+$verdict = if ($script:killed) { 'KILLED - exceeded ceiling' }
+    elseif ($null -eq $repeatClimb) { "inconclusive: run -RepeatFirst >= 2 to test for a leak (whole-session climb ${baseClimb}MB)" }
+    elseif ($ratchet) { "LEAK: identical re-query grew baseline +${repeatClimb}MB across $($repeats.Count) repeats - native memory not reclaimed (whole-session climb ${baseClimb}MB)" }
+    else { "no leak: identical re-query plateaued (baseline +${repeatClimb}MB across $($repeats.Count) repeats); the ${baseClimb}MB whole-session climb was warm-up / distinct-query cost" }
+[void]$sb.AppendLine("memory: $verdict")
 if ($repeat) { [void]$sb.AppendLine("determinism: repeat refs $($repeat.Refs) vs first $($rows[0].Refs) ($(if($repeat.Refs -eq $rows[0].Refs){'match'}else{'DIFFER'}))") }
 [void]$sb.AppendLine('```')
 $report = $sb.ToString()
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $rh = Get-Hash4 $Repo
-@{ version = $version; repoHash = $rh; ceilMB = $CeilMB; peakMB = $script:peakMB; killed = $script:killed; ratchet = $ratchet; baseClimbMB = $baseClimb; rows = $rows; repeat = $repeat; curve = $script:curve.ToArray() } |
+@{ version = $version; repoHash = $rh; ceilMB = $CeilMB; peakMB = $script:peakMB; killed = $script:killed; ratchet = $ratchet; baseClimbMB = $baseClimb; repeatClimbMB = $repeatClimb; rows = $rows; repeats = $repeats.ToArray(); repeat = $repeat; curve = $script:curve.ToArray() } |
     ConvertTo-Json -Depth 8 | Out-File (Join-Path $OutDir "probe-mcp-$rh-$stamp.json") -Encoding utf8
 $report | Out-File (Join-Path $OutDir "probe-mcp-$rh-$stamp.txt") -Encoding utf8
 
