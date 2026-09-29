@@ -1038,6 +1038,13 @@ static int CmdRefs(string[] args)
         }
     }
 
+    // Field diagnostic (opt-in, CODECOMPASS_DEBUG_REFS): the same semantic-vs-lexical breakdown the MCP tool
+    // logs, so a CLI run over a UNC root can be compared against a local run to localize a refs-count gap.
+    if (RefsDebug.On)
+        RefsDebug.Log($"CLI name='{name}' cppCand={cppRes.CandidateTus} cppParsed={cppRes.ParsedTus} " +
+            $"memStopped={cppRes.MemoryStopped} unresolvedIncludes={cppRes.UnresolvedIncludes.Count} " +
+            $"incomplete={cppIncomplete} => semC#={cs.Count} semC/C++={cpp.Count} lexical={lexical}");
+
     // Honest disclosure (same as MCP): if candidate C/C++ TUs failed to parse or had unresolved #includes,
     // a low/zero C/C++ count means "couldn't look," not "no references." Name the missing headers. This is a
     // correctness QUALIFIER on the answer (not a progress diagnostic), so it goes to STDOUT alongside the hits

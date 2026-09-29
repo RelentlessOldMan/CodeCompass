@@ -1,4 +1,5 @@
 using CodeCompass.Core.Config;
+using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Storage;
 
@@ -319,6 +320,10 @@ public sealed class SegmentedIndex : IDisposable
             bool handled = PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults, caseSensitive, out long srcBytes, out long scBytesRead);
             if (!handled)
                 FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network);
+            // A candidate the trigram index named as containing the query, yet the NETWORK read located
+            // nothing, is the fingerprint of a hit dropped on a UNC read (the deterministic refs-gap).
+            if (network && results.Count == 0 && RefsDebug.On)
+                RefsDebug.Log($"scan EMPTY (network sidecar) rel='{rel}' handled={handled} srcBytes={srcBytes} scBytes={scBytesRead} query='{query}'");
             // Block bytes (or a whole-file fallback read) + the sidecar's own bytes read to pick those blocks.
             // scBytesRead is 0 when the sidecar was already parsed+cached in-process, so the trace reflects
             // the TRUE I/O this query paid (the field report's ~695 MB residual was this re-read every call).
@@ -342,9 +347,18 @@ public sealed class SegmentedIndex : IDisposable
                 return results;
             }
         }
-        catch { if (trace != null) AddTrace(trace, rel, false, 0, 0, results.Count); return results; }
+        catch (Exception ex)
+        {
+            // A read that THREW (share dropped the handle, transient network error) yields 0/partial hits
+            // and is swallowed - exactly how a UNC refs-count gap can appear. Surface it under the debug flag.
+            if (RefsDebug.On) RefsDebug.Log($"scan READ ERROR rel='{rel}' network={network} query='{query}': {ex.GetType().Name}: {ex.Message}");
+            if (trace != null) AddTrace(trace, rel, false, 0, 0, results.Count);
+            return results;
+        }
 
         FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network); // rare: large, no sidecar
+        if (network && results.Count == 0 && RefsDebug.On)
+            RefsDebug.Log($"scan EMPTY (network large no-sidecar) rel='{rel}' query='{query}'");
         if (trace != null) AddTrace(trace, rel, false, TryFileLength(full), 0, results.Count); // whole-file read (the residual-cost shape)
         return results;
     }

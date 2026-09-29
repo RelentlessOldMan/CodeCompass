@@ -266,6 +266,16 @@ public static class CodeCompassTools
                 if (hits.Count > maxResults) break;
             }
 
+        // Field diagnostic (opt-in, CODECOMPASS_DEBUG_REFS): the semantic-vs-lexical breakdown that made up
+        // this answer, so a UNC refs-count gap can be split into "semantic came back short" vs "lexical
+        // dropped hits" against the same query on the real share. No-op unless the flag is set.
+        if (CodeCompass.Core.Diagnostics.RefsDebug.On)
+            CodeCompass.Core.Diagnostics.RefsDebug.Log(
+                $"MCP name='{name}' cppCand={cppCand} cppParsed={cppParsed} memStopped={cppMemStopped} " +
+                $"unresolvedIncludes={cppUnresolved.Count} incomplete={cppIncomplete} => " +
+                $"semC#={hits.Count(h => h.Kind == 'c')} semC/C++={hits.Count(h => h.Kind == 'p')} " +
+                $"lexical={hits.Count(h => h.Kind == 'l')} total={hits.Count}");
+
         // Honest disclosure keyed on what THIS QUERY actually did (not merely whether a compile DB file
         // exists): if some candidate C/C++ TUs failed to parse or had unresolved #includes, a low/zero C/C++
         // count means "couldn't look," not "no references." Names the missing headers - those can't be fixed
