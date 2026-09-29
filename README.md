@@ -43,9 +43,9 @@ editing it keeps just the changed files in memory. This is what lets an 87 GB re
 ## Minimal token footprint
 
 A pain point with some in-house tools is that they register a pile of MCP tools/skills that eat
-context every session. CodeCompass exposes a deliberately small **6 tools** with terse descriptions —
+context every session. CodeCompass exposes a deliberately small **7 tools** with terse descriptions —
 that's the entire standing per-session cost: `search_code`, `find_definition`, `find_references`,
-`find_callees`, `search_symbols`, `reindex`.
+`find_callees`, `search_symbols`, `reindex`, `manage_links`.
 
 ## Install
 
@@ -313,6 +313,11 @@ codecompass link remove <path> [project-dir]   detach it (offers to delete its i
 codecompass link list   [project-dir]          show the project's linked roots + index status
 ```
 
+You can do the same **from inside the agent** (Claude Code / Codex) with the **`manage_links`** MCP tool —
+`manage_links` with `action: "list" | "add" | "remove"` (and a `path` for add/remove) — so you don't have to
+drop to a terminal. Either way edits the same per-project link set; a running MCP server picks up the change
+on its next query. (The CLI and the tool share one implementation, so they behave identically.)
+
 - **One index per root, shared across projects.** Each linked root keeps its **own** independent index
   keyed by its absolute path, so a root two projects both link is indexed **once** and reused. `link
   remove` only deletes that index if **no other project** still references it (it tells you who does).
@@ -352,13 +357,14 @@ running an always-on background CodeCompass service, which the tool intentionall
 | Query scope | project **+ all its linked roots**, merged into one result | the **single root** you point it at |
 | `search_code` / `find_definition` / `find_references` / `find_callees` / `search_symbols` | federated across roots | one root only |
 | Live watching, write-ownership, cross-root C#/C++ semantics | ✅ | — (one-shot, cold) |
-| Manage links (`link add` / `remove` / `list`) | — | ✅ (this is where you *configure* federation) |
+| Manage links | ✅ `manage_links` tool | ✅ `link add`/`remove`/`list` |
 | Build/refresh an index (`index` / `update`) | auto (per root) | ✅ per root |
 
-So: **use the CLI to set federation up** (`link add`) and to build or spot-check an individual root; **let
-the MCP tools do the actual multi-repo searching.** A CLI query on a project that has linked roots prints
-a one-line reminder to that effect (so a CLI "0 results" isn't mistaken for "not found anywhere"). You can
-still point the CLI directly at a linked root's own path to search just that one.
+So: **set federation up from either side** — the `manage_links` MCP tool (inside the agent) or the CLI
+`link` commands (in a terminal); they share one implementation. Then **let the MCP tools do the actual
+multi-repo searching** (that part is MCP-only — the CLI searches a single root). A CLI query on a project
+that has linked roots prints a one-line reminder to that effect (so a CLI "0 results" isn't mistaken for
+"not found anywhere"). You can still point the CLI directly at a linked root's own path to search just that one.
 
 ## Status line (optional)
 
