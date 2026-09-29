@@ -1007,7 +1007,19 @@ static int CmdRefs(string[] args)
                 cppCandidates.Add(Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar))));
         }
     }
-    var cppRes = new ClangCppAnalyzer(root).FindReferencesDetailed(name, cppCandidates);
+    // Parse the C/C++ candidates in a SHORT-LIVED CHILD PROCESS (crash isolation), same as the MCP tool. A
+    // pathological giant TU can trip an uncatchable LLVM OOM abort() mid-parse - BEFORE the graceful per-query
+    // memory stop runs - and in-process that abort takes down this whole CLI (silent 0 refs + nonzero exit,
+    // bypassing the lexical backfill + disclosure below). In the child it only kills the child; the failure is
+    // then contained as an incomplete pass, so the backfill covers it honestly. Falls back to in-process only
+    // when the subprocess is disabled (CODECOMPASS_CPP_SUBPROCESS=0) or the worker exe isn't found.
+    ClangCppAnalyzer.CppRefResult cppRes;
+    var cppWorker = ClangSubprocess.Enabled ? ClangSubprocess.WorkerExePath() : null;
+    if (cppWorker is not null &&
+        ClangSubprocess.TryFindReferences(cppWorker, new[] { root }, name, cppCandidates, 200, ClangSubprocess.TimeoutSeconds(), out var cppSub))
+        cppRes = cppSub;
+    else
+        cppRes = new ClangCppAnalyzer(root).FindReferencesDetailed(name, cppCandidates);
     foreach (var s in cppRes.Locations)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 

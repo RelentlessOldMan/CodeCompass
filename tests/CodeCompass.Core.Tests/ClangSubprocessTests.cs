@@ -133,6 +133,81 @@ public class ClangSubprocessTests
         Assert.Contains("☃", useHit.LineText); // snowman survived (not mojibake)
     }
 
+    // A HARD worker failure (nonzero exit / broken pipe) is usually an uncatchable LLVM OOM abort() while
+    // parsing a pathological giant TU: the graceful per-query memory stop never runs because a single huge
+    // allocation dies mid-parse. The parent must NOT re-run that parse in-process - it would re-trigger the
+    // abort in the CLI process (or the long-lived MCP server), the exact crash the child isolates, and surface
+    // to the user as a SILENT 0 refs + nonzero exit. Instead it returns an INCOMPLETE pass so the caller's
+    // lexical backfill + coverage disclosure produce an honest answer. (Found going ham on 'death', 2026-09-29.)
+    [Fact]
+    public void ContainedFailure_OomStderr_IsIncompleteAndMemoryStopped()
+    {
+        var cands = new[] { "a.c", "b.c", "c.c" };
+        var r = ClangSubprocess.ContainedFailure(cands, "LLVM ERROR: out of memory\nBuffer allocation failed\n");
+        Assert.Empty(r.Locations);
+        Assert.Equal(0, r.ParsedTus);
+        Assert.Equal(cands.Length, r.CandidateTus);
+        Assert.True(r.MemoryStopped, "an OOM signature must mark the pass memory-stopped so the caveat names the ceiling knob");
+        Assert.True(SemanticCoverage.IsCppPassIncomplete(r.MemoryStopped, r.ParsedTus, r.CandidateTus, r.UnresolvedIncludes.Count),
+            "a contained crash must count as an incomplete pass so lexical backfill runs (never a silent 0)");
+        var bits = ReferenceMerge.CppCoverageBits(r.ParsedTus, r.CandidateTus, r.MemoryStopped, r.UnresolvedIncludes);
+        Assert.Contains(bits, b => b.Contains("candidate C/C++ file(s) parsed"));
+        Assert.Contains(bits, b => b.Contains("memory budget"));
+    }
+
+    // A non-OOM hard failure (e.g. a broken pipe with no OOM text) is still contained as incomplete, but must
+    // NOT falsely blame the memory ceiling - the honest "0/N parsed" bit carries it.
+    [Fact]
+    public void ContainedFailure_NonOomCrash_IncompleteWithoutMemoryClaim()
+    {
+        var cands = new[] { "a.c", "b.c" };
+        var r = ClangSubprocess.ContainedFailure(cands, "worker died: pipe closed");
+        Assert.Equal(0, r.ParsedTus);
+        Assert.Equal(2, r.CandidateTus);
+        Assert.False(r.MemoryStopped);
+        Assert.True(SemanticCoverage.IsCppPassIncomplete(r.MemoryStopped, r.ParsedTus, r.CandidateTus, 0)); // 0 < 2
+        var bits = ReferenceMerge.CppCoverageBits(r.ParsedTus, r.CandidateTus, r.MemoryStopped, r.UnresolvedIncludes);
+        Assert.Contains(bits, b => b.Contains("candidate C/C++ file(s) parsed"));
+        Assert.DoesNotContain(bits, b => b.Contains("memory budget"));
+    }
+
+    // With no candidate count to make 0<N true, incompleteness must still be forced so lexical backfill runs.
+    [Fact]
+    public void ContainedFailure_NoCandidates_StillIncomplete()
+    {
+        var r = ClangSubprocess.ContainedFailure(null, "worker died");
+        Assert.True(r.MemoryStopped);
+        Assert.True(SemanticCoverage.IsCppPassIncomplete(r.MemoryStopped, r.ParsedTus, r.CandidateTus, 0));
+    }
+
+    [Theory]
+    [InlineData("LLVM ERROR: out of memory", true)]
+    [InlineData("terminate called after throwing an instance of 'std::bad_alloc'", true)]
+    [InlineData("Buffer allocation failed", true)]
+    [InlineData("clang: warning: some benign message", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsOomSignature_DetectsNativeOom(string? stderr, bool expected)
+        => Assert.Equal(expected, ClangSubprocess.IsOomSignature(stderr));
+
+    // End-to-end: a REAL worker that exits nonzero must be CONTAINED (ok==true, incomplete result), NOT
+    // reported as false (which would send the caller into the crashing in-process retry). An empty name forces
+    // the worker's nonzero exit deterministically without needing to actually OOM libclang. Soft-skips if the
+    // CLI exe isn't built (bare `dotnet test`); the release gate builds it and runs this for real.
+    [Fact]
+    public void TryFindReferences_WorkerNonZeroExit_ContainedAsIncomplete()
+    {
+        var cli = FindCliExe();
+        if (cli is null) return;
+        var cands = new[] { "x.c", "y.c", "z.c" };
+        var ok = ClangSubprocess.TryFindReferences(cli, new[] { Path.GetTempPath() }, "", cands, 200, 60, out var r);
+        Assert.True(ok, "a worker crash must be contained (return true with an incomplete result), not fall through to in-process");
+        Assert.Empty(r.Locations);
+        Assert.Equal(0, r.ParsedTus);
+        Assert.Equal(cands.Length, r.CandidateTus);
+        Assert.True(SemanticCoverage.IsCppPassIncomplete(r.MemoryStopped, r.ParsedTus, r.CandidateTus, 0));
+    }
+
     private static string? FindCliExe()
     {
         // Walk up from the test's output dir to the repo root, then find the built CLI exe.
