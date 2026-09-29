@@ -48,7 +48,9 @@ if (-not $Exe)    { $Exe = Join-Path $scriptDir 'plugin\bin\CodeCompass.Cli.exe'
 if (-not $OutDir) { $OutDir = $scriptDir }
 if (-not (Test-Path $Exe))  { throw "CLI exe not found: $Exe  (build the plugin, or pass -Exe)" }
 if (-not (Test-Path $Repo)) { throw "repo not found: $Repo" }
-$Repo = (Resolve-Path $Repo).Path
+# .ProviderPath (not .Path): .Path returns the provider-qualified form for UNC paths
+# (Microsoft.PowerShell.Core\FileSystem::\\server\share), which native process launches reject.
+$Repo = (Resolve-Path $Repo).ProviderPath
 
 if ($CeilMB -le 0) {
     $ramBytes = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
