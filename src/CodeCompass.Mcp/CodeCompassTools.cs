@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Text;
 using CodeCompass.Core.Indexing;
+using CodeCompass.Core.Storage;
 using CodeCompass.Core.Symbols;
 using CodeCompass.Core.Text;
 using CodeCompass.Semantics;
@@ -366,5 +367,52 @@ public static class CodeCompassTools
         var s = ServerContext.Rebuild();
         return $"Reindexed {s.Files} files ({s.Bytes / (1024.0 * 1024.0):F1} MB) in {s.Seconds:F2}s; " +
                $"{s.Symbols} symbols.";
+    }
+
+    [McpServerTool(Name = "manage_links")]
+    [Description("Configure LINKED ROOTS - external directories outside this workspace (a shared library, a " +
+                 "sibling repo, a third-party drop on another drive) whose code is federated into this " +
+                 "workspace's searches. action: \"list\" (default) shows the current linked roots + index " +
+                 "status; \"add\" attaches a directory (and indexes it, or defers if very large); \"remove\" " +
+                 "detaches one. 'path' is the external directory (required for add/remove). Changes take " +
+                 "effect on the NEXT query this session. Searching across links is automatic - this only " +
+                 "configures which roots are federated; it does not itself run a search.")]
+    public static string ManageLinks(
+        [Description("What to do: list | add | remove (default list).")] string action = "list",
+        [Description("The external directory to add or remove (absolute path). Required for add/remove.")] string? path = null,
+        [Description("On remove, also delete the linked root's index if no other workspace uses it (reclaim disk).")] bool purge = false)
+    {
+        var project = ServerContext.Root;
+        if (string.IsNullOrWhiteSpace(project)) return "No workspace is currently being served.";
+
+        switch ((action ?? "list").Trim().ToLowerInvariant())
+        {
+            case "list":
+            {
+                var links = LinkManager.List(project);
+                if (links.Count == 0) return $"No linked roots for {project}. Use action=\"add\" with a path to federate an external directory.";
+                var sb = new StringBuilder($"Linked roots for {project}:\n");
+                foreach (var l in links) sb.AppendLine($"  {l.Path}  [{l.Status}]");
+                return sb.ToString().TrimEnd();
+            }
+            case "add":
+            {
+                if (string.IsNullOrWhiteSpace(path)) return "Provide 'path' - the external directory to link.";
+                var r = LinkManager.Add(project, path);
+                var suffix = r.Status is LinkManager.AddStatus.Rejected or LinkManager.AddStatus.AlreadyLinked ? "" : " — active on the next query.";
+                return r.Message + suffix;
+            }
+            case "remove":
+            {
+                if (string.IsNullOrWhiteSpace(path)) return "Provide 'path' - the linked directory to remove.";
+                var r = LinkManager.Remove(project, path, _ => purge);
+                var sb = new StringBuilder(r.Message);
+                foreach (var o in r.OtherProjects) sb.Append($"\n      {o}");
+                if (r.Status != LinkManager.RemoveStatus.NotLinked) sb.Append(" — active on the next query.");
+                return sb.ToString();
+            }
+            default:
+                return $"Unknown action '{action}'. Use list, add, or remove.";
+        }
     }
 }

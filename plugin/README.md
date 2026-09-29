@@ -14,6 +14,7 @@ MCP tools (returned as precise `file:line:col` results, not whole files):
 - `find_callees` — the in-repo methods a C# method calls, resolved **semantically** (walk a call chain downward)
 - `search_symbols` — symbol-name navigation
 - `reindex` — rebuild the index after large external changes
+- `manage_links` — add / remove / list **linked roots** (external directories federated into this workspace's search) without leaving the agent
 
 The index builds on first use, then **auto-updates** as files change (debounced,
 content-hash verified, ignores build output). Changes made *outside* a session (a

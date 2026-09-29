@@ -55,8 +55,8 @@ context on thinking, not on scrolling files it didn't need.</p>
 
 <h3>Minimal token footprint</h3>
 <p>A pain point with some in-house tools is that they register a pile of MCP tools/skills that eat context every session.
-CodeCompass exposes a deliberately small <b>6 tools</b> with terse descriptions &mdash; that's the entire standing per-session cost.</p>
-<p><span class="pill">search_code</span><span class="pill">find_definition</span><span class="pill">find_references</span><span class="pill">search_symbols</span><span class="pill">reindex</span></p>
+CodeCompass exposes a deliberately small <b>7 tools</b> with terse descriptions &mdash; that's the entire standing per-session cost.</p>
+<p><span class="pill">search_code</span><span class="pill">find_definition</span><span class="pill">find_references</span><span class="pill">find_callees</span><span class="pill">search_symbols</span><span class="pill">reindex</span><span class="pill">manage_links</span></p>
 
 <h2>What it can &amp; can't do</h2>
 <table>
@@ -110,6 +110,23 @@ codecompass statusline [--wrap "..."] Claude Code status-line segment (index sta
 codecompass doctor  &lt;path&gt;            diagnose a repo's index (health + metadata)
 codecompass cache   [list|gc|clear &lt;path&gt;]   inspect/manage the per-user index cache
 codecompass report  &lt;path&gt; [--no-logs]  zip diagnostics + logs for a bug report (never source)</pre>
+
+<h2>Linked roots (searching more than one repo)</h2>
+<p>When the code you work on spans more than one place &mdash; a shared library checked out elsewhere, a sibling
+repo, or a third-party drop on another drive that can't be nested under your project &mdash; <b>linked roots</b> let a
+project index and search those external directories alongside its own, as one federated result set. Each linked root
+keeps its <b>own</b> index (keyed by its absolute path, so a root two projects both link is indexed once and reused),
+is live-watched for edits like the main repo, and <code>find_references</code>/<code>find_callees</code> resolve
+<b>across</b> the boundary (C# via Roslyn, C/C++ via clang). Links are stored machine-local (absolute paths), not in
+the committed <code>.codecompass.json</code>.</p>
+<p>Manage them from <b>either</b> side &mdash; they share one implementation:</p>
+<pre>From the agent (MCP tool):   manage_links  action: list | add | remove   (path: for add/remove)
+From a terminal (CLI):       codecompass link add|remove|list &lt;path&gt; [project-dir]</pre>
+<p><b>Only the MCP server searches across linked roots</b> (it's the long-lived process that holds each root's index
+open and watches it); the CLI always searches the single root you point it at. So: set federation up with
+<code>manage_links</code> or <code>link add</code>, then let the MCP tools do the multi-repo searching.
+<code>codecompass doctor &lt;project&gt;</code> lists every linked root, whether it exists and is indexed, and how many
+other projects share it.</p>
 
 <h2>Tuning for huge or generated trees</h2>
 <p>Indexing is robust on ordinary source at scale. The one hazard is <i>large machine-generated files</i>. Tree-sitter parse
