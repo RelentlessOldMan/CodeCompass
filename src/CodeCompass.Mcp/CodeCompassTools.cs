@@ -253,7 +253,10 @@ public static class CodeCompassTools
         if (hits.Count <= maxResults)
             foreach (var h in handles)
             {
-                foreach (var m in h.Text.Search(name, probe * 5))
+                // Reference mode: canonical candidate order (build-order-independent: a local and a UNC index
+                // built in separate runs return the same set) + a per-file cap so one high-hit noise file
+                // can't consume the whole budget and starve the real references (the UNC refs-count gap).
+                foreach (var m in h.Text.Search(name, probe * 5, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true))
                 {
                     // Shared filter (same as the CLI): skip semantic-covered files unless the C/C++ pass was
                     // incomplete, skip build noise, require a whole-word match.
