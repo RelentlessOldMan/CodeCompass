@@ -8,8 +8,33 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $binDir = Join-Path $root "plugin/bin"
 
+# A dev MCP server (or CLI) launched from plugin/bin holds a lock on its own binaries
+# (clrjit.dll et al.), so the clean below would die with a cryptic "Access denied". This is
+# the common dogfooding case: we run CodeCompass out of the very dir we're rebuilding. Detect
+# such processes, stop them, and wait for the locks to drop before cleaning.
+$binFull = [System.IO.Path]::GetFullPath($binDir)
+$locking = @(Get-Process -Name "CodeCompass.Mcp", "CodeCompass.Cli" -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.Path -and $_.Path.StartsWith($binFull, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+})
+if ($locking) {
+    foreach ($p in $locking) {
+        Write-Host "Stopping $($p.ProcessName) (PID $($p.Id)) running from plugin/bin so its binaries can be replaced ..."
+        try { $p.Kill(); $p.WaitForExit(10000) | Out-Null } catch { }
+    }
+    Write-Host "  (if this was the dogfooded MCP server, reconnect it with /mcp or a new session after the build)"
+}
+
 Write-Host "Cleaning $binDir ..."
-if (Test-Path $binDir) { Remove-Item $binDir -Recurse -Force }
+if (Test-Path $binDir) {
+    try { Remove-Item $binDir -Recurse -Force }
+    catch {
+        $still = @(Get-Process -Name "CodeCompass.Mcp", "CodeCompass.Cli" -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.Path -and $_.Path.StartsWith($binFull, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+        })
+        $who = if ($still) { " Still running from plugin/bin: " + (($still | ForEach-Object { "$($_.ProcessName)#$($_.Id)" }) -join ", ") + "." } else { "" }
+        throw "Could not clean $binDir - a binary is locked (a CodeCompass process is likely running from it).$who Stop it (Stop-Process) or reconnect via /mcp after the build, then re-run. Original error: $($_.Exception.Message)"
+    }
+}
 New-Item -ItemType Directory -Path $binDir | Out-Null
 
 $common = @("-c", "Release", "-r", "win-x64", "--self-contained", "true",
