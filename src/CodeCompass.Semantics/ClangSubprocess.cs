@@ -75,6 +75,36 @@ public static class ClangSubprocess
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
+    /// <summary>True when the worker's stderr shows an uncatchable NATIVE out-of-memory: LLVM's fatal
+    /// allocation handler (or a libc bad_alloc) calls abort(), so a single pathological giant TU can die
+    /// mid-parse BEFORE the graceful per-query memory stop ever runs. Used to mark a contained failure as
+    /// memory-stopped so the coverage caveat points at the right ceiling knob.</summary>
+    public static bool IsOomSignature(string? stderr)
+    {
+        if (string.IsNullOrEmpty(stderr)) return false;
+        return stderr.Contains("out of memory", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("LLVM ERROR", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("bad_alloc", StringComparison.OrdinalIgnoreCase)
+            || stderr.Contains("Buffer allocation failed", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The result to use when the isolated worker FAILED HARD (nonzero exit, timeout, or a broken pipe
+    /// from the child abort()ing) - most often an uncatchable LLVM OOM while parsing a pathological giant TU.
+    /// The parent must NOT re-run that parse in-process: it would re-trigger the abort in the caller (the CLI
+    /// process, or the long-lived MCP server) - the very crash the child isolates - which surfaces to a user as
+    /// a SILENT 0 references + nonzero exit. Instead we return an INCOMPLETE pass (0 parsed of N candidates,
+    /// memory-stopped on an OOM signature) so the caller's lexical backfill + coverage disclosure produce an
+    /// honest, non-empty answer. (Found going ham on the 'death' corpus, 2026-09-29.)</summary>
+    public static ClangCppAnalyzer.CppRefResult ContainedFailure(IReadOnlyCollection<string>? candidates, string? stderr)
+    {
+        int cand = candidates?.Count ?? 0;
+        // 0 parsed < N candidates already marks the pass incomplete; when we have no candidate count, set
+        // memoryStopped so IsCppPassIncomplete is still true and the lexical backfill runs regardless.
+        bool memStopped = IsOomSignature(stderr) || cand == 0;
+        return new ClangCppAnalyzer.CppRefResult(
+            Array.Empty<SemanticLocation>(), cand, 0, Array.Empty<string>(), memStopped);
+    }
+
     /// <summary>Run the C/C++ reference pass in a child process. Returns true and sets <paramref name="result"/>
     /// on success; false on any failure (caller should fall back to in-process). Never throws.</summary>
     public static bool TryFindReferences(string workerExe, IReadOnlyList<string> roots, string name,
@@ -126,16 +156,22 @@ public static class ClangSubprocess
             if (!p.WaitForExit(timeoutSeconds * 1000))
             {
                 try { p.Kill(entireProcessTree: true); } catch { }
-                Log.Global.Warn($"clang subprocess: timed out after {timeoutSeconds}s on '{name}' ({req.Candidates.Count} candidates); using in-process fallback (raise CODECOMPASS_CPP_WORKER_TIMEOUT_SEC)");
-                return false;
+                Log.Global.Warn($"clang subprocess: timed out after {timeoutSeconds}s on '{name}' ({req.Candidates.Count} candidates); CONTAINED as an incomplete C/C++ pass (lexical backfill will cover) - NOT retried in-process (raise CODECOMPASS_CPP_WORKER_TIMEOUT_SEC)");
+                result = ContainedFailure(candidates, null);
+                return true;
             }
             p.WaitForExit(); // parameterless: ensures the async stdout/stderr readers have fully flushed
             var payload = outTask.GetAwaiter().GetResult();
             var errText = errTask.GetAwaiter().GetResult(); // observe stderr so it's never an unobserved task
             if (p.ExitCode != 0)
             {
-                Log.Global.Warn($"clang subprocess: exit {p.ExitCode} on '{name}'; using in-process fallback. stderr: {Tail(errText)}");
-                return false;
+                // The worker ran and died. Overwhelmingly this is an uncatchable LLVM OOM abort() on a
+                // pathological giant TU. Re-running that parse in-process would re-trigger the abort in THIS
+                // process (CLI or the long-lived MCP server), surfacing as a silent 0 refs + nonzero exit - so
+                // contain it as an incomplete pass and let the caller's lexical backfill + disclosure answer.
+                Log.Global.Warn($"clang subprocess: exit {p.ExitCode} on '{name}'; CONTAINED as an incomplete C/C++ pass (lexical backfill will cover) - NOT retried in-process. stderr: {Tail(errText)}");
+                result = ContainedFailure(candidates, errText);
+                return true;
             }
             if (string.IsNullOrWhiteSpace(payload)) { Log.Global.Warn($"clang subprocess: empty output on '{name}'; using in-process fallback. stderr: {Tail(errText)}"); return false; }
             var resp = JsonSerializer.Deserialize<RefResponse>(payload, Json);
@@ -151,8 +187,18 @@ public static class ClangSubprocess
         catch (Exception ex)
         {
             try { if (p is { HasExited: false }) p.Kill(entireProcessTree: true); } catch { }
-            Log.Global.Warn($"clang subprocess: {ex.GetType().Name} on '{name}'; using in-process fallback: {ex.Message}");
-            return false;
+            if (p is null)
+            {
+                // The worker never started (missing/locked exe, bad ProcessStartInfo). No parse was attempted,
+                // so there's no native crash to contain - let the caller use the in-process analyzer.
+                Log.Global.Warn($"clang subprocess: {ex.GetType().Name} starting worker on '{name}'; using in-process fallback: {ex.Message}");
+                return false;
+            }
+            // The worker HAD started, then the pipe/wait threw - almost always the child abort()ing hard (LLVM
+            // OOM) mid-request. Re-running that parse in-process would re-trigger the abort HERE, so contain it.
+            Log.Global.Warn($"clang subprocess: {ex.GetType().Name} after worker start on '{name}'; CONTAINED as an incomplete C/C++ pass (lexical backfill will cover) - NOT retried in-process: {ex.Message}");
+            result = ContainedFailure(candidates, ex.Message);
+            return true;
         }
     }
 
