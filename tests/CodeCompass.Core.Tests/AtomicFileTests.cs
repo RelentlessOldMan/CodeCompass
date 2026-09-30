@@ -75,4 +75,24 @@ public sealed class AtomicFileTests : IDisposable
         var lines = File.ReadAllLines(path);
         Assert.Equal(new[] { "line1", "line2" }, lines);
     }
+
+    // The network-safer replace (File.Replace with a null backup, fallback to Move) must, on the happy path,
+    // leave exactly the target - no .tmp orphan and no leftover backup file - across repeated replacements.
+    [Fact]
+    public void Write_RepeatedReplace_LeavesOnlyTheTarget_NoTempOrBackupOrphans()
+    {
+        var path = Path.Combine(_dir, "reg.bin");
+        for (int i = 0; i < 20; i++)
+        {
+            var payload = Encoding.UTF8.GetBytes($"rev-{i}");
+            AtomicFile.Write(path, s => s.Write(payload, 0, payload.Length));
+        }
+        Assert.Equal("rev-19", File.ReadAllText(path)); // last writer wins, content intact
+
+        var leftovers = Directory.GetFiles(_dir)
+            .Select(Path.GetFileName)
+            .Where(n => n != "reg.bin")
+            .ToArray();
+        Assert.Empty(leftovers); // no reg.bin.tmp and no File.Replace backup left behind
+    }
 }
