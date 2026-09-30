@@ -1,3 +1,4 @@
+using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Storage;
 
 namespace CodeCompass.Core.Symbols.Segments;
@@ -54,7 +55,9 @@ public sealed class SegmentedSymbolIndex : IDisposable
     public static SegmentedSymbolIndex FromSegmentFiles(
         string dir, IReadOnlyList<string> segmentFileNames, int nextSegmentNumber, long budget = DefaultBudgetBytes)
     {
-        var idx = new SegmentedSymbolIndex(dir, budget) { _nextSegmentNumber = nextSegmentNumber };
+        // Clamp against the on-disk max: a number below an existing sym-*.ccsym would make the next flush reuse
+        // a live segment's filename and overwrite it, breaking the monotonic never-reuse invariant. (Mirrors Load.)
+        var idx = new SegmentedSymbolIndex(dir, budget) { _nextSegmentNumber = Math.Max(nextSegmentNumber, NextSegmentNumber(dir)) };
         foreach (var name in segmentFileNames)
             idx._segments.Add(new SymbolSegmentReader(Path.Combine(dir, name)));
         idx.SaveManifest();
@@ -251,16 +254,31 @@ public sealed class SegmentedSymbolIndex : IDisposable
     private void Load()
     {
         var manifestPath = Path.Combine(_dir, ManifestName);
-        if (!File.Exists(manifestPath)) return;
-
-        var lines = File.ReadAllLines(manifestPath);
-        if (lines.Length >= 1) int.TryParse(lines[0], out _nextSegmentNumber);
-        for (int i = 1; i < lines.Length; i++)
+        if (File.Exists(manifestPath))
         {
-            if (!PathSafety.IsBareFileName(lines[i])) continue; // a tampered manifest can't point outside _dir
-            var file = Path.Combine(_dir, lines[i]);
-            if (File.Exists(file)) _segments.Add(new SymbolSegmentReader(file));
+            var lines = File.ReadAllLines(manifestPath);
+            if (lines.Length >= 1) int.TryParse(lines[0], out _nextSegmentNumber);
+            for (int i = 1; i < lines.Length; i++)
+            {
+                if (!PathSafety.IsBareFileName(lines[i])) continue; // a tampered manifest can't point outside _dir
+                var file = Path.Combine(_dir, lines[i]);
+                if (File.Exists(file)) _segments.Add(new SymbolSegmentReader(file));
+            }
         }
+
+        // Durability net (mirrors SegmentedIndex.Load): reconstruct from sym-*.ccsym files if the manifest is
+        // missing/empty but segments remain, rather than treating the symbol index as EMPTY (silent total loss).
+        if (_segments.Count == 0 && System.IO.Directory.Exists(_dir))
+        {
+            foreach (var f in System.IO.Directory.EnumerateFiles(_dir, SegmentPattern).OrderBy(f => f, StringComparer.Ordinal))
+            {
+                try { _segments.Add(new SymbolSegmentReader(f)); }
+                catch (Exception ex) { Log.Global.Warn($"skipping unreadable symbol segment {Path.GetFileName(f)} during manifest-less recovery: {ex.Message}"); }
+            }
+            if (_segments.Count > 0)
+                Log.Global.Warn($"symbol index manifest missing/empty at {_dir}; reconstructed {_segments.Count} segment(s) from disk (run codecompass index to restore tombstones/compaction)");
+        }
+
         if (_nextSegmentNumber < _segments.Count) _nextSegmentNumber = NextSegmentNumber(_dir);
 
         var tombPath = Path.Combine(_dir, TombstoneName);
