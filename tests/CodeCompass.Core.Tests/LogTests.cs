@@ -133,4 +133,32 @@ public class LogTests
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    [Fact]
+    public void Rotation_KeepZero_DeletesInsteadOfRotating()
+    {
+        // KEEP=0 is the "hard cap, keep nothing" contract: at the cap the current log is DELETED and no
+        // .log.1 is ever created. An off-by-one in the keep cascade would resurrect a rotated file the
+        // operator explicitly asked to discard.
+        var dir = NewTempDir();
+        try
+        {
+            using var _ = new EnvScope(
+                ("CODECOMPASS_LOG_DIR", dir), ("CODECOMPASS_LOG", null), ("CODECOMPASS_LOG_LEVEL", "debug"),
+                ("CODECOMPASS_LOG_MAX_MB", "1"), ("CODECOMPASS_LOG_KEEP", "0"));
+            var path = Path.Combine(dir, "k0.log");
+            var log = new DiskLogger(path, "test", null);
+
+            var big = new string('x', 500);
+            for (int i = 0; i < 12000; i++) log.Info(big); // well over 1 MB -> triggers the cap repeatedly
+
+            Assert.False(File.Exists(path + ".1"), "KEEP=0 must never produce a rotated .log.1");
+            Assert.False(File.Exists(path + ".2"));
+            // Nothing is kept across the cap, so the on-disk family stays within a single cap (+ slack).
+            long max = 1L * 1024 * 1024;
+            long total = new DirectoryInfo(dir).GetFiles("k0.log*").Sum(f => f.Length);
+            Assert.True(total <= max + 8192, $"total {total} bytes exceeds a single cap");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }

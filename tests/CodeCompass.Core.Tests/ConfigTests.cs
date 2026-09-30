@@ -107,6 +107,73 @@ public class ConfigTests
         finally { Environment.SetEnvironmentVariable("CODECOMPASS_MAX_SYMBOL_MB", old); }
     }
 
+    // Nulls the CODECOMPASS_* knobs the resolver reads FIRST (env > file > default), so a value inherited
+    // from the ambient environment can't mask the config-file/default behavior under test.
+    private sealed class EnvNull : IDisposable
+    {
+        private readonly (string Key, string? Old)[] _saved;
+        public EnvNull(params string[] keys)
+        {
+            _saved = keys.Select(k => (k, Environment.GetEnvironmentVariable(k))).ToArray();
+            foreach (var k in keys) Environment.SetEnvironmentVariable(k, null);
+        }
+        public void Dispose() { foreach (var (k, old) in _saved) Environment.SetEnvironmentVariable(k, old); }
+    }
+
+    // The tuning-knob resolvers each guard their range; a dropped guard would silently poison a cap. These
+    // pin the out-of-range/zero/overflow behavior the happy-path precedence tests never touch.
+    [Fact]
+    public void MaxSymbolChars_ClampsZeroAndNegativeToDefault_AndAvoidsOverflow()
+    {
+        using var _ = new EnvNull("CODECOMPASS_MAX_SYMBOL_MB");
+        Assert.Equal(1 * 1024 * 1024, CodeCompassConfig.MaxSymbolChars(new RepoConfig { MaxSymbolMb = 0 }));  // 0 -> default
+        Assert.Equal(1 * 1024 * 1024, CodeCompassConfig.MaxSymbolChars(new RepoConfig { MaxSymbolMb = -5 })); // negative -> default
+        // A huge MB value must saturate at int.MaxValue, never overflow-wrap to a negative char cap.
+        Assert.Equal(int.MaxValue, CodeCompassConfig.MaxSymbolChars(new RepoConfig { MaxSymbolMb = 9_000_000 }));
+    }
+
+    [Fact]
+    public void MaxAutoBytes_ZeroIsValidForceCli_NegativeIsDefault()
+    {
+        using var _ = new EnvNull("CODECOMPASS_MAX_AUTO_MB");
+        Assert.Equal(0, CodeCompassConfig.MaxAutoBytes(new RepoConfig { MaxAutoMb = 0 }));            // 0 = force CLI (valid)
+        Assert.Equal(100L * 1024 * 1024, CodeCompassConfig.MaxAutoBytes(new RepoConfig { MaxAutoMb = -1 })); // negative -> default 100 MB
+    }
+
+    [Fact]
+    public void MaxFileBytes_ZeroAndNegative_FallBackToTwoGigDefault()
+    {
+        using var _ = new EnvNull("CODECOMPASS_MAX_FILE_MB");
+        long twoGb = 2000L * 1024 * 1024;
+        Assert.Equal(twoGb, CodeCompassConfig.MaxFileBytes(new RepoConfig { MaxFileMb = 0 }));
+        Assert.Equal(twoGb, CodeCompassConfig.MaxFileBytes(new RepoConfig { MaxFileMb = -10 }));
+    }
+
+    [Fact]
+    public void CompactSegments_BelowMinTwo_FallsBackToDefault()
+    {
+        using var _ = new EnvNull("CODECOMPASS_COMPACT_SEGMENTS");
+        Assert.Equal(64, CodeCompassConfig.CompactSegments(new RepoConfig { CompactSegments = 1 }));  // below the min-2 guard
+        Assert.Equal(64, CodeCompassConfig.CompactSegments(new RepoConfig { CompactSegments = -3 }));
+        Assert.Equal(2, CodeCompassConfig.CompactSegments(new RepoConfig { CompactSegments = 2 }));   // exactly the floor is honored
+    }
+
+    [Fact]
+    public void StallWarnSec_BelowMinFive_FallsBackToDefault()
+    {
+        using var _ = new EnvNull("CODECOMPASS_STALL_WARN_SEC");
+        Assert.Equal(60, CodeCompassConfig.StallWarnSec(new RepoConfig { StallWarnSec = 3 }));  // below the min-5 guard
+        Assert.Equal(5, CodeCompassConfig.StallWarnSec(new RepoConfig { StallWarnSec = 5 }));   // the floor is honored
+    }
+
+    [Fact]
+    public void SemanticIdleMinutes_ZeroDisablesEviction_NegativeIsDefault()
+    {
+        using var _ = new EnvNull("CODECOMPASS_SEMANTIC_IDLE_MIN");
+        Assert.Equal(0, CodeCompassConfig.SemanticIdleMinutes(new RepoConfig { SemanticIdleMinutes = 0 }));   // 0 = keep resident (valid)
+        Assert.Equal(10, CodeCompassConfig.SemanticIdleMinutes(new RepoConfig { SemanticIdleMinutes = -1 })); // negative -> default 10
+    }
+
     [Fact]
     public void IgnoredDirs_UnionsEnvAndConfig()
     {

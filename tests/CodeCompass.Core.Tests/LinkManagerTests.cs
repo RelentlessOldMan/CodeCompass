@@ -52,6 +52,35 @@ public class LinkManagerTests
     }
 
     [Fact]
+    public void Add_NonexistentDirectory_Rejected()
+    {
+        using var project = new TempRepo();
+        var ghost = Path.Combine(Path.GetTempPath(), "cc-nope-" + Guid.NewGuid().ToString("N"));
+        var r = LinkManager.Add(project.Root, ghost);
+        Assert.Equal(LinkManager.AddStatus.Rejected, r.Status);
+        Assert.Contains("not a directory", r.Message);
+    }
+
+    [Fact]
+    public void Add_OuterDirContainingAnExistingLink_Rejected()
+    {
+        // Distinct from Add_NestedOrSelf (which nests against the PROJECT): here the new root would OVERLAP a
+        // PREVIOUSLY LINKED root (linking the parent of something already federated double-covers a subtree).
+        using var project = new TempRepo();
+        using var outer = new TempRepo();               // an external tree...
+        var inner = Path.Combine(outer.Root, "inner");  // ...with a subdir we link first
+        Directory.CreateDirectory(inner);
+        outer.Write("inner/lib.c", "int f(void){return 0;}\n");
+
+        Assert.NotEqual(LinkManager.AddStatus.Rejected, LinkManager.Add(project.Root, inner).Status); // inner links OK
+        var r = LinkManager.Add(project.Root, outer.Root); // outer contains inner -> overlap
+        Assert.Equal(LinkManager.AddStatus.Rejected, r.Status);
+
+        // cleanup the shared index the inner link may have built
+        LinkManager.Remove(project.Root, inner, _ => true);
+    }
+
+    [Fact]
     public void Remove_SharedIndex_KeptWhileAnotherProjectLinksIt()
     {
         using var projA = new TempRepo();

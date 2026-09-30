@@ -24,7 +24,7 @@ public static class RepoDiagnostics
     // An env-var name that hints its value is a secret, so the shareable report masks the value. Check the
     // part AFTER the CODECOMPASS_ prefix: the product name itself contains "PASS" (codecomPASS), so a raw
     // substring match would mask EVERY CODECOMPASS_* var - gutting the diagnostic dump while looking "safe".
-    private static bool LooksSecret(string name)
+    internal static bool LooksSecret(string name)
     {
         const string prefix = "CODECOMPASS_";
         var tail = name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? name.Substring(prefix.Length) : name;

@@ -522,7 +522,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     // Split a compile_commands.json "command" string into argv, honoring double quotes and backslash escapes.
     // A naive Split(' ') shreds the common Windows case -I "C:\Program Files\..." into broken tokens, so the
     // include path never resolves and the TU parses with errors (honest-but-wrong "0 refs / unresolved include").
-    private static List<string> TokenizeCommand(string command)
+    internal static List<string> TokenizeCommand(string command)
     {
         var tokens = new List<string>();
         var sb = new StringBuilder();
@@ -544,7 +544,7 @@ public sealed class ClangCppAnalyzer : IDisposable
 
     // Drop the compiler executable, the source file, and output/compile-step flags;
     // keep include paths, defines, std, etc. that clang needs to bind correctly.
-    private static string[] CleanArgs(List<string> tokens, string fileName)
+    internal static string[] CleanArgs(List<string> tokens, string fileName)
     {
         var result = new List<string>();
         var baseName = Path.GetFileName(fileName);
