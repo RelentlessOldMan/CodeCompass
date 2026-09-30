@@ -71,7 +71,10 @@ public sealed class SegmentedIndex : IDisposable
         string root, string dir, IReadOnlyList<string> segmentFileNames, int nextSegmentNumber,
         long budget = DefaultBudgetBytes)
     {
-        var idx = new SegmentedIndex(root, dir, budget) { _nextSegmentNumber = nextSegmentNumber };
+        // Clamp against the on-disk max: a caller-supplied number below an existing seg-*.ccseg would make the
+        // NEXT flush reuse a live segment's filename (FileMode.Create overwrites it) - breaking the monotonic,
+        // never-reuse invariant that lets old readers keep their memory maps on Windows. (Mirrors Load.)
+        var idx = new SegmentedIndex(root, dir, budget) { _nextSegmentNumber = Math.Max(nextSegmentNumber, NextSegmentNumber(dir)) };
         foreach (var name in segmentFileNames)
             idx._segments.Add(new SegmentReader(Path.Combine(dir, name)));
         idx.SaveManifest();
@@ -563,16 +566,36 @@ public sealed class SegmentedIndex : IDisposable
     private void Load()
     {
         var manifestPath = Path.Combine(_dir, ManifestName);
-        if (!File.Exists(manifestPath)) return;
-
-        var lines = File.ReadAllLines(manifestPath);
-        if (lines.Length >= 2) int.TryParse(lines[1], out _nextSegmentNumber);
-        for (int i = 2; i < lines.Length; i++)
+        if (File.Exists(manifestPath))
         {
-            if (!PathSafety.IsBareFileName(lines[i])) continue; // a tampered manifest can't point outside _dir
-            var file = Path.Combine(_dir, lines[i]);
-            if (File.Exists(file)) _segments.Add(new SegmentReader(file));
+            var lines = File.ReadAllLines(manifestPath);
+            if (lines.Length >= 2) int.TryParse(lines[1], out _nextSegmentNumber);
+            for (int i = 2; i < lines.Length; i++)
+            {
+                if (!PathSafety.IsBareFileName(lines[i])) continue; // a tampered manifest can't point outside _dir
+                var file = Path.Combine(_dir, lines[i]);
+                if (File.Exists(file)) _segments.Add(new SegmentReader(file));
+            }
         }
+
+        // Durability net: the manifest can go missing (or name no surviving segment) while seg-*.ccseg files
+        // remain on disk - e.g. a non-atomic replace that lost the manifest mid-write over a share (see
+        // AtomicFile). Rather than treat the index as EMPTY (a silent total loss that only a full rebuild
+        // recovers), reconstruct the segment set from disk. Tombstones may be gone with the manifest; the
+        // worst case is a few not-yet-compacted deleted docs reappearing until the next rebuild - far better
+        // than losing the whole index. Corrupt segments are skipped, not fatal, on this recovery path.
+        if (_segments.Count == 0 && System.IO.Directory.Exists(_dir))
+        {
+            foreach (var f in System.IO.Directory.EnumerateFiles(_dir, SegmentPattern).OrderBy(f => f, StringComparer.Ordinal))
+            {
+                try { _segments.Add(new SegmentReader(f)); }
+                catch (Exception ex) { Log.Global.Warn($"skipping unreadable segment {Path.GetFileName(f)} during manifest-less recovery: {ex.Message}"); }
+            }
+            if (_segments.Count > 0)
+                Log.Global.Warn($"index manifest missing/empty at {_dir}; reconstructed {_segments.Count} segment(s) from disk (run codecompass index to restore tombstones/compaction)");
+        }
+
+        // next=0 after manifest-less recovery (or a too-small manifest number) < segment count -> recompute to max+1
         if (_nextSegmentNumber < _segments.Count) _nextSegmentNumber = NextSegmentNumber(_dir);
 
         var tombPath = Path.Combine(_dir, TombstoneName);

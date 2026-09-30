@@ -172,16 +172,19 @@ public static class LargeFileIndexer
             if (len == 0) return;
             byte[] data = blockBuf.GetBuffer(); // valid [0, len)
 
+            int skip = blockStartByte == 0 ? bomLen : 0; // strip BOM only at file start
             int cut;
             if (len >= BlockTargetBytes)
             {
                 cut = LastIndexOf(data, len, (byte)'\n') + 1; // cut just after the last newline
-                if (cut <= 0) cut = len >= BlockHardCapBytes ? len : -1; // no newline: force only past the hard cap
+                // No newline within the hard cap: force a cut, but NOT mid-UTF-8-codepoint - a split multibyte
+                // sequence decodes to a replacement char here AND mis-decodes the next block's leading bytes,
+                // corrupting the trigrams in the block Bloom (a real match then tests negative -> missed hit).
+                if (cut <= 0) cut = len >= BlockHardCapBytes ? TrimToCharBoundary(data, skip, len) : -1;
             }
             else cut = force ? len : -1;
             if (cut <= 0) return; // nothing to close yet
 
-            int skip = blockStartByte == 0 ? bomLen : 0; // strip BOM only at file start
             var chars = DecodeBlock(data, skip, cut - skip);
             whole.Add(chars);
 
@@ -201,6 +204,21 @@ public static class LargeFileIndexer
             if (!force && rem < BlockTargetBytes) return;
             if (rem == 0) return;
         }
+    }
+
+    // Largest cut in (skip, len] that does not split a UTF-8 multibyte sequence, so a forced (no-newline) block
+    // boundary lands on a codepoint boundary. Trailing partial bytes stay in the buffer for the next block. Falls
+    // back to len for invalid UTF-8 (no boundary in the last 4 bytes) - there's no clean cut and progress must
+    // not stall. Newline cuts never need this (a newline is a 1-byte ASCII boundary).
+    internal static int TrimToCharBoundary(byte[] data, int skip, int len)
+    {
+        int p = len - 1, cont = 0;
+        while (p > skip && (data[p] & 0xC0) == 0x80 && cont < 3) { p--; cont++; } // walk back over continuation bytes
+        if (p <= skip) return len;
+        int lead = data[p] & 0xFF;
+        int seqLen = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+        // If the last lead byte starts a sequence that runs past len, it's incomplete -> cut before it.
+        return (lead >= 0x80 && p + seqLen > len) ? p : len;
     }
 
     private static char[] DecodeBlock(byte[] bytes, int index, int count)
