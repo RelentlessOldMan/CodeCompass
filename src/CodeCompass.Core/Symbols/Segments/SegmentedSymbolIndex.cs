@@ -101,6 +101,26 @@ public sealed class SegmentedSymbolIndex : IDisposable
         }
     }
 
+    /// <summary>Every live symbol-bearing path in the index (deduped, tombstoned paths excluded). Used by the
+    /// stale-index ignore prune to find paths the CURRENT rules now exclude. O(symbols); no source reads.</summary>
+    public IReadOnlyCollection<string> AllPaths()
+    {
+        if (_pending is { Count: > 0 }) FlushPending();
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        for (int segId = 0; segId < _segments.Count; segId++)
+        {
+            var seg = _segments[segId];
+            _tombstones.TryGetValue(segId, out var tomb);
+            for (int i = 0; i < seg.Count; i++)
+            {
+                var p = seg.GetSymbolPath(i);
+                if (tomb is not null && tomb.Contains(p)) continue;
+                paths.Add(p);
+            }
+        }
+        return paths;
+    }
+
     public IReadOnlyList<Symbol> FindByName(string name)
     {
         if (_pending is { Count: > 0 }) FlushPending();
