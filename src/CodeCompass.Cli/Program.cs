@@ -906,6 +906,10 @@ static int CmdSearch(string[] args)
     bool ignoreCase = args.Any(a => a is "-i" or "--ignore-case");
     var query = string.Join(' ', args.Skip(2).Where(a => a is not ("-i" or "--ignore-case")));
 
+    // A whitespace-only query has no trigrams and would scan the whole corpus for a bare space, dumping
+    // almost every line. Reject it like the MCP tools do, with a helpful message instead of a noise flood.
+    if (string.IsNullOrWhiteSpace(query)) { Console.Error.WriteLine("Provide a non-empty search string."); return 2; }
+
     if (!RepositoryIndexer.TryLoad(root, out var index, out _)) return NoIndex(root);
 
     const int cap = 200;

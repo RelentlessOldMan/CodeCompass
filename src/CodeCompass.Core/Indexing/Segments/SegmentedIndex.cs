@@ -183,7 +183,11 @@ public sealed class SegmentedIndex : IDisposable
                                              List<CandidateTrace>? trace = null, int maxPerFile = 0,
                                              bool orderByPath = false)
     {
-        if (string.IsNullOrEmpty(query)) return new List<SearchMatch>();
+        // Whitespace-only queries have no meaningful trigrams: under 3 chars they produce no trigram groups,
+        // so every file becomes a candidate and the verify step matches almost every line that contains a
+        // space/tab - a context-dump / DoS-shaped footgun. Reject them here (not just at the MCP call site)
+        // so the CLI and every other caller share the backstop. (IsNullOrWhiteSpace, not IsNullOrEmpty.)
+        if (string.IsNullOrWhiteSpace(query)) return new List<SearchMatch>();
         if (_pending is { DocCount: > 0 }) FlushPending();
 
         var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
@@ -229,7 +233,9 @@ public sealed class SegmentedIndex : IDisposable
     /// </summary>
     public IReadOnlyList<string> CandidateFiles(string query)
     {
-        if (string.IsNullOrEmpty(query)) return Array.Empty<string>();
+        // Same backstop as Search: a whitespace-only "symbol" would expand to the whole corpus and make the
+        // semantic layer parse every file. Reject it (IsNullOrWhiteSpace, not IsNullOrEmpty).
+        if (string.IsNullOrWhiteSpace(query)) return Array.Empty<string>();
         if (_pending is { DocCount: > 0 }) FlushPending();
 
         var groups = query.Length >= 3 ? TrigramIndex.QueryTrigramGroups(query, caseSensitive: true) : null;
