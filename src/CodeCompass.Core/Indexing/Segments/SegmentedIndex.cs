@@ -91,8 +91,17 @@ public sealed class SegmentedIndex : IDisposable
 
     public static string SegmentFileName(int number) => $"seg-{number:D8}.ccseg";
 
-    /// <summary>True if an index (manifest) already exists in the directory.</summary>
-    public static bool Exists(string dir) => File.Exists(Path.Combine(dir, ManifestName));
+    /// <summary>
+    /// True if a loadable index exists in the directory. The manifest is the fast path, but it can be lost while
+    /// seg-*.ccseg segments survive (a non-atomic replace over a share - see AtomicFile). <see cref="Load"/>
+    /// reconstructs from those surviving segments, so Exists MUST agree with it: gating only on the manifest would
+    /// let RepositoryIndexer.TryLoad short-circuit to "no index" the moment the manifest vanished, silently
+    /// rebuilding from scratch and ignoring every segment still on disk. Manifest present is checked first so the
+    /// common case stays a single File.Exists; the directory is only enumerated when the manifest is gone.
+    /// </summary>
+    public static bool Exists(string dir) =>
+        File.Exists(Path.Combine(dir, ManifestName)) ||
+        (System.IO.Directory.Exists(dir) && System.IO.Directory.EnumerateFiles(dir, SegmentPattern).Any());
 
     public int DocumentCount
     {
