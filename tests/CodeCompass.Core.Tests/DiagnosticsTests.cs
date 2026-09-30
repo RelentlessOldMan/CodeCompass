@@ -74,6 +74,24 @@ public class DiagnosticsTests
         }
     }
 
+    // Direct pin on the prefix-vs-tail boundary the redaction relies on: the product name itself contains
+    // "PASS" (codecomPASS), so the secret markers must be matched only AFTER the CODECOMPASS_ prefix -
+    // otherwise every CODECOMPASS_* var is masked (gutting the bundle) or none is (leaking credentials). The
+    // full-report test covers this only indirectly with a single var; this is far tighter and cheaper.
+    [Theory]
+    [InlineData("CODECOMPASS_API_TOKEN", true)]
+    [InlineData("CODECOMPASS_GH_SECRET", true)]
+    [InlineData("CODECOMPASS_SIGNING_KEY", true)]
+    [InlineData("CODECOMPASS_DB_PASSWORD", true)]   // contains PASS in the tail
+    [InlineData("CODECOMPASS_SMTP_PWD", true)]
+    [InlineData("CODECOMPASS_AZURE_CRED", true)]
+    [InlineData("CODECOMPASS_MAX_MB", false)]       // benign knob
+    [InlineData("CODECOMPASS_LOG_DIR", false)]
+    [InlineData("CODECOMPASS_", false)]             // bare prefix: empty tail must NOT trip on "PASS" in the prefix
+    [InlineData("CODECOMPASS_FORCE_NETWORK", false)]
+    public void LooksSecret_MatchesMarkersInTailOnly(string name, bool expected)
+        => Assert.Equal(expected, RepoDiagnostics.LooksSecret(name));
+
     [Fact]
     public void HealthChecks_FreshIndex_IsUpToDate_AndProvenanceIsNotAWarning()
     {

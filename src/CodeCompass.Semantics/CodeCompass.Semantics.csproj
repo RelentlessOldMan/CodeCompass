@@ -18,4 +18,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <!-- Let the test assembly reach the pure command-parsing helpers (ClangCppAnalyzer.TokenizeCommand /
+       CleanArgs) so the compile_commands quote/escape splitting can be unit-tested without spawning
+       libclang. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="CodeCompass.Core.Tests" />
+  </ItemGroup>
+
 </Project>

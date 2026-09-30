@@ -128,4 +128,59 @@ public class CompactionTests
         using (b.Symbols)
             Assert.False(RepositoryIndexer.NeedsCompaction(b.Text, b.Symbols));
     }
+
+    // Compaction's PURPOSE is reclaiming disk: after a merge, the superseded seg-*.ccseg files must actually
+    // be removed, not just logically replaced. Without the orphan cleanup a long incremental-only session
+    // accumulates every pre-compaction segment forever - unbounded disk growth. The search-equivalence test
+    // never looks at the on-disk file set, so this pins it.
+    [Fact]
+    public void Compact_RemovesOrphanedSegmentFilesFromDisk()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class Alpha { } }");
+        var b0 = RepositoryIndexer.Build(repo.Root);
+        b0.Text.Dispose(); b0.Symbols.Dispose();
+        for (int i = 1; i <= 6; i++) // pile up several segments
+        {
+            repo.Write("a.cs", $"namespace N {{ class Alpha{i} {{ }} }}");
+            var u = RepositoryIndexer.UpdatePaths(repo.Root, new[] { repo.FullPath("a.cs") });
+            u.Text.Dispose(); u.Symbols.Dispose();
+        }
+
+        var cacheDir = CodeCompass.Core.Storage.IndexStore.CacheDirPath(repo.Root);
+        Assert.True(RepositoryIndexer.TryLoad(repo.Root, out var text, out var symbols));
+        using (text)
+        using (symbols)
+        {
+            int filesBefore = System.IO.Directory.GetFiles(cacheDir, "seg-*.ccseg", System.IO.SearchOption.AllDirectories).Length;
+            text.Compact();
+            int filesAfter = System.IO.Directory.GetFiles(cacheDir, "seg-*.ccseg", System.IO.SearchOption.AllDirectories).Length;
+
+            Assert.True(filesAfter < filesBefore, $"compaction should delete superseded segments ({filesBefore} -> {filesAfter})");
+            Assert.Equal(text.SegmentCount, filesAfter); // exactly the live segments remain on disk - no orphans
+            Assert.NotEmpty(text.Search("Alpha6")); // and the live content is intact
+        }
+    }
+
+    // A single-segment, zero-tombstone index is ALREADY compact: Compact() must be a no-op that neither
+    // renumbers nor deletes the sole live segment (a change that always merges would churn files needlessly
+    // and risk the mmap-in-use invariant).
+    [Fact]
+    public void Compact_SingleSegment_IsNoOp()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class Solo { } }");
+        var b = RepositoryIndexer.Build(repo.Root);
+        b.Text.Dispose(); b.Symbols.Dispose();
+
+        Assert.True(RepositoryIndexer.TryLoad(repo.Root, out var text, out var symbols));
+        using (text)
+        using (symbols)
+        {
+            int before = text.SegmentCount;
+            text.Compact();
+            Assert.Equal(before, text.SegmentCount); // unchanged
+            Assert.NotEmpty(text.Search("Solo"));    // still serves
+        }
+    }
 }

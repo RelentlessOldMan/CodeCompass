@@ -79,6 +79,26 @@ public class McpToolsTests
         Assert.Contains("ABSOLUTE", msg);
     }
 
+    // The symmetric guard: `remove` must reject a relative path for the same reason `add` does (it would
+    // resolve against the server's launch dir, not the workspace).
+    [Fact]
+    public void ManageLinks_Remove_RelativePath_IsRejected()
+    {
+        using var repo = NewIndexedRepo();
+        var msg = CodeCompassTools.ManageLinks("remove", "..\\sibling");
+        Assert.Contains("ABSOLUTE", msg);
+    }
+
+    // An unrecognized action must return the usage default, not silently behave like "list" or throw.
+    [Fact]
+    public void ManageLinks_UnknownAction_ReturnsUsage()
+    {
+        using var repo = NewIndexedRepo();
+        var msg = CodeCompassTools.ManageLinks("bogus");
+        Assert.Contains("Unknown action", msg);
+        Assert.Contains("bogus", msg);
+    }
+
     // Guardrail (v1.0.201): reindex must not run a synchronous rebuild of an over-limit workspace (it would
     // block/timeout the MCP call and orphan the build) - it returns the CLI guidance instead.
     [Fact]

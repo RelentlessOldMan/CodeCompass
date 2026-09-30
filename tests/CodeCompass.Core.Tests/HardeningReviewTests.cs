@@ -219,6 +219,81 @@ public class HardeningReviewTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
+    // Targeted-update parity with a full rebuild: a file that GROWS past the size cap must be DROPPED from the
+    // index by UpdatePaths. The walk-time filter (Build/Update) never sees it, but UpdatePaths is fed an
+    // explicit path list, so ApplyFile carries the only guard - without it, an edited file that crosses the cap
+    // keeps stale content a full rebuild would never hold (a silent incremental-vs-full divergence).
+    [Fact]
+    public void UpdatePaths_FileGrownOverSizeCap_IsDroppedFromIndex()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class Small { } }");
+        var built = RepositoryIndexer.Build(repo.Root);
+        built.Text.Dispose(); built.Symbols.Dispose();
+
+        var old = Environment.GetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB", "1"); // 1 MB cap
+            File.WriteAllText(repo.FullPath("a.cs"),
+                "namespace N { class Small { } }\n" + new string('x', 1_200 * 1024)); // now ~1.2 MB, over the cap
+            var u = RepositoryIndexer.UpdatePaths(repo.Root, new[] { repo.FullPath("a.cs") });
+            try
+            {
+                Assert.True(u.Stats.Removed >= 1, "the now-over-cap file should be pruned by the targeted update");
+                Assert.DoesNotContain(u.Text.AllPaths(), p => p == "a.cs");
+            }
+            finally { u.Text.Dispose(); u.Symbols.Dispose(); }
+        }
+        finally { Environment.SetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB", old); }
+    }
+
+    // The OTHER half of the incomplete-walk contract (the first half is Update_IncompleteWalk_DoesNotPrune...):
+    // a path retained through a transient drop must be carried forward in the snapshot so a LATER complete walk
+    // finally reconciles it. Without the carry-forward, a file genuinely deleted during a network hiccup would
+    // never be pruned once the share heals - a permanent index orphan.
+    [Fact]
+    public void Update_HealedWalk_AfterTransientDrop_ReconcilesDeletedFile()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "root");
+        repo.Write("sub/b.cs", "beta");
+        repo.Write("sub/c.cs", "gamma");
+        var built = RepositoryIndexer.Build(repo.Root);
+        built.Text.Dispose(); built.Symbols.Dispose();
+
+        var oldNet = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+            File.Delete(repo.FullPath("sub/c.cs"));
+
+            // 1st update: 'sub' fails -> incomplete walk -> deletion suppressed, c.cs carried forward.
+            FileWalker.GlobalBeforeReadDirHook = dir =>
+            {
+                if (Path.GetFileName(dir) == "sub") throw new IOException("simulated transient SMB failure");
+            };
+            var u1 = RepositoryIndexer.Update(repo.Root);
+            u1.Text.Dispose(); u1.Symbols.Dispose();
+
+            // 2nd update: share healed (hook cleared) -> complete walk -> the carried-forward c.cs is pruned.
+            FileWalker.GlobalBeforeReadDirHook = null;
+            var u2 = RepositoryIndexer.Update(repo.Root);
+            try
+            {
+                var paths = u2.Text.AllPaths();
+                Assert.Contains(paths, p => p == "sub/b.cs");       // healthy sibling retained throughout
+                Assert.DoesNotContain(paths, p => p == "sub/c.cs"); // finally reconciled once the walk completed
+            }
+            finally { u2.Text.Dispose(); u2.Symbols.Dispose(); }
+        }
+        finally
+        {
+            FileWalker.GlobalBeforeReadDirHook = null;
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", oldNet);
+        }
+    }
+
     // Durability net, SYMBOL side (mirrors the text index): a missing manifest with surviving sym-*.ccsym files
     // reconstructs from disk instead of an empty symbol index.
     [Fact]
