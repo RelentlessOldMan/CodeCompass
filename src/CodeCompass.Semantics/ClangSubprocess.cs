@@ -112,6 +112,7 @@ public static class ClangSubprocess
     {
         result = default;
         Process? p = null;
+        Task<string>? outTask = null, errTask = null;
         try
         {
             var req = new RefRequest
@@ -144,18 +145,37 @@ public static class ClangSubprocess
             if (p is null) { Log.Global.Warn("clang subprocess: Process.Start returned null; using in-process fallback"); return false; }
 
             // Drain stdout/stderr asynchronously BEFORE waiting, so a large result set can't deadlock the
-            // child on a full pipe buffer.
-            var outTask = p.StandardOutput.ReadToEndAsync();
-            var errTask = p.StandardError.ReadToEndAsync();
+            // child on a full pipe buffer. stdout is read with a byte/char ceiling: the result set is already
+            // bounded by `max`, but a rogue/pathological child must not be able to balloon the long-lived
+            // parent's managed heap via an unbounded ReadToEnd.
+            outTask = ReadCappedAsync(p.StandardOutput, MaxResponseChars);
+            errTask = p.StandardError.ReadToEndAsync();
 
-            // Send the request, then close stdin so the worker knows the request is complete.
-            JsonSerializer.Serialize(p.StandardInput.BaseStream, req, Json);
-            p.StandardInput.BaseStream.Flush();
-            p.StandardInput.Close();
+            // Send the request on a task guarded by the timeout, then close stdin. A synchronous write has no
+            // timeout: if the child dies/exits BEFORE draining a large request (many candidate paths can exceed
+            // the OS stdin pipe buffer), the write would block forever and WaitForExit below would never be
+            // reached. Guarding the write bounds that hang.
+            var writeTask = Task.Run(() =>
+            {
+                try
+                {
+                    JsonSerializer.Serialize(p.StandardInput.BaseStream, req, Json);
+                    p.StandardInput.BaseStream.Flush();
+                    p.StandardInput.Close();
+                }
+                catch { /* child gone/broken pipe: the exit-code / empty-output path handles it */ }
+            });
+            if (!writeTask.Wait(timeoutSeconds * 1000))
+            {
+                KillAndReap(p, outTask, errTask);
+                Log.Global.Warn($"clang subprocess: timed out after {timeoutSeconds}s WRITING the request to '{name}' ({req.Candidates.Count} candidates); CONTAINED as an incomplete C/C++ pass (lexical backfill will cover) - NOT retried in-process");
+                result = ContainedFailure(candidates, null);
+                return true;
+            }
 
             if (!p.WaitForExit(timeoutSeconds * 1000))
             {
-                try { p.Kill(entireProcessTree: true); } catch { }
+                KillAndReap(p, outTask, errTask);
                 Log.Global.Warn($"clang subprocess: timed out after {timeoutSeconds}s on '{name}' ({req.Candidates.Count} candidates); CONTAINED as an incomplete C/C++ pass (lexical backfill will cover) - NOT retried in-process (raise CODECOMPASS_CPP_WORKER_TIMEOUT_SEC)");
                 result = ContainedFailure(candidates, null);
                 return true;
@@ -186,7 +206,9 @@ public static class ClangSubprocess
         }
         catch (Exception ex)
         {
-            try { if (p is { HasExited: false }) p.Kill(entireProcessTree: true); } catch { }
+            // Kill the child (if any) and reap the reader tasks so they complete instead of lingering as
+            // orphaned reads against a dead pipe (a potential unobserved-task fault on a busy server).
+            if (p is not null) KillAndReap(p, outTask, errTask);
             if (p is null)
             {
                 // The worker never started (missing/locked exe, bad ProcessStartInfo). No parse was attempted,
@@ -200,6 +222,45 @@ public static class ClangSubprocess
             result = ContainedFailure(candidates, ex.Message);
             return true;
         }
+        finally
+        {
+            // The Process object holds a Win32 process handle (and, once redirected, the pipe handles). Without
+            // this, every C/C++ query in the long-lived MCP server leaks a kernel handle until finalization.
+            p?.Dispose();
+        }
+    }
+
+    /// <summary>Ceiling on the child's stdout the parent will buffer. The result set is bounded by `max`, so this
+    /// only trips on a pathological/rogue child; a truncated payload fails JSON parse -> in-process fallback.</summary>
+    private const int MaxResponseChars = 64 * 1024 * 1024;
+
+    /// <summary>Read a stream reader to end but stop buffering past <paramref name="maxChars"/> (still draining the
+    /// pipe so the child isn't blocked), so a hostile/huge child response can't OOM the long-lived parent.</summary>
+    private static async Task<string> ReadCappedAsync(StreamReader reader, int maxChars)
+    {
+        var sb = new StringBuilder();
+        var buf = new char[16384];
+        int n;
+        while ((n = await reader.ReadAsync(buf, 0, buf.Length).ConfigureAwait(false)) > 0)
+        {
+            if (sb.Length < maxChars) sb.Append(buf, 0, Math.Min(n, maxChars - sb.Length));
+            // else: keep draining to EOF but discard, so the child can exit rather than block on a full pipe.
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Kill the child (whole tree) and wait briefly for it to exit and for the async pipe readers to
+    /// finish, so nothing is left running against a dead process. Best-effort; never throws.</summary>
+    private static void KillAndReap(Process p, params Task?[] readers)
+    {
+        try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { }
+        try { p.WaitForExit(2000); } catch { }
+        try
+        {
+            var live = readers.Where(t => t is not null).Cast<Task>().ToArray();
+            if (live.Length > 0) Task.WaitAll(live, 2000);
+        }
+        catch { /* a reader faulting on the killed pipe is expected; observe and ignore */ }
     }
 
     private static string Tail(string? s, int max = 300)

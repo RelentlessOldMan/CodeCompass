@@ -539,13 +539,33 @@ public static class RepositoryIndexer
                 }
             }
 
-            foreach (var rel in old.Keys)
+            // Reconcile deletions ONLY when the walk was complete. A dropped directory (a transient SMB
+            // failure, retried and still failed) makes its whole subtree ABSENT from this walk - which is
+            // indistinguishable here from "the files were deleted". Pruning on that absence would delete a
+            // healthy subtree from a good index on a passing network hiccup (a real over-the-wire data-loss
+            // path). When the walk is incomplete we keep those paths (index + snapshot) untouched; a later
+            // COMPLETE update reconciles any genuine deletions. Build already records DroppedDirs; Update must
+            // honor it before pruning.
+            if (walker.DroppedDirs == 0)
             {
-                if (seen.Contains(rel)) continue;
-                text.RemovePath(rel);
-                symbols.RemovePath(rel);
-                PositionalSidecar.Delete(dir, rel); // idempotent (no-op if none) - covers any cutoff, no orphans
-                removed++;
+                foreach (var rel in old.Keys)
+                {
+                    if (seen.Contains(rel)) continue;
+                    text.RemovePath(rel);
+                    symbols.RemovePath(rel);
+                    PositionalSidecar.Delete(dir, rel); // idempotent (no-op if none) - covers any cutoff, no orphans
+                    removed++;
+                }
+            }
+            else
+            {
+                // Carry the un-seen (possibly just dropped) paths forward so the snapshot doesn't lose them
+                // either - otherwise the next update's `old` wouldn't know to reconcile them once the walk heals.
+                int retained = 0;
+                foreach (var rel in old.Keys)
+                    if (!seen.Contains(rel) && !newSnapshot.ContainsKey(rel) && old.TryGetValue(rel, out var st))
+                    { newSnapshot[rel] = st; retained++; }
+                Log.Global.Warn($"index update: walk dropped {walker.DroppedDirs} dir(s); SUPPRESSED deletion of {retained} absent path(s) to avoid pruning a subtree on a transient failure (a later complete update reconciles)");
             }
 
             if (added + modified + removed > RebuildThreshold)

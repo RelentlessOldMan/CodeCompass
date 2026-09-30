@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using ClangSharp;
@@ -504,7 +505,7 @@ public sealed class ClangCppAnalyzer : IDisposable
                         if (entry.TryGetProperty("arguments", out var argsArr) && argsArr.ValueKind == JsonValueKind.Array)
                             tokens = argsArr.EnumerateArray().Select(x => x.GetString() ?? "").ToList();
                         else if (entry.TryGetProperty("command", out var cmd) && cmd.GetString() is string c)
-                            tokens = c.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
+                            tokens = TokenizeCommand(c);
                         else
                             continue;
 
@@ -516,6 +517,29 @@ public sealed class ClangCppAnalyzer : IDisposable
             }
         }
         if (map.Count > 0) _compileArgs = map;
+    }
+
+    // Split a compile_commands.json "command" string into argv, honoring double quotes and backslash escapes.
+    // A naive Split(' ') shreds the common Windows case -I "C:\Program Files\..." into broken tokens, so the
+    // include path never resolves and the TU parses with errors (honest-but-wrong "0 refs / unresolved include").
+    private static List<string> TokenizeCommand(string command)
+    {
+        var tokens = new List<string>();
+        var sb = new StringBuilder();
+        bool inQuotes = false, any = false;
+        for (int i = 0; i < command.Length; i++)
+        {
+            char ch = command[i];
+            if (ch == '"') { inQuotes = !inQuotes; any = true; }
+            else if (ch == '\\' && i + 1 < command.Length && command[i + 1] == '"') { sb.Append('"'); i++; any = true; } // \" -> literal quote
+            else if (!inQuotes && (ch == ' ' || ch == '\t'))
+            {
+                if (any) { tokens.Add(sb.ToString()); sb.Clear(); any = false; }
+            }
+            else { sb.Append(ch); any = true; }
+        }
+        if (any) tokens.Add(sb.ToString());
+        return tokens;
     }
 
     // Drop the compiler executable, the source file, and output/compile-step flags;
@@ -530,7 +554,11 @@ public sealed class ClangCppAnalyzer : IDisposable
             if (i == 0) continue;                             // compiler executable
             if (t is "-c") continue;
             if (t is "-o") { i++; continue; }                 // skip -o <output>
-            if (t.EndsWith(baseName, StringComparison.OrdinalIgnoreCase)) continue; // the source file
+            // The source file is a POSITIONAL arg whose filename equals the source basename - not a flag. Match
+            // that precisely so a define/include whose value merely ends with the basename (e.g. -DX=path/to/x.c)
+            // isn't dropped, which would change the parse and miss references.
+            if (!t.StartsWith("-", StringComparison.Ordinal) &&
+                Path.GetFileName(t).Equals(baseName, StringComparison.OrdinalIgnoreCase)) continue;
             result.Add(t);
         }
         return result.ToArray();

@@ -53,6 +53,10 @@ public sealed class FileWalker
     // test can simulate a transient SMB failure (throw once) and assert the walker retries into it.
     internal Action<string>? BeforeReadDirHook;
 
+    // Test-only PROCESS-WIDE variant of the above, for driving a fault into a walk performed by code that
+    // constructs its own FileWalker internally (e.g. RepositoryIndexer.Update). Null in normal operation.
+    internal static Action<string>? GlobalBeforeReadDirHook;
+
     private static EnumerationOptions EnumOpts() => new()
     {
         // AttributesToSkip=0 preserves coverage (the default drops Hidden/System); IgnoreInaccessible skips
@@ -161,6 +165,7 @@ public sealed class FileWalker
         try
         {
             BeforeReadDirHook?.Invoke(dir); // test seam: may throw to simulate a transient failure
+            GlobalBeforeReadDirHook?.Invoke(dir); // process-wide test seam (for walks made by internal walkers)
             error = null;
             return new DirectoryInfo(dir).EnumerateFileSystemInfos("*", opts).ToList();
         }
@@ -243,8 +248,24 @@ public sealed class FileWalker
             }, token);
         }
 
-        // Once every worker has exited, nothing more will be produced.
-        System.Threading.Tasks.Task.WhenAll(workers).ContinueWith(_ => { try { output.CompleteAdding(); } catch { } });
+        // Once every worker has exited, nothing more will be produced. A worker that died on an UNEXPECTED
+        // exception (its own catch handles cancellation + the CompleteAdding race) may have left directories
+        // unwalked - surface that as an incomplete walk (DroppedDirs) so callers suppress deletion
+        // reconciliation, and log it, rather than silently returning a partial file list that looks like a
+        // smaller repo.
+        System.Threading.Tasks.Task.WhenAll(workers).ContinueWith(t =>
+        {
+            if (t.IsFaulted && t.Exception is not null)
+            {
+                foreach (var inner in t.Exception.Flatten().InnerExceptions)
+                {
+                    if (inner is OperationCanceledException) continue;
+                    System.Threading.Interlocked.Increment(ref _droppedDirs);
+                    try { Log.Global.Warn($"walk worker faulted ({inner.GetType().Name}): {inner.Message}; walk marked incomplete"); } catch { }
+                }
+            }
+            try { output.CompleteAdding(); } catch { }
+        });
 
         try
         {

@@ -189,12 +189,30 @@ internal static class SidecarCache
             // forever; a bad bomLen would make GetString throw). Any bad header -> no sidecar, whole-file fallback.
             if (count < 0 || bloomBytes <= 0 || bloomBytes > (16 << 20) || bloomK < 1 || bloomK > 64 || bomLen < 0 || bomLen > 4)
                 return null;
+            // Bound `count` against the bytes actually remaining before allocating: each block is a 20-byte
+            // table record (int line + two long offsets) plus a `bloomBytes` bloom. A garbage/truncated count
+            // would otherwise force multi-GB array allocations (count-sized int[]/long[]/byte[][]) -> OOM.
+            long remaining = r.BaseStream.Length - r.BaseStream.Position;
+            long perBlock = 20L + bloomBytes;
+            if ((long)count * perBlock > remaining) return null;
             var startLine = new int[count];
             var startByte = new long[count];
             var endByte = new long[count];
-            for (int i = 0; i < count; i++) { startLine[i] = r.ReadInt32(); startByte[i] = r.ReadInt64(); endByte[i] = r.ReadInt64(); }
+            for (int i = 0; i < count; i++)
+            {
+                startLine[i] = r.ReadInt32(); startByte[i] = r.ReadInt64(); endByte[i] = r.ReadInt64();
+                // A block whose byte range is negative or inverted would misdirect the positional read; reject.
+                if (startByte[i] < 0 || endByte[i] < startByte[i]) return null;
+            }
             var blooms = new byte[count][];
-            for (int i = 0; i < count; i++) blooms[i] = r.ReadBytes(bloomBytes);
+            for (int i = 0; i < count; i++)
+            {
+                blooms[i] = r.ReadBytes(bloomBytes);
+                // ReadBytes returns a SHORT array on EOF rather than throwing. A short bloom silently changes
+                // BloomFilter's bit modulus -> false negatives (a real match tests negative and the block is
+                // skipped). The sidecar must never cause a missed hit, so reject a truncated bloom.
+                if (blooms[i].Length != bloomBytes) return null;
+            }
             return new ParsedSidecar
             {
                 Rel = rel, BloomK = bloomK, BomLen = bomLen, Count = count,

@@ -302,7 +302,16 @@ public static class ServerContext
             if (_state != IndexState.Ready || _text is null || _symbols is null) return StatusMessage();
             var handles = new List<IndexHandle>(1 + _linked.Count) { new(Root, _text, _symbols, IsPrimary: true) };
             foreach (var lr in _linked) handles.Add(new IndexHandle(lr.Root, lr.Text, lr.Symbols, IsPrimary: false));
-            return op(handles);
+            // Every tool funnels through here. An unexpected throw inside op (a clang edge case, a corrupt
+            // segment surfacing mid-read, an OOM in a semantic pass) would otherwise escape to the MCP framework
+            // and serialize a raw stack trace - leaking internal cache/repo paths and giving the agent an
+            // unactionable error. Contain it to a short, path-free message and log the detail for diagnosis.
+            try { return op(handles); }
+            catch (Exception ex)
+            {
+                try { Log.Global.Warn($"query op failed: {ex.GetType().Name}: {ex.Message}"); } catch { }
+                return "The query failed unexpectedly. It has been logged; try a narrower query, and if it persists rebuild the index with `codecompass index`.";
+            }
         }
         finally { Rw.ExitReadLock(); }
     }
@@ -413,7 +422,9 @@ public static class ServerContext
             }
         }
         var status = new IndexStatus(token, text, files);
-        Task.Run(() => IndexStatusFile.Write(root, status));
+        // Best-effort, fire-and-forget: a status-line write failing (disk full, path locked) must never become an
+        // unobserved task exception or otherwise disturb the server - swallow it here rather than leaking a fault.
+        Task.Run(() => { try { IndexStatusFile.Write(root, status); } catch { } });
     }
 
     // These getters run inside Query's read lock (find_references), so they can't race the write-locked
@@ -774,6 +785,14 @@ public static class ServerContext
     // (here) and linked roots (`link add`) apply the identical "small -> index, large -> defer" rule.
     private static bool ExceedsAutoLimit(out long totalBytes) => RepositoryIndexer.ExceedsAutoLimit(Root, out totalBytes);
 
+    /// <summary>Would an in-server rebuild of this workspace exceed the auto-index size limit? The `reindex`
+    /// tool uses this to refuse a synchronous multi-minute build that would time out the MCP call (and orphan
+    /// the build), pointing the caller at the CLI instead - mirroring the initial-index deferral policy.</summary>
+    internal static bool ReindexWouldExceedAutoLimit(out long totalBytes) => ExceedsAutoLimit(out totalBytes);
+
+    /// <summary>The CLI-build guidance message (for the reindex tool's over-limit refusal).</summary>
+    internal static string CliBuildGuidance() => CliBuildMessage();
+
     private static string BuildingMessage()
     {
         long total = Interlocked.Read(ref _progressTotalBytes);
@@ -841,7 +860,7 @@ public static class ServerContext
         // can't race a manual reindex for the segment directory. A true reconcile (events were
         // lost) must re-read files (Build); a compaction just merges existing segments.
         BuildGate.Wait();
-        bool ok = false;
+        bool ok = false, keptServing = false;
         try
         {
             SegmentedIndex nt;
@@ -854,12 +873,21 @@ public static class ServerContext
         catch (Exception ex)
         {
             Rw.EnterWriteLock();
-            try { _state = IndexState.NeedsCliBuild; _pendingPaths.Clear(); _pendingReconcile = false; }
+            try
+            {
+                // A transient compaction/reconcile failure (disk pressure, a locked segment) must NOT down a
+                // healthy server. If a valid index is still installed it keeps serving - revert to Ready and keep
+                // the captured edits so the next drain applies them. Only when no usable index exists do we fall
+                // back to the CLI-build state (and only then is clearing pending correct).
+                if (_text is not null && _symbols is not null) { _state = IndexState.Ready; keptServing = true; }
+                else { _state = IndexState.NeedsCliBuild; _pendingPaths.Clear(); _pendingReconcile = false; }
+            }
             finally { Rw.ExitWriteLock(); }
-            Log.For(Root).Error("reconcile/compaction failed", ex);
+            Log.For(Root).Error("reconcile/compaction failed" + (keptServing ? "; keeping the serving index" : "; falling back to CLI-build state"), ex);
+            PublishStatus();
         }
         finally { BuildGate.Release(); }
-        if (ok) DrainPending();
+        if (ok || keptServing) DrainPending();
     }
 
     // Caller holds the write lock.

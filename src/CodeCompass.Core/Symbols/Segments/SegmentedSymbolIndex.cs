@@ -269,11 +269,16 @@ public sealed class SegmentedSymbolIndex : IDisposable
             using var fs = File.OpenRead(tombPath);
             using var r = new BinaryReader(fs, System.Text.Encoding.UTF8);
             int count = r.ReadInt32();
+            if (count < 0) throw new InvalidDataException($"corrupt symbol tombstone file: negative segment count ({count})");
             for (int i = 0; i < count; i++)
             {
                 int seg = r.ReadInt32();
                 int n = r.ReadInt32();
-                var set = new HashSet<string>(n, StringComparer.Ordinal);
+                if (n < 0) throw new InvalidDataException($"corrupt symbol tombstone file: negative entry count ({n})");
+                // Cap the pre-size: an untrusted `n` must not force a huge allocation before any path is read.
+                // The set still grows to fit; an `n` that overruns the file throws EndOfStream. (Mirrors
+                // SegmentedIndex.Load.)
+                var set = new HashSet<string>(Math.Min(n, 4096), StringComparer.Ordinal);
                 for (int j = 0; j < n; j++) set.Add(r.ReadString());
                 _tombstones[seg] = set;
             }
