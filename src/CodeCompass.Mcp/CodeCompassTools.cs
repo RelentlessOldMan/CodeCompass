@@ -31,7 +31,9 @@ public static class CodeCompassTools
         [Description("Whether the match is case-sensitive (default true). Set false to match any case.")] bool caseSensitive = true)
         => ServerContext.QueryAll(handles =>
     {
-        if (string.IsNullOrEmpty(query)) return "Provide a non-empty search string.";
+        // Whitespace-only queries have no trigrams, so they'd fall to a full-corpus scan returning noise at
+        // high I/O cost - reject them like the other tools do (IsNullOrWhiteSpace, not IsNullOrEmpty).
+        if (string.IsNullOrWhiteSpace(query)) return "Provide a non-empty search string.";
         maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
         // Federate across the primary index + every linked root. Fetch one extra per index to detect
         // truncation across the union; primary hits stay repo-relative, linked hits show absolute paths.
@@ -407,6 +409,10 @@ public static class CodeCompassTools
                  "status. Run this after large external changes (e.g. a source-control sync) if results seem stale.")]
     public static string Reindex()
     {
+        // A synchronous rebuild of a large/network workspace would block this tool call for minutes - the MCP
+        // host times out the call while the build keeps running (orphaned), the very stall the deferred-to-CLI
+        // policy exists to prevent. Refuse it and point at the CLI, consistent with the initial-index deferral.
+        if (ServerContext.ReindexWouldExceedAutoLimit(out _)) return ServerContext.CliBuildGuidance();
         var s = ServerContext.Rebuild();
         return $"Reindexed {s.Files} files ({s.Bytes / (1024.0 * 1024.0):F1} MB) in {s.Seconds:F2}s; " +
                $"{s.Symbols} symbols.";
@@ -441,6 +447,10 @@ public static class CodeCompassTools
             case "add":
             {
                 if (string.IsNullOrWhiteSpace(path)) return "Provide 'path' - the external directory to link.";
+                // A relative path would resolve against the SERVER process's working directory (wherever it was
+                // launched), not this workspace - almost never what the caller means. Require an absolute path so
+                // the linked root is deterministic (the tool contract already says "absolute path").
+                if (!System.IO.Path.IsPathRooted(path)) return $"Provide an ABSOLUTE path (got relative '{path}'). Relative paths resolve against the server's launch directory, not this workspace.";
                 var r = LinkManager.Add(project, path);
                 var suffix = r.Status is LinkManager.AddStatus.Rejected or LinkManager.AddStatus.AlreadyLinked ? "" : " — active on the next query.";
                 return r.Message + suffix;
@@ -448,6 +458,7 @@ public static class CodeCompassTools
             case "remove":
             {
                 if (string.IsNullOrWhiteSpace(path)) return "Provide 'path' - the linked directory to remove.";
+                if (!System.IO.Path.IsPathRooted(path)) return $"Provide an ABSOLUTE path (got relative '{path}'). Relative paths resolve against the server's launch directory, not this workspace.";
                 var r = LinkManager.Remove(project, path, _ => purge);
                 var sb = new StringBuilder(r.Message);
                 foreach (var o in r.OtherProjects) sb.Append($"\n      {o}");
