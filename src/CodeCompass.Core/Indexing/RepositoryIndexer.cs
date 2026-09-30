@@ -566,6 +566,41 @@ public static class RepositoryIndexer
         }
     }
 
+    /// <summary>Cheaply prune paths the CURRENT ignore rules exclude but a STALE index (built by an older or
+    /// looser version) still holds - a rival tool's <c>.claude/</c> cache dump, or a dir since added to
+    /// CODECOMPASS_IGNORE. Unlike <see cref="Update"/> this does NO stat-walk and NO source reads: it
+    /// enumerates the indexed paths and tombstones the now-ignored ones. Complements the query-time ignore
+    /// filter (which already HIDES them) by physically shrinking the on-disk index so it stays clean without a
+    /// full rebuild. Returns the freshly-opened handles (mutated) + how many paths were pruned; the caller
+    /// swaps them in when >0. Pruned==0 (already clean, or no index) means the returned handles are unchanged.</summary>
+    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, int Pruned) PruneIgnored(string root)
+    {
+        root = Path.GetFullPath(root);
+        if (!TryLoad(root, out var text, out var symbols)) return (text, symbols, 0);
+
+        var ignore = new IgnoreRules();
+        var prune = new HashSet<string>(text.AllPaths(), StringComparer.Ordinal);
+        foreach (var p in symbols.AllPaths()) prune.Add(p);
+        prune.RemoveWhere(p => !ignore.IsIgnoredPath(p));
+        if (prune.Count == 0) return (text, symbols, 0);
+
+        var dir = IndexStore.GetCacheDir(root);
+        foreach (var rel in prune)
+        {
+            text.RemovePath(rel);
+            symbols.RemovePath(rel);
+            PositionalSidecar.Delete(dir, rel); // idempotent; drop any block sidecar for the pruned file too
+        }
+        text.Flush();
+        symbols.Flush();
+        // Refresh the doc count in meta; carry the other coverage fields forward unchanged (a prune doesn't
+        // re-measure size caps / symbol skips / landscape).
+        var pm = IndexMetaFile.Read(root);
+        IndexMetaFile.Write(root, text.DocumentCount, pm?.FilesOverCap ?? 0, pm?.FilesSymbolSkipped ?? 0,
+                            pm?.DroppedDirs ?? 0, pm?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold, pm?.Landscape);
+        return (text, symbols, prune.Count);
+    }
+
     /// <summary>Disk-based targeted update: apply just the given changed paths.</summary>
     public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, UpdateStats Stats) UpdatePaths(
         string root, IReadOnlyCollection<string> changedFullPaths)

@@ -145,6 +145,16 @@ public sealed class SegmentedIndex : IDisposable
         _pathToDoc.Remove(relPath);
     }
 
+    /// <summary>Every live document path in the index (deduped; tombstoned paths already dropped from the
+    /// map). Used by the stale-index ignore prune to find paths the CURRENT rules now exclude. Builds the
+    /// path map if not resident (serve-lean drops it); O(docs), no source reads.</summary>
+    public IReadOnlyCollection<string> AllPaths()
+    {
+        if (_pending is { DocCount: > 0 }) FlushPending();
+        EnsurePathMap();
+        return _pathToDoc.Keys.ToList();
+    }
+
     /// <summary>Per-candidate verify accounting for the opt-in search trace: which files the trigram step
     /// admitted, whether each had a block sidecar, how many bytes the verify actually read, and how many hits
     /// it contributed. Lets an operator see WHERE a query's I/O goes (sidecar block-selective vs a whole-file

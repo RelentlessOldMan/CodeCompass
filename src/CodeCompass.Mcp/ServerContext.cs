@@ -670,7 +670,16 @@ public static class ServerContext
     // walk doesn't block queries) whether to reconcile external changes, then does it.
     private static void MaybeReconcile()
     {
-        try { if (ShouldAutoReconcile()) BackgroundReconcile(); }
+        try
+        {
+            if (ShouldAutoReconcile()) { BackgroundReconcile(); return; }
+            // The full stat-walk reconcile is gated off (network share or huge repo). Unless the user
+            // explicitly disabled auto-reconcile, still run the CHEAP ignore-only prune: a stale index (built
+            // by an older/looser version) can hold now-ignored pollution (a rival tool's .claude cache dump, a
+            // dir since added to CODECOMPASS_IGNORE), and the query-time filter only HIDES it - this physically
+            // drops it, with no re-walk, so even network/huge repos self-heal on startup.
+            if (CodeCompassConfig.AutoReconcile() != false) BackgroundPruneIgnored();
+        }
         catch (Exception ex) { Log.For(Root).Warn($"startup reconcile skipped: {ex.Message}"); }
     }
 
@@ -727,6 +736,38 @@ public static class ServerContext
             PublishStatus(); // back to Ready (Swap published "reconciling" while the flag was still set)
         }
         DrainPending();
+    }
+
+    // Cheap companion to BackgroundReconcile for the network/huge case where the full stat-walk is skipped:
+    // physically drop stale now-ignored paths from the on-disk index (no re-walk, no source reads). Same guard
+    // pattern (BuildGate + _rebuilding) and Swap as the full reconcile, so it can't race a manual reindex or a
+    // live-watch write. No-op (and no swap) when the index is already clean.
+    private static void BackgroundPruneIgnored()
+    {
+        BuildGate.Wait();
+        Rw.EnterWriteLock();
+        try { _rebuilding = true; }
+        finally { Rw.ExitWriteLock(); }
+        try
+        {
+            var u = RepositoryIndexer.PruneIgnored(Root);
+            if (u.Pruned > 0)
+            {
+                Swap(u.Text, u.Symbols);
+                Log.For(Root).Info($"pruned {u.Pruned} stale now-ignored path(s) from the index " +
+                                   "(an older/looser build had indexed them; query-time filter already hid them)");
+            }
+            else { u.Text.Dispose(); u.Symbols.Dispose(); } // already clean - drop the extra handles, keep serving
+        }
+        catch (Exception ex) { Log.For(Root).Warn($"ignore-prune skipped: {ex.Message}"); }
+        finally
+        {
+            BuildGate.Release();
+            Rw.EnterWriteLock();
+            try { _rebuilding = false; }
+            finally { Rw.ExitWriteLock(); }
+            DrainPending();
+        }
     }
 
     // The auto-index size policy lives in Core (RepositoryIndexer.ExceedsAutoLimit) so the project root
