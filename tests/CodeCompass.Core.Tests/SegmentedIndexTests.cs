@@ -67,6 +67,53 @@ public class SegmentedIndexTests
         finally { Directory.Delete(dir, true); }
     }
 
+    // A whitespace-only query has no meaningful trigrams. Under 3 chars it produces no trigram groups,
+    // so the candidate step would treat EVERY file as a candidate and the verify step would match almost
+    // every line that contains a space/tab - a context-dump / DoS-shaped footgun (a single space returned
+    // 200+ unfiltered lines in the field). The core Search primitive must reject whitespace outright, not
+    // just the MCP call site: this is the backstop that protects the CLI and any other caller.
+    [Theory]
+    [InlineData(" ")]      // single space: length < 3, no trigrams -> would full-scan every file with a space
+    [InlineData("  ")]     // two spaces: still under the trigram threshold
+    [InlineData("   ")]    // three spaces: has trigrams but is still whitespace-only noise
+    [InlineData("\t")]     // tab
+    [InlineData(" \t ")]   // mixed whitespace
+    public void Search_WhitespaceOnlyQuery_ReturnsEmpty_NoFullScan(string query)
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class Foo { void Run() { } } }"); // spaces + a tab-free line
+        repo.Write("b.txt", "one two three\nfour\tfive six\n");             // lots of spaces and a tab
+        var dir = NewTempDir();
+        try
+        {
+            using var idx = Build(repo, dir, budget: 64);
+            Assert.NotEmpty(idx.Search("class")); // sanity: a real token still matches, index isn't just empty
+            Assert.Empty(idx.Search(query));      // whitespace-only must not fall to a full-corpus scan
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    // Same backstop for the semantic candidate expansion (find_references / find_callees): a whitespace
+    // "symbol" must not expand to the whole corpus and make the analyzer parse every file.
+    [Theory]
+    [InlineData(" ")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    public void CandidateFiles_WhitespaceOnlyQuery_ReturnsEmpty(string query)
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class Foo { void Run() { } } }");
+        repo.Write("b.cs", "namespace N { class Bar { void Run() { } } }");
+        var dir = NewTempDir();
+        try
+        {
+            using var idx = Build(repo, dir, budget: 64);
+            Assert.NotEmpty(idx.CandidateFiles("class")); // sanity
+            Assert.Empty(idx.CandidateFiles(query));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     [Fact]
     public void RemovePath_TombstonesTheDocument()
     {
