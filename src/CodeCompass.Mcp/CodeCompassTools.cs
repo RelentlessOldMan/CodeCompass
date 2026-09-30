@@ -212,10 +212,14 @@ public static class CodeCompassTools
         // roots (absolute paths) and clang-parses ONLY those - complete, and proportional to the symbol's
         // real footprint, never a whole-tree parse. Empty candidate set => no C/C++ work at all.
         var cppCandidates = new List<string>();
+        var csCandidates = new List<string>();
         foreach (var h in handles)
             foreach (var rel in h.Text.CandidateFiles(name))
-                if (IsCppSourceFile(rel))
-                    cppCandidates.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar))));
+            {
+                var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
+                if (IsCppSourceFile(rel)) cppCandidates.Add(full);
+                else if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase)) csCandidates.Add(full);
+            }
         int cppCand = 0, cppParsed = 0;
         bool cppMemStopped = false;
         IReadOnlyList<string> cppUnresolved = System.Array.Empty<string>();
@@ -246,6 +250,10 @@ public static class CodeCompassTools
         // C/C++ file (SemanticCoverage treats them as "covered"), yielding a bare "0" on a symbol with real
         // hits. So when incomplete, let lexical cover C/C++ files too, deduped against the semantic hits.
         bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppMemStopped, cppParsed, cppCand, cppUnresolved.Count);
+        // Roslyn parses with an empty preprocessor set, so it silently misses references in inactive #if/#elif
+        // branches. When any candidate .cs uses conditional compilation, treat the C# pass as incomplete so
+        // the lexical backfill covers .cs too (deduped) and we disclose it - the C# twin of cppIncomplete.
+        bool csharpIncomplete = SemanticCoverage.IsCSharpPassIncomplete(csCandidates);
         var semKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.OrdinalIgnoreCase);
@@ -260,7 +268,7 @@ public static class CodeCompassTools
                 {
                     // Shared filter (same as the CLI): skip semantic-covered files unless the C/C++ pass was
                     // incomplete, skip build noise, require a whole-word match.
-                    if (!ReferenceMerge.IsLexicalReference(m.Path, m.LineText, m.Column, name.Length, cppIncomplete)) continue;
+                    if (!ReferenceMerge.IsLexicalReference(m.Path, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete)) continue;
                     var key = $"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}";
                     if (!semKeys.Add(key)) continue;                             // already found semantically - don't double-count
                     hits.Add(($"{key}: {m.LineText}", 'l'));
@@ -275,7 +283,7 @@ public static class CodeCompassTools
         if (CodeCompass.Core.Diagnostics.RefsDebug.On)
             CodeCompass.Core.Diagnostics.RefsDebug.Log(
                 $"MCP name='{name}' cppCand={cppCand} cppParsed={cppParsed} memStopped={cppMemStopped} " +
-                $"unresolvedIncludes={cppUnresolved.Count} incomplete={cppIncomplete} => " +
+                $"unresolvedIncludes={cppUnresolved.Count} cppIncomplete={cppIncomplete} csharpIncomplete={csharpIncomplete} => " +
                 $"semC#={hits.Count(h => h.Kind == 'c')} semC/C++={hits.Count(h => h.Kind == 'p')} " +
                 $"lexical={hits.Count(h => h.Kind == 'l')} total={hits.Count}");
 
@@ -296,10 +304,17 @@ public static class CodeCompassTools
                 cppNote = " (Note: no compile_commands.json found - C/C++ references resolved with best-effort " +
                           "flags and may be imprecise; add one for precise results.)";
         }
+        // C# conditional-compilation disclosure: Roslyn can't see inactive #if/#elif branches, so a semantic
+        // count may miss #if-guarded references (shown lexically where the backfill found them).
+        string csNote = csharpIncomplete
+            ? " (Note: C# coverage INCOMPLETE - candidate file(s) use #if/#elif conditional compilation; the " +
+              "semantic pass doesn't see references in inactive branches (shown lexically where found), so a low " +
+              "count may miss #if-guarded uses.)"
+            : "";
 
         if (hits.Count == 0)
             return $"No references found for \"{name}\". Tip: try search_code for a raw text search " +
-                   "(it may not resolve as a symbol here), or check the exact spelling/case." + cppNote + CoverageCaveat();
+                   "(it may not resolve as a symbol here), or check the exact spelling/case." + cppNote + csNote + CoverageCaveat();
 
         bool truncated = hits.Count > maxResults;
         var shown = hits.Take(maxResults).ToList();
@@ -309,6 +324,7 @@ public static class CodeCompassTools
         sb.Append($"({cs} C# + {cpp} C/C++ semantic reference(s); {lex} lexical in other files)");
         if (truncated) sb.Append(" - MORE EXIST, narrow the query or raise the limit");
         sb.Append(cppNote);
+        sb.Append(csNote);
         return sb.ToString();
     });
 
@@ -329,6 +345,19 @@ public static class CodeCompassTools
         // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
         // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
         var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1);
+        // Conditional-compilation disclosure (see find_references): FindCallees walks the method body via
+        // Roslyn, which parses with an empty preprocessor set and can't see inactive #if/#elif branches - so a
+        // call guarded by conditional compilation is SILENTLY missing. Lexical backfill can't help here (a
+        // callee is a resolved definition, not a text match), so disclose when the method's file(s) use it.
+        var calleeCsCands = new List<string>();
+        foreach (var h in handles)
+            foreach (var rel in h.Text.CandidateFiles(name))
+                if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase))
+                    calleeCsCands.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar))));
+        string calleeCsNote = SemanticCoverage.IsCSharpPassIncomplete(calleeCsCands)
+            ? " (Note: C# coverage INCOMPLETE - the method's file(s) use #if/#elif conditional compilation; callees " +
+              "in inactive branches aren't seen by the semantic pass, so some calls may be missing.)"
+            : "";
         if (callees.Count == 0)
             // Distinguish "no such symbol" from "found, but calls no repo code" - answering a bare
             // "nothing" to both is the silent-empty hazard that turns a typo into a false finding.
@@ -336,12 +365,13 @@ public static class CodeCompassTools
                 ? $"\"{name}\" is defined here, but calls no in-repo methods - it may call only " +
                   "framework/external code, or it isn't C# (callees are semantic for C# only)."
                 : $"No symbol named \"{name}\" is indexed - check the exact spelling/case, or it may be a " +
-                  "macro or an unsupported language. (find_callees resolves C# only.)") + CoverageCaveat();
+                  "macro or an unsupported language. (find_callees resolves C# only.)") + calleeCsNote + CoverageCaveat();
 
         bool truncated = callees.Count > maxResults;
         var sb = new StringBuilder();
         foreach (var c in callees.Take(maxResults)) sb.AppendLine($"{DisplayPath(c)}:{c.Line}:{c.Column}: {c.LineText}");
         sb.Append(Footer(Math.Min(callees.Count, maxResults), truncated, "callee", "callees"));
+        sb.Append(calleeCsNote);
         return sb.ToString();
     });
 

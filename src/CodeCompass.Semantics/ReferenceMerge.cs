@@ -23,14 +23,21 @@ public static class ReferenceMerge
     public const int MaxLexicalHitsPerFile = 16;
 
     /// <summary>A trigram hit qualifies as a LEXICAL reference to a symbol of length <paramref name="nameLength"/>
-    /// when: it is NOT in a semantically-covered file (unless the C/C++ pass was incomplete - then cover those
-    /// too, so a symbol whose semantic resolution failed isn't dropped to a bare zero), it is a code file (not
-    /// build noise like .lst/.bak/.o), and it is a whole-word match (not a substring). Callers dedup by their
-    /// own display key and emit.</summary>
-    public static bool IsLexicalReference(string path, string lineText, int column1Based, int nameLength, bool cppIncomplete)
-        => !(SemanticCoverage.IsCovered(path) && !cppIncomplete)
+    /// when: it is NOT in a semantically-covered file whose language pass was COMPLETE, it is a code file (not
+    /// build noise like .lst/.bak/.o), and it is a whole-word match (not a substring). Incompleteness is
+    /// resolved PER LANGUAGE: a .cs file backfills when the C# pass was incomplete (<paramref
+    /// name="csharpIncomplete"/> - e.g. #if-guarded code Roslyn couldn't see), a .c/.cpp/.h when the C/C++
+    /// pass was (<paramref name="cppIncomplete"/> - memory-stop / unparsed TU / unresolved include). This is
+    /// what stops a symbol whose semantic resolution silently missed part of the tree from being reported as a
+    /// bare zero, without over-firing lexical on the OTHER language that resolved cleanly. Callers dedup by
+    /// their own display key and emit.</summary>
+    public static bool IsLexicalReference(string path, string lineText, int column1Based, int nameLength, bool cppIncomplete, bool csharpIncomplete)
+    {
+        bool languageIncomplete = SemanticCoverage.IsCSharp(path) ? csharpIncomplete : cppIncomplete;
+        return !(SemanticCoverage.IsCovered(path) && !languageIncomplete)
            && ReferenceFileFilter.IsCodeReference(path)
            && WordBoundary.IsWholeWord(lineText, column1Based - 1, nameLength);
+    }
 
     /// <summary>The honest C/C++ coverage caveats for a query as a list of bit strings (empty if fully
     /// covered): how many candidate TUs parsed, whether the memory budget stopped it, and which #includes were

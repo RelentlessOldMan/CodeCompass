@@ -997,14 +997,19 @@ static int CmdRefs(string[] args)
     // the lexical fallback below. If unindexed, the clang analyzer self-scans (slower, but still correct).
     bool haveIndex = RepositoryIndexer.TryLoad(root, out var index, out _);
     List<string>? cppCandidates = null;
+    List<string>? csCandidates = null;
     if (haveIndex)
     {
         cppCandidates = new List<string>();
+        csCandidates = new List<string>();
         foreach (var rel in index!.CandidateFiles(name))
         {
+            var full = Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)));
             var ext = Path.GetExtension(rel);
             if (ext is ".c" or ".cc" or ".cpp" or ".cxx" or ".c++")
-                cppCandidates.Add(Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar))));
+                cppCandidates.Add(full);
+            else if (ext.Equals(".cs", StringComparison.OrdinalIgnoreCase))
+                csCandidates.Add(full);
         }
     }
     // Parse the C/C++ candidates in a SHORT-LIVED CHILD PROCESS (crash isolation), same as the MCP tool. A
@@ -1035,6 +1040,11 @@ static int CmdRefs(string[] args)
     // lexical rather than treat these files as covered" - covers memory-stop, unparsed TUs, AND unresolved
     // includes (a TU can PARSE with errors yet resolve nothing).
     bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppRes.MemoryStopped, cppRes.ParsedTus, cppRes.CandidateTus, cppRes.UnresolvedIncludes.Count);
+    // The C# semantic pass (Roslyn, empty preprocessor set) can't see code in inactive #if/#elif branches, so
+    // it SILENTLY misses references guarded by conditional compilation. When any candidate .cs uses it, treat
+    // the C# pass as incomplete: backfill lexical for .cs too (deduped) and disclose - the C# twin of the
+    // C/C++ incomplete->lexical rule. No conditional compilation => unchanged (semantic-only, no comment noise).
+    bool csharpIncomplete = csCandidates is not null && SemanticCoverage.IsCSharpPassIncomplete(csCandidates);
     var semKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var s in cs) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
     foreach (var s in cpp) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
@@ -1046,7 +1056,7 @@ static int CmdRefs(string[] args)
         // fix for the deterministic local-vs-UNC refs-count gap - see ReferenceMerge.MaxLexicalHitsPerFile.
         foreach (var m in index!.Search(name, 1000, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true))
         {
-            if (!ReferenceMerge.IsLexicalReference(m.Path, m.LineText, m.Column, name.Length, cppIncomplete)) continue;
+            if (!ReferenceMerge.IsLexicalReference(m.Path, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete)) continue;
             if (!semKeys.Add($"{m.Path}:{m.Line}:{m.Column}")) continue;                       // already found semantically
             Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
             lexical++;
@@ -1058,7 +1068,7 @@ static int CmdRefs(string[] args)
     if (RefsDebug.On)
         RefsDebug.Log($"CLI name='{name}' cppCand={cppRes.CandidateTus} cppParsed={cppRes.ParsedTus} " +
             $"memStopped={cppRes.MemoryStopped} unresolvedIncludes={cppRes.UnresolvedIncludes.Count} " +
-            $"incomplete={cppIncomplete} => semC#={cs.Count} semC/C++={cpp.Count} lexical={lexical}");
+            $"cppIncomplete={cppIncomplete} csharpIncomplete={csharpIncomplete} => semC#={cs.Count} semC/C++={cpp.Count} lexical={lexical}");
 
     // Honest disclosure (same as MCP): if candidate C/C++ TUs failed to parse or had unresolved #includes,
     // a low/zero C/C++ count means "couldn't look," not "no references." Name the missing headers. This is a
@@ -1072,6 +1082,12 @@ static int CmdRefs(string[] args)
             Console.Out.WriteLine("-- C/C++ coverage INCOMPLETE: " + string.Join("; ", bits) +
                 " (missing headers aren't in the tree - a low/zero C/C++ count may mean 'couldn't parse', not 'no references').");
     }
+    // C# conditional-compilation disclosure: Roslyn can't see inactive #if/#elif branches, so a semantic
+    // count may miss #if-guarded call sites (shown lexically where the backfill found them). Fires to STDOUT
+    // alongside the hits, same as the C/C++ caveat, so a `refs > out.txt` keeps the qualifier.
+    if (csharpIncomplete)
+        Console.Out.WriteLine("-- C# coverage INCOMPLETE: candidate file(s) use #if/#elif conditional compilation; " +
+            "the semantic pass doesn't see references in inactive branches (shown lexically where found) - a low count may miss #if-guarded uses.");
 
     Console.Error.WriteLine($"-- {cs.Count} C# + {cpp.Count} C/C++ semantic + {lexical} lexical reference(s)");
     return 0;
@@ -1089,6 +1105,17 @@ static int CmdCallees(string[] args)
     var callees = new RoslynCSharpAnalyzer(root).FindCallees(name);
     foreach (var c in callees)
         Console.WriteLine($"{c.RelativePath}:{c.Line}:{c.Column}: {c.LineText}");
+    // Conditional-compilation disclosure: FindCallees walks the method body via Roslyn, which can't see
+    // inactive #if/#elif branches - so calls guarded by conditional compilation are silently missing. If the
+    // method's candidate .cs file(s) use it, say so (lexical backfill can't recover a callee, only disclose).
+    bool calleeCsIncomplete = RepositoryIndexer.TryLoad(root, out var cidx, out _)
+        && SemanticCoverage.IsCSharpPassIncomplete(
+            cidx!.CandidateFiles(name)
+                .Where(rel => rel.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+                .Select(rel => Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)))));
+    if (calleeCsIncomplete)
+        Console.Out.WriteLine("-- C# coverage INCOMPLETE: the method's file(s) use #if/#elif conditional compilation; " +
+            "callees in inactive branches aren't seen by the semantic pass - some calls may be missing.");
     Console.Error.WriteLine($"-- {callees.Count} callee(s) (C# only)");
     return 0;
 }

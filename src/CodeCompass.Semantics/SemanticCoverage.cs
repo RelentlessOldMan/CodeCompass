@@ -12,6 +12,60 @@ public static class SemanticCoverage
 
     public static bool IsCovered(string path) => Extensions.Contains(Path.GetExtension(path));
 
+    /// <summary>Is this a C# source file (the Roslyn-covered language, distinct from the clang-covered C/C++
+    /// set)? Lets the lexical backfill decide incompleteness PER LANGUAGE - a .cs file backfills when the C#
+    /// pass was incomplete, a .c/.cpp/.h when the C/C++ pass was.</summary>
+    public static bool IsCSharp(string path) => Path.GetExtension(path).Equals(".cs", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True if C# source uses conditional compilation (<c>#if</c>/<c>#elif</c>/<c>#else</c>). Roslyn
+    /// builds its model with an EMPTY preprocessor-symbol set, so code in inactive branches is parsed as
+    /// disabled text - invisible to semantic find_references AND find_callees. A candidate file with these
+    /// directives means the semantic pass may have SILENTLY missed guarded references/calls, so callers
+    /// disclose it (and refs backfills lexically). Cheap allocation-free scan of line starts.</summary>
+    public static bool HasCSharpConditionalCompilation(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+        int i = 0, n = text.Length;
+        while (i < n)
+        {
+            int j = i;
+            while (j < n && (text[j] == ' ' || text[j] == '\t')) j++;   // leading whitespace
+            if (j < n && text[j] == '#')
+            {
+                j++;
+                while (j < n && (text[j] == ' ' || text[j] == '\t')) j++; // '#' and optional space, e.g. "# if"
+                if (Kw(text, j, "if") || Kw(text, j, "elif") || Kw(text, j, "else")) return true;
+            }
+            while (i < n && text[i] != '\n') i++; // to end of line
+            i++;                                   // past '\n'
+        }
+        return false;
+
+        static bool Kw(string s, int at, string kw)
+        {
+            if (at + kw.Length > s.Length) return false;
+            for (int k = 0; k < kw.Length; k++) if (s[at + k] != kw[k]) return false;
+            int after = at + kw.Length;                       // word boundary so "ifdef"/"elsewhere" don't match
+            return after >= s.Length || !char.IsLetterOrDigit(s[after]);
+        }
+    }
+
+    /// <summary>Whether the C# semantic pass may be INCOMPLETE for this query: true if ANY candidate .cs file
+    /// uses conditional compilation, since Roslyn can't see inactive <c>#if</c> branches. Early-exits on the
+    /// first hit. Reads candidate files (bounded to those that could contain the symbol); unreadable files are
+    /// skipped. Mirrors <see cref="IsCppPassIncomplete"/> as the single source of truth for "backfill lexical
+    /// + disclose rather than trust a possibly-partial C# semantic result."</summary>
+    public static bool IsCSharpPassIncomplete(IEnumerable<string> candidateFullPaths)
+    {
+        foreach (var p in candidateFullPaths)
+        {
+            if (!IsCSharp(p)) continue;
+            try { if (HasCSharpConditionalCompilation(File.ReadAllText(p))) return true; }
+            catch { /* unreadable candidate: can't prove incompleteness from it */ }
+        }
+        return false;
+    }
+
     /// <summary>
     /// Whether a C/C++ <c>find_references</c> pass was INCOMPLETE, i.e. a low/zero semantic count may mean
     /// "couldn't look," not "no references" - so the lexical layer should backfill C/C++ files instead of
