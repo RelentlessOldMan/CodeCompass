@@ -43,6 +43,14 @@ public class IgnoreRulesTests
     [InlineData("docs/readme.md", false)]              // .md is searchable
     [InlineData("a/b/c/Widget.cpp", false)]
     [InlineData("", false)]
+    // Edge cases the fix must get right (exact SEGMENT match, not substring; case-insensitive; both separators;
+    // directory segments only - the filename is not treated as a dir):
+    [InlineData("binary/logo.cs", false)]              // "binary" merely CONTAINS "bin" - not an ignored segment
+    [InlineData("objects/model.cs", false)]            // "objects" is not "obj"
+    [InlineData("node_modules\\pkg\\index.js", true)]  // backslash separators split too
+    [InlineData("BIN/App.cs", true)]                   // dir match is case-insensitive
+    [InlineData("src/bin/App.cs", true)]               // ignored dir nested under a normal one
+    [InlineData("bin", false)]                          // a bare filename "bin" is NOT a directory segment
     public void IsIgnoredPath_MatchesWalkerExclusions(string relativePath, bool expected)
         => Assert.Equal(expected, new IgnoreRules().IsIgnoredPath(relativePath));
 

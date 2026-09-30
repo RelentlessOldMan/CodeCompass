@@ -197,4 +197,48 @@ public class HardeningReviewTests
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
+
+    // Query-time ignore consistency (v1.0.198), SYMBOL side: a stale index holding symbols for a now-ignored
+    // path (a rival tool's .claude dump) must not surface them via find_definition/search_symbols.
+    [Fact]
+    public void SymbolIndex_QueryTime_ExcludesNowIgnoredPaths()
+    {
+        var dir = NewTempDir();
+        try
+        {
+            using var idx = SegmentedSymbolIndex.Create(dir);
+            idx.Add(new Symbol("Widget", SymbolKind.Class, "src/Widget.cs", 1, 1));
+            idx.Add(new Symbol("Widget", SymbolKind.Class, ".claude/index/Widget.cs", 2, 1)); // stale pollution
+            idx.Flush();
+
+            var byName = idx.FindByName("Widget");
+            Assert.Contains(byName, s => s.RelativePath == "src/Widget.cs");
+            Assert.DoesNotContain(byName, s => s.RelativePath.Contains(".claude"));
+            Assert.DoesNotContain(idx.Find("Widget", 50), s => s.RelativePath.Contains(".claude"));
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // Durability net, SYMBOL side (mirrors the text index): a missing manifest with surviving sym-*.ccsym files
+    // reconstructs from disk instead of an empty symbol index.
+    [Fact]
+    public void SymbolIndex_Open_ManifestMissing_ReconstructsFromSegmentFilesOnDisk()
+    {
+        var dir = NewTempDir();
+        try
+        {
+            var idx = SegmentedSymbolIndex.Create(dir);
+            idx.Add(new Symbol("Foo", SymbolKind.Class, "a.cs", 1, 1));
+            idx.Add(new Symbol("Bar", SymbolKind.Method, "b.cs", 2, 1));
+            idx.Flush();
+            idx.Dispose();
+
+            File.Delete(Path.Combine(dir, "symbols.manifest"));
+
+            using var reopened = SegmentedSymbolIndex.Open(dir);
+            Assert.True(reopened.SegmentCount >= 1);
+            Assert.Contains(reopened.FindByName("Foo"), s => s.RelativePath == "a.cs");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
 }

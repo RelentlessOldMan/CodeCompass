@@ -60,6 +60,47 @@ public class McpToolsTests
         Assert.Contains("Helper", result);
     }
 
+    // Guardrail (v1.0.201): a whitespace-only query has no trigrams and would fall to a full-corpus scan
+    // returning noise; it must be rejected like an empty one.
+    [Fact]
+    public void SearchCode_WhitespaceOnly_IsRejected()
+    {
+        using var repo = NewIndexedRepo();
+        Assert.Contains("non-empty", CodeCompassTools.SearchCode("   "));
+    }
+
+    // Guardrail (v1.0.201): a relative link path would resolve against the server's launch dir, not the
+    // workspace - reject it so the linked root is deterministic.
+    [Fact]
+    public void ManageLinks_Add_RelativePath_IsRejected()
+    {
+        using var repo = NewIndexedRepo();
+        var msg = CodeCompassTools.ManageLinks("add", "../sibling");
+        Assert.Contains("ABSOLUTE", msg);
+    }
+
+    // Guardrail (v1.0.201): reindex must not run a synchronous rebuild of an over-limit workspace (it would
+    // block/timeout the MCP call and orphan the build) - it returns the CLI guidance instead.
+    [Fact]
+    public void Reindex_OverAutoLimit_ReturnsCliGuidance()
+    {
+        using var repo = new TempRepo();
+        repo.Write("src/A.cs", "namespace N { class A { } }");
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_MAX_AUTO_MB");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_MAX_AUTO_MB", "0"); // every workspace is now over the limit
+            ServerContext.Init(repo.Root);
+            var msg = CodeCompassTools.Reindex();
+            Assert.Contains("codecompass index", msg); // guidance, not a "Reindexed N files" completion
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_MAX_AUTO_MB", prev);
+            ServerContext.Init(repo.Root);
+        }
+    }
+
     [Fact]
     public void FindReferences_ExcludesDataAndDocFileMatches()
     {
