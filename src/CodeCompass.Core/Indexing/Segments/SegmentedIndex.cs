@@ -274,6 +274,11 @@ public sealed class SegmentedIndex : IDisposable
                 // Defence in depth: paths come from the index, but a tampered/corrupt cache could
                 // hold a "../" or rooted path - never read (and return to the agent) outside the repo.
                 if (!PathSafety.IsInsideRepo(rel)) continue;
+                // Query-time ignore consistency: a STALE index (built by an older/looser version) can still
+                // hold paths the current walker would skip - a rival tool's .claude/ cache dump, or a dir
+                // added to CODECOMPASS_IGNORE since the last build. Drop them here so they never reach
+                // search/refs/symbol results without needing a rebuild. See IgnoreRules.IsIgnoredPath.
+                if (CodeCompass.Core.Ignore.IgnoreRules.QueryDefault.IsIgnoredPath(rel)) continue;
                 candidates.Add(rel);
             }
         }

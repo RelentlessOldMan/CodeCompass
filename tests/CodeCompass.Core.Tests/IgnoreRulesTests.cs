@@ -29,6 +29,23 @@ public class IgnoreRulesTests
         Assert.False(new IgnoreRules().IsIgnoredDirectory(name));
     }
 
+    // Query-time guard: a (repo-relative) path is ignored if ANY directory segment is an ignored dir OR the
+    // extension is an ignored asset type. Lets query results drop stale-index pollution the current walker
+    // would never index - so "ignored at index time" also means "excluded at query time".
+    [Theory]
+    [InlineData(".claude/index/tags.json", true)]     // rival AI-tool cache dump - the field pollution case
+    [InlineData("node_modules/pkg/index.js", true)]   // ignored dir
+    [InlineData("deep/a/b/.git/config", true)]         // ignored dir at any depth
+    [InlineData("obj/Release/App.dll", true)]          // ignored dir (and ignored ext)
+    [InlineData("assets/logo.png", true)]              // ignored extension
+    [InlineData("data/blob.bin", true)]                // ignored extension
+    [InlineData("src/App.cs", false)]                  // normal source
+    [InlineData("docs/readme.md", false)]              // .md is searchable
+    [InlineData("a/b/c/Widget.cpp", false)]
+    [InlineData("", false)]
+    public void IsIgnoredPath_MatchesWalkerExclusions(string relativePath, bool expected)
+        => Assert.Equal(expected, new IgnoreRules().IsIgnoredPath(relativePath));
+
     [Theory]
     [InlineData("app.dll")]
     [InlineData("photo.PNG")]

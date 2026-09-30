@@ -30,6 +30,35 @@ public class SegmentedIndexEdgeTests
         Assert.Equal(10, text.Search("ZEBRA", 100).Count);
     }
 
+    // Query-time ignore consistency: a STALE index built by an older/looser version can still hold postings
+    // for paths the current walker would skip (a rival tool's .claude/ cache dump, a node_modules artifact).
+    // AddDocumentText plants them directly, exactly as such an index would. Search must NOT return them - the
+    // fix drops now-ignored paths at query time, so "ignored at index time" also means "excluded at query
+    // time" without a rebuild. (Field report: search leaked .claude/index/tags.json from an old-version index.)
+    [Fact]
+    public void Search_ExcludesStaleIndexPathsUnderNowIgnoredDirs()
+    {
+        using var repo = new TempRepo();
+        // Write all three to disk (Search verifies by reading the candidate file), then index them MANUALLY -
+        // bypassing the walker, which would skip the ignored dirs. That's exactly the shape of a stale index
+        // built by an older/looser version that DID index them.
+        repo.Write(".claude/index/tags.json", "ZZTOKEN pollution ZZTOKEN everywhere ZZTOKEN");
+        repo.Write("node_modules/pkg/x.js", "ZZTOKEN in a dependency");
+        repo.Write("src/real.cs", "int ZZTOKEN = 1; // the real one");
+        var dir = NewCacheDir();
+        using var idx = SegmentedIndex.Create(repo.Root, dir, budget: 1 << 20);
+        idx.AddDocumentText(".claude/index/tags.json", File.ReadAllText(repo.FullPath(".claude/index/tags.json")));
+        idx.AddDocumentText("node_modules/pkg/x.js", File.ReadAllText(repo.FullPath("node_modules/pkg/x.js")));
+        idx.AddDocumentText("src/real.cs", File.ReadAllText(repo.FullPath("src/real.cs")));
+        idx.Flush();
+
+        var hits = idx.Search("ZZTOKEN", 100);
+        Assert.Contains(hits, h => h.Path == "src/real.cs");
+        Assert.DoesNotContain(hits, h => h.Path.Contains(".claude"));
+        Assert.DoesNotContain(hits, h => h.Path.Contains("node_modules"));
+        Assert.Single(hits); // only the real source file survives the query-time ignore filter
+    }
+
     [Fact]
     public void Search_ShortQueryUnderThreeChars_StillMatches()
     {

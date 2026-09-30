@@ -67,7 +67,7 @@ public sealed class SymbolIndex
         var result = new List<Symbol>();
         if (_byName.TryGetValue(name, out var ids))
             foreach (var id in ids)
-                if (!_removed.Contains(id))
+                if (!_removed.Contains(id) && !CodeCompass.Core.Ignore.IgnoreRules.QueryDefault.IsIgnoredPath(_symbols[id].RelativePath))
                     result.Add(_symbols[id]);
         return result;
     }
@@ -80,6 +80,7 @@ public sealed class SymbolIndex
         {
             if (_removed.Contains(id)) continue;
             var s = _symbols[id];
+            if (CodeCompass.Core.Ignore.IgnoreRules.QueryDefault.IsIgnoredPath(s.RelativePath)) continue;
             if (s.Name.Contains(queryText, StringComparison.OrdinalIgnoreCase))
             {
                 results.Add(s);

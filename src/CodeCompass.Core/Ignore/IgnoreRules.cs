@@ -61,6 +61,32 @@ public sealed class IgnoreRules
 
     public bool IsIgnoredDirectory(string directoryName) => _ignoredDirs.Contains(directoryName);
 
+    // Process-shared rules for QUERY-TIME result filtering (defaults + env + config), built once and lazily
+    // so a config read can't fault type init. Query paths (text search, symbols) use this to drop stale-index
+    // pollution; the walker builds its own rules per index, so this only needs the current process's rules.
+    private static readonly Lazy<IgnoreRules> _queryDefault = new(() => new IgnoreRules());
+
+    /// <summary>Shared ignore rules for dropping stale-index pollution from query results. See <see
+    /// cref="IsIgnoredPath"/>.</summary>
+    public static IgnoreRules QueryDefault => _queryDefault.Value;
+
+    /// <summary>Query-time guard: would the walker skip this (repo-relative) path today? True if ANY directory
+    /// segment is an ignored dir, or the filename's extension is an ignored (binary/asset) type. The point:
+    /// a STALE index built by an older/looser version can still hold postings for paths the current walker
+    /// would never index - a rival tool's <c>.claude/index/tags.json</c> dump, or a dir added to
+    /// CODECOMPASS_IGNORE since the last build - and those must not leak into search/symbol results. Applying
+    /// this at query time makes "ignored at index time" also mean "excluded at query time" WITHOUT forcing a
+    /// rebuild. The size cap is index-time-only (size isn't known here), so it's intentionally not applied.</summary>
+    public bool IsIgnoredPath(string relativePath)
+    {
+        if (string.IsNullOrEmpty(relativePath)) return false;
+        var parts = relativePath.Split('/', '\\');
+        for (int i = 0; i < parts.Length - 1; i++)          // directory segments only (the last part is the filename)
+            if (parts[i].Length > 0 && _ignoredDirs.Contains(parts[i])) return true;
+        var ext = Path.GetExtension(parts[^1]);
+        return !string.IsNullOrEmpty(ext) && _ignoredExtensions.Contains(ext);
+    }
+
     public bool IsIgnoredFile(string fileName, long size)
     {
         if (size > MaxFileSizeBytes) return true;
