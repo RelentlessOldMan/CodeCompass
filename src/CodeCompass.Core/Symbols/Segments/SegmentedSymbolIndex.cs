@@ -112,6 +112,8 @@ public sealed class SegmentedSymbolIndex : IDisposable
             foreach (var i in seg.FindByName(name))
             {
                 if (tomb is not null && tomb.Contains(seg.GetSymbolPath(i))) continue;
+                // Query-time ignore consistency: drop symbols a stale index still holds for now-ignored paths.
+                if (CodeCompass.Core.Ignore.IgnoreRules.QueryDefault.IsIgnoredPath(seg.GetSymbolPath(i))) continue;
                 result.Add(seg.GetSymbol(i));
             }
         }
@@ -130,6 +132,7 @@ public sealed class SegmentedSymbolIndex : IDisposable
             {
                 if (!seg.GetName(i).Contains(queryText, StringComparison.OrdinalIgnoreCase)) continue;
                 if (tomb is not null && tomb.Contains(seg.GetSymbolPath(i))) continue;
+                if (CodeCompass.Core.Ignore.IgnoreRules.QueryDefault.IsIgnoredPath(seg.GetSymbolPath(i))) continue;
                 result.Add(seg.GetSymbol(i));
                 if (result.Count >= max) return result;
             }
