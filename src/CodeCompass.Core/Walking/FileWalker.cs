@@ -37,8 +37,17 @@ public sealed class FileWalker
     public long LargestOverCapBytes { get; private set; }
     public string? LargestOverCapPath { get; private set; }
 
+    /// <summary>Opt-in (survey/diagnostics): also collect the identities of over-cap files that are otherwise
+    /// indexable (not an ignored binary/asset type), so a diagnostic can list "absent from the index due to
+    /// SIZE" off the SAME walk the index uses instead of a second hand-rolled one that drifts. Default off -
+    /// the build only needs the count/largest above, not the list, so it pays nothing.</summary>
+    public bool CollectOverCapFiles { get; init; }
+    public IReadOnlyList<(string Path, long Size)> OverCapFiles =>
+        _overCapFiles is null ? Array.Empty<(string, long)>() : _overCapFiles;
+    private List<(string Path, long Size)>? _overCapFiles;
+
     private int _overCapSkipped;
-    private readonly object _largestLock = new(); // guards the largest-over-cap pair (parallel walk)
+    private readonly object _largestLock = new(); // guards the largest-over-cap pair + over-cap list (parallel walk)
 
     /// <summary>Directory subtrees DROPPED during the last <see cref="Walk"/> because their listing failed
     /// (or came back empty) even after a network retry - i.e. their files are silently absent from the index.
@@ -73,6 +82,7 @@ public sealed class FileWalker
         _droppedDirs = 0;
         LargestOverCapBytes = 0;
         LargestOverCapPath = null;
+        _overCapFiles = CollectOverCapFiles ? new List<(string, long)>() : null;
 
         // A network root gets retry-on-failure directory reads: over SMB under concurrent load, a directory
         // listing can transiently throw (path-not-found on a dir that exists) or come back empty (a child
@@ -105,6 +115,10 @@ public sealed class FileWalker
             lock (_largestLock)
             {
                 if (size > LargestOverCapBytes) { LargestOverCapBytes = size; LargestOverCapPath = file.FullName; }
+                // Only files that would otherwise be indexed (not an ignored binary/asset extension) count as
+                // "excluded by SIZE" - a big .png is excluded because it's an asset, not because of the cap.
+                if (_overCapFiles is not null && !_ignore.IsIgnoredFile(file.Name, 0))
+                    _overCapFiles.Add((Path.GetRelativePath(root, file.FullName).Replace('\\', '/'), size));
             }
             return false;
         }
