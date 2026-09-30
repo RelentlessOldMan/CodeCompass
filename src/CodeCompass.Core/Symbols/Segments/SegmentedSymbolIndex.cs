@@ -70,7 +70,14 @@ public sealed class SegmentedSymbolIndex : IDisposable
 
     public static string SegmentFileName(int number) => $"sym-{number:D8}.ccsym";
 
-    public static bool Exists(string dir) => File.Exists(Path.Combine(dir, ManifestName));
+    /// <summary>
+    /// True if a loadable symbol index exists. Mirrors <see cref="CodeCompass.Core.Indexing.Segments.SegmentedIndex.Exists"/>:
+    /// a lost manifest with surviving sym-*.ccsym segments is still recoverable by Load, so Exists must agree, or
+    /// TryLoad's gate bypasses recovery. Manifest first (cheap common path); enumerate only when it's missing.
+    /// </summary>
+    public static bool Exists(string dir) =>
+        File.Exists(Path.Combine(dir, ManifestName)) ||
+        (System.IO.Directory.Exists(dir) && System.IO.Directory.EnumerateFiles(dir, SegmentPattern).Any());
 
     /// <summary>Raw symbol count (includes not-yet-compacted tombstoned symbols); exact after a build.</summary>
     public int Count

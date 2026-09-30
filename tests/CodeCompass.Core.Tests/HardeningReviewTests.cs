@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Indexing.Segments;
+using CodeCompass.Core.Storage;
 using CodeCompass.Core.Symbols;
 using CodeCompass.Core.Symbols.Segments;
 using CodeCompass.Core.Walking;
@@ -198,6 +199,40 @@ public class HardeningReviewTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
+    // The GATE in front of the recovery above: Open()/Load() reconstruct correctly, but every real caller reaches
+    // them through RepositoryIndexer.TryLoad, which first checks Exists(dir). If Exists only asks "is the manifest
+    // present?" it returns false the moment the manifest is lost - short-circuiting TryLoad to "no index" so the
+    // reconstruction code never runs and the surviving seg-*.ccseg files are ignored (a silent full rebuild, not
+    // recovery). Exists must agree with what Load can salvage: manifest OR a surviving segment file.
+    [Fact]
+    public void Exists_ManifestMissing_TrueWhenSegmentFilesSurvive()
+    {
+        var dir = NewTempDir();
+        try
+        {
+            var idx = SegmentedIndex.Create("root", dir);
+            idx.AddDocumentText("a.cs", "needle in a haystack");
+            idx.Flush();
+            idx.Dispose();
+            Assert.True(File.Exists(Path.Combine(dir, "segments.manifest")));
+
+            File.Delete(Path.Combine(dir, "segments.manifest")); // lost manifest, seg-*.ccseg survive
+
+            Assert.True(SegmentedIndex.Exists(dir),
+                "Exists must stay true while reconstructible segment files remain, or TryLoad bypasses recovery");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // Nothing to salvage -> Exists is false (a genuinely empty/absent cache still triggers a rebuild, not recovery).
+    [Fact]
+    public void Exists_ManifestAndSegmentsBothGone_False()
+    {
+        var dir = NewTempDir();
+        try { Assert.False(SegmentedIndex.Exists(dir)); }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
     // Query-time ignore consistency (v1.0.198), SYMBOL side: a stale index holding symbols for a now-ignored
     // path (a rival tool's .claude dump) must not surface them via find_definition/search_symbols.
     [Fact]
@@ -315,5 +350,54 @@ public class HardeningReviewTests
             Assert.Contains(reopened.FindByName("Foo"), s => s.RelativePath == "a.cs");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // Gate test, SYMBOL side (mirrors Exists_ManifestMissing_TrueWhenSegmentFilesSurvive).
+    [Fact]
+    public void SymbolIndex_Exists_ManifestMissing_TrueWhenSegmentFilesSurvive()
+    {
+        var dir = NewTempDir();
+        try
+        {
+            var idx = SegmentedSymbolIndex.Create(dir);
+            idx.Add(new Symbol("Foo", SymbolKind.Class, "a.cs", 1, 1));
+            idx.Flush();
+            idx.Dispose();
+            Assert.True(File.Exists(Path.Combine(dir, "symbols.manifest")));
+
+            File.Delete(Path.Combine(dir, "symbols.manifest")); // lost manifest, sym-*.ccsym survive
+
+            Assert.True(SegmentedSymbolIndex.Exists(dir),
+                "symbol Exists must stay true while reconstructible sym-*.ccsym files remain");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // End-to-end regression for the field report (v1.0.207): the exact real-world SMB scenario - a non-atomic
+    // replace loses BOTH segments.manifest and symbols.manifest while every seg-*.ccseg / sym-*.ccsym survives -
+    // must recover through the caller path (RepositoryIndexer.TryLoad), not present as total index loss. This is
+    // the gap the Open()/Load() tests missed: recovery worked, but TryLoad's Exists() gate short-circuited before
+    // ever calling it, so a query after manifest loss returned "no index" and a silent rebuild-from-scratch.
+    [Fact]
+    public void TryLoad_BothManifestsMissing_RecoversFromSegmentsOnDisk()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class Widget { void Run() { } } }");
+        repo.Write("b.cs", "namespace N { class Gadget { void Run() { } } }");
+        var built = RepositoryIndexer.Build(repo.Root);
+        built.Text.Dispose(); built.Symbols.Dispose();
+
+        var cache = IndexStore.GetCacheDir(repo.Root);
+        File.Delete(Path.Combine(cache, "segments.manifest")); // both manifests lost (the SMB non-atomic-replace case)
+        File.Delete(Path.Combine(cache, "symbols.manifest"));
+
+        Assert.True(RepositoryIndexer.TryLoad(repo.Root, out var text, out var symbols),
+            "TryLoad must recover from surviving segment/symbol files, not report the index as gone");
+        try
+        {
+            Assert.NotEmpty(text.Search("Widget", 1_000));           // trigram content recovered
+            Assert.Contains(symbols.FindByName("Gadget"), s => s.RelativePath == "b.cs"); // symbols recovered
+        }
+        finally { text.Dispose(); symbols.Dispose(); }
     }
 }
