@@ -84,7 +84,21 @@ public static class ServerContext
     private static volatile bool _reconciling;
     public static bool IsReconciling => _reconciling;
 
+    // Re-point generation. Bumped by Init() whenever the served workspace changes. A background build/reconcile
+    // captures the epoch when it STARTS and Swap installs its result only if the epoch still matches - otherwise
+    // the workspace was re-pointed mid-build and the (now stale-root) result is discarded rather than installed
+    // into the new context, which would silently serve the wrong repository. Written under the Rw write lock.
+    private static int _epoch;
+
     public static string Root { get; private set; } = "";
+
+    // Test seams (HardeningReviewTests): drive the re-point epoch guard deterministically without racing threads.
+    internal static int EpochForTest => Volatile.Read(ref _epoch);
+    internal static bool IsServingForTest
+    {
+        get { Rw.EnterReadLock(); try { return _text is not null && _state == IndexState.Ready; } finally { Rw.ExitReadLock(); } }
+    }
+    internal static bool SwapForTest(SegmentedIndex text, SegmentedSymbolIndex symbols, int epoch) => Swap(text, symbols, epoch);
 
     public static void Init(string root)
     {
@@ -111,6 +125,7 @@ public static class ServerContext
             _pendingPaths.Clear();
             _pendingReconcile = false;
             _rebuilding = false;
+            _epoch++; // re-point: any in-flight build for the previous root is now stale (discarded at Swap)
         }
         finally { Rw.ExitWriteLock(); }
         oldWatcher?.Dispose();
@@ -534,9 +549,10 @@ public static class ServerContext
         finally { Rw.ExitWriteLock(); }
         try
         {
+            int epoch = Volatile.Read(ref _epoch);
             var built = RepositoryIndexer.Build(Root); // off-lock; old index still serves reads
-            Swap(built.Text, built.Symbols);
-            Log.For(Root).Info($"manual reindex complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+            if (Swap(built.Text, built.Symbols, epoch))
+                Log.For(Root).Info($"manual reindex complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
             return built.Stats;
         }
         finally
@@ -556,31 +572,47 @@ public static class ServerContext
     }
 
     // Dispose the previous indexes and install new ones under the write lock (waits for any
-    // in-flight search to finish, so a search never touches a disposed mmap).
-    private static void Swap(SegmentedIndex text, SegmentedSymbolIndex symbols)
+    // in-flight search to finish, so a search never touches a disposed mmap). Returns false (and disposes the
+    // incoming indexes, leaving current state untouched) if the workspace was re-pointed since the build that
+    // produced them started - see _epoch.
+    private static bool Swap(SegmentedIndex text, SegmentedSymbolIndex symbols, int epoch)
     {
-        RoslynCSharpAnalyzer? oldCs;
-        ClangCppAnalyzer? oldCpp;
+        RoslynCSharpAnalyzer? oldCs = null;
+        ClangCppAnalyzer? oldCpp = null;
+        bool installed = false;
         Rw.EnterWriteLock();
         try
         {
-            _text?.Dispose();
-            _symbols?.Dispose();
-            _snapshot?.Dispose();
-            oldCs = _csharp; oldCpp = _cpp; // stale after a rebuild; dispose off-lock to free their model
-            _text = text;
-            _symbols = symbols;
-            _snapshot = null;
-            _csharp = null;
-            _cpp = null;
-            _state = IndexState.Ready;
+            if (epoch == _epoch)
+            {
+                _text?.Dispose();
+                _symbols?.Dispose();
+                _snapshot?.Dispose();
+                oldCs = _csharp; oldCpp = _cpp; // stale after a rebuild; dispose off-lock to free their model
+                _text = text;
+                _symbols = symbols;
+                _snapshot = null;
+                _csharp = null;
+                _cpp = null;
+                _state = IndexState.Ready;
+                installed = true;
+            }
         }
         finally { Rw.ExitWriteLock(); }
+
+        if (!installed)
+        {
+            // Re-pointed mid-build: this result belongs to a stale root. Drop it; never touch the current context.
+            text.Dispose(); symbols.Dispose();
+            Log.For(Root).Info("discarded a rebuild whose workspace was re-pointed mid-flight (stale epoch)");
+            return false;
+        }
         oldCs?.Dispose(); oldCpp?.Dispose();
         // meta.json (path/version/coverage) is written by RepositoryIndexer.Build/Update, which have the
         // walker's over-cap count; Swap must not overwrite it here (it has no coverage data).
         PublishStatus(); // now Ready (or reconciling, if a startup reconcile is still in flight)
         Task.Run(MaybeReconcileLinks); // warm the federated set off-lock (cheap no-op if unchanged)
+        return true;
     }
 
     public static void EnableLiveIndex(int debounceMs = 1000)
@@ -659,11 +691,11 @@ public static class ServerContext
         bool ok = false;
         try
         {
+            int epoch = Volatile.Read(ref _epoch);
             var built = RepositoryIndexer.Build(Root,
                 (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); });
-            Swap(built.Text, built.Symbols);
-            Log.For(Root).Info($"background build complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
-            ok = true;
+            ok = Swap(built.Text, built.Symbols, epoch);
+            if (ok) Log.For(Root).Info($"background build complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
         }
         catch (Exception ex)
         {
@@ -731,9 +763,10 @@ public static class ServerContext
         BuildGate.Wait(); // serialize against a manual reindex / watcher rebuild
         try
         {
+            int epoch = Volatile.Read(ref _epoch);
             var u = RepositoryIndexer.Update(Root);
-            Swap(u.Text, u.Symbols);
-            if (u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild)
+            if (Swap(u.Text, u.Symbols, epoch) &&
+                (u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild))
                 Log.For(Root).Info($"startup reconcile applied external changes: +{u.Stats.Added} ~{u.Stats.Modified} -{u.Stats.Removed}" +
                                    (u.Stats.FullRebuild ? " (full rebuild)" : ""));
         }
@@ -761,12 +794,13 @@ public static class ServerContext
         finally { Rw.ExitWriteLock(); }
         try
         {
+            int epoch = Volatile.Read(ref _epoch);
             var u = RepositoryIndexer.PruneIgnored(Root);
             if (u.Pruned > 0)
             {
-                Swap(u.Text, u.Symbols);
-                Log.For(Root).Info($"pruned {u.Pruned} stale now-ignored path(s) from the index " +
-                                   "(an older/looser build had indexed them; query-time filter already hid them)");
+                if (Swap(u.Text, u.Symbols, epoch)) // Swap disposes the handles itself if the workspace was re-pointed
+                    Log.For(Root).Info($"pruned {u.Pruned} stale now-ignored path(s) from the index " +
+                                       "(an older/looser build had indexed them; query-time filter already hid them)");
             }
             else { u.Text.Dispose(); u.Symbols.Dispose(); } // already clean - drop the extra handles, keep serving
         }
@@ -863,12 +897,12 @@ public static class ServerContext
         bool ok = false, keptServing = false;
         try
         {
+            int epoch = Volatile.Read(ref _epoch);
             SegmentedIndex nt;
             SegmentedSymbolIndex ns;
             if (batch.FullReconcile) { var b = RepositoryIndexer.Build(Root); nt = b.Text; ns = b.Symbols; }
             else { var c = RepositoryIndexer.Compact(Root); nt = c.Text; ns = c.Symbols; }
-            Swap(nt, ns);
-            ok = true;
+            ok = Swap(nt, ns, epoch);
         }
         catch (Exception ex)
         {
@@ -938,7 +972,7 @@ public static class ServerContext
                 Rw.EnterWriteLock();
                 try { _rebuilding = true; } finally { Rw.ExitWriteLock(); }
                 BuildGate.Wait(); // serialize with any other rebuild
-                try { var b = RepositoryIndexer.Build(Root); Swap(b.Text, b.Symbols); }
+                try { int epoch = Volatile.Read(ref _epoch); var b = RepositoryIndexer.Build(Root); Swap(b.Text, b.Symbols, epoch); }
                 catch (Exception ex) { Log.For(Root).Error("drained reconcile failed", ex); return; }
                 finally
                 {

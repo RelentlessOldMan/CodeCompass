@@ -1,4 +1,5 @@
 using System.Text;
+using System.Threading;
 
 namespace CodeCompass.Core.Storage;
 
@@ -9,6 +10,9 @@ namespace CodeCompass.Core.Storage;
 /// </summary>
 public static class AtomicFile
 {
+    private const int ReplaceAttempts = 5;
+    private const int ReplaceBackoffMs = 30;
+
     /// <summary>Write via a temp file + atomic replace, so a crash never leaves a truncated file. The temp is
     /// flushed to disk before the rename (so the rename can't be persisted ahead of the contents on power
     /// loss) and is deleted if the write or rename fails (so a full disk / still-locked target doesn't leave
@@ -23,7 +27,7 @@ public static class AtomicFile
                 writeBody(fs);
                 fs.Flush(flushToDisk: true);
             }
-            File.Move(tmp, path, overwrite: true);
+            ReplaceWithRetry(tmp, path);
         }
         catch { TryDelete(tmp); throw; }
     }
@@ -39,9 +43,35 @@ public static class AtomicFile
                 using (var w = new StreamWriter(fs, leaveOpen: true)) writeBody(w);
                 fs.Flush(flushToDisk: true);
             }
-            File.Move(tmp, path, overwrite: true);
+            ReplaceWithRetry(tmp, path);
         }
         catch { TryDelete(tmp); throw; }
+    }
+
+    /// <summary>Move <paramref name="tmp"/> onto <paramref name="path"/> as close to atomically as the platform
+    /// allows, retrying transient failures. Prefers <see cref="File.Replace(string,string,string?)"/> when the
+    /// target exists: it swaps the file in place (via an internal backup) rather than delete-then-rename, so a
+    /// crash or SMB disconnect mid-replace leaves EITHER the old OR the new file - never neither. (A plain
+    /// <c>File.Move(overwrite:true)</c> over a share is a non-atomic delete+rename that can wipe the target with
+    /// no replacement - the failure mode this guards. A brief AV/indexer/reader lock, or a share hiccup under
+    /// load, is retried with backoff.)</summary>
+    private static void ReplaceWithRetry(string tmp, string path)
+    {
+        for (int i = 0; ; i++)
+        {
+            try
+            {
+                if (!File.Exists(path)) { File.Move(tmp, path); return; } // no target yet: a plain move is atomic
+                try { File.Replace(tmp, path, destinationBackupFileName: null); return; }
+                // Some filesystems/configs (cross-volume, certain SMB/FAT) don't support Replace -> fall back.
+                catch (PlatformNotSupportedException) { File.Move(tmp, path, overwrite: true); return; }
+                catch (NotSupportedException) { File.Move(tmp, path, overwrite: true); return; }
+            }
+            catch (Exception ex) when ((ex is IOException || ex is UnauthorizedAccessException) && i < ReplaceAttempts - 1)
+            {
+                Thread.Sleep(ReplaceBackoffMs * (i + 1)); // transient sharing violation / share hiccup: back off + retry
+            }
+        }
     }
 
     /// <summary>Delete if present, tolerating a file that's still memory-mapped or already gone.</summary>
