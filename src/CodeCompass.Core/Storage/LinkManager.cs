@@ -104,12 +104,26 @@ public static class LinkManager
             if (!Directory.Exists(l)) { result.Add(new(l, "MISSING (directory gone)", false, false)); continue; }
             if (RepositoryIndexer.TryLoad(l, out var t, out var s))
             {
-                using (t) using (s) result.Add(new(l, $"indexed, {t.DocumentCount:N0} files", true, true));
+                // DocumentCount is the LIVE count (segment docs - tombstones) as of NOW; the "built by" stamp
+                // is when the index was last built. They make explicit that this is a snapshot at read time, so
+                // a difference from `codecompass index` (a build-run stat) reads as expected, not a discrepancy.
+                using (t) using (s)
+                {
+                    var meta = IndexMetaFile.Read(l);
+                    var built = meta is not null ? $"; built by {meta.Version} at {FormatUtc(meta.BuiltUtc)}" : "";
+                    result.Add(new(l, $"indexed, {t.DocumentCount:N0} files (as of {System.DateTime.UtcNow:u}{built})", true, true));
+                }
             }
             else result.Add(new(l, $"not indexed - run: codecompass index \"{l}\"", true, false));
         }
         return result;
     }
+
+    // Render an ISO-8601 ("o") build timestamp as a compact UTC "u" string; fall back to raw if it won't parse.
+    private static string FormatUtc(string iso) =>
+        System.DateTime.TryParse(iso, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind, out var dt)
+            ? dt.ToUniversalTime().ToString("u") : iso;
 
     // True if `a` and `b` are the same directory or one is nested in the other (so linking `b` is redundant).
     private static bool Nested(string a, string b, out string why)

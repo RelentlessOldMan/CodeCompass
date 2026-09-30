@@ -141,6 +141,14 @@ static int CmdSurvey(string[] args)
         int suggest = (int)Math.Ceiling(Mb(r.OverFileCap[0].Bytes));
         Console.WriteLine($"  To include them in text search, set \"maxFileMb\": {suggest} in .codecompass.json.");
     }
+
+    // Why this count won't equal `index` / `link list` - stated up front so a mismatch reads as by-design,
+    // not a bug (a real field-report question: one tool, several file counts).
+    Console.WriteLine();
+    Console.WriteLine("Note: 'Indexed' is a pre-index ESTIMATE from directory metadata, not a count of a built index.");
+    Console.WriteLine("  It is an upper bound and is expected to differ from 'codecompass index' / 'link list':");
+    Console.WriteLine("  content-detected binary files are dropped when the index is actually built, and a live repo");
+    Console.WriteLine("  changes between runs. Different numbers here are by design, not a discrepancy.");
     return 0;
 }
 
@@ -680,6 +688,10 @@ static int CmdIndex(string[] args)
     Console.WriteLine($"Throughput: {throughput:F1} MB/s across {s.Cores} core(s)  ({perCore:F1} MB/s/core)");
     Console.WriteLine($"Trigram postings: {s.TrigramPostings:N0}   Symbols: {s.Symbols:N0}");
     Console.WriteLine($"Text index: {s.IndexBytes / (1024.0 * 1024.0):F1} MB ({ratio:F2}x corpus)");
+    // Build stamp: this count is a build-run stat (files THIS build added). `link list` shows the LIVE count
+    // as of when it runs, which drifts as the repo changes - the stamp makes the two obviously different reads.
+    var idxMeta = CodeCompass.Core.Storage.IndexMetaFile.Read(root);
+    if (idxMeta is not null) Console.WriteLine($"Built by {idxMeta.Version} at {idxMeta.BuiltUtc}");
     PublishReady(root, (int)s.Files); // so the status line shows "ready" even before the MCP server loads
     return 0;
 }

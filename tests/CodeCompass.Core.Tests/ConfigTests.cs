@@ -210,4 +210,29 @@ public class ConfigTests
         }
         finally { Environment.SetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB", old); }
     }
+
+    // Survey now walks through the shared FileWalker (no second hand-rolled traversal), so it prunes ignored
+    // directories exactly like a build, and its over-file-cap list means "excluded by SIZE" only - an over-cap
+    // file that's ALSO an ignored asset type (a big .png) is excluded because it's an asset, not the cap.
+    [Fact]
+    public void Survey_SharedWalk_PrunesIgnoredDirs_And_OverCapIsSizeOnly()
+    {
+        var old = Environment.GetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB", "5"); // 5 MB file cap
+            using var repo = new TempRepo();
+            repo.WriteBytes("keep.cs", new byte[100]);                        // indexed
+            repo.WriteBytes("node_modules/dep.js", new byte[100]);            // ignored dir -> excluded entirely
+            repo.WriteBytes("big.png", new byte[(int)(6 * 1024 * 1024)]);     // over cap, but asset type -> NOT size-excluded
+            repo.WriteBytes("big.cs", new byte[(int)(6 * 1024 * 1024)]);      // over cap, real code -> size-excluded
+
+            var r = Surveyor.Survey(repo.Root);
+            Assert.Equal(1, r.IndexedFiles);                                  // only keep.cs (node_modules pruned)
+            Assert.Contains(r.OverFileCap, x => x.Path == "big.cs");          // excluded by SIZE
+            Assert.DoesNotContain(r.OverFileCap, x => x.Path == "big.png");   // excluded by TYPE, not size
+            Assert.DoesNotContain(r.OverFileCap, x => x.Path.Contains("node_modules"));
+        }
+        finally { Environment.SetEnvironmentVariable("CODECOMPASS_MAX_FILE_MB", old); }
+    }
 }
