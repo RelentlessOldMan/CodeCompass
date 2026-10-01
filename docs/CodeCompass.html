@@ -100,10 +100,11 @@ codecompass watch   &lt;path&gt;            auto-reindex on file changes
 codecompass search  &lt;path&gt; &lt;query&gt;     literal text search  -> file:line:col
 codecompass def     &lt;path&gt; &lt;name&gt;      go-to-definition
 codecompass refs    &lt;path&gt; &lt;name&gt;      references (semantic C#/C++, lexical elsewhere)
+codecompass callees &lt;path&gt; &lt;name&gt;      in-repo methods a C# method calls (C# only)
 codecompass symbols &lt;path&gt; &lt;substr&gt;    symbol-name search
 codecompass survey  &lt;path&gt;            report what the size caps skip + suggest config
 codecompass logs                      show the log folder and files
-codecompass version                   print the build version (e.g. 1.0.52+a76d3245)
+codecompass version                   print the build version (1.0.&lt;commit-count&gt;+&lt;short-sha&gt;)
 codecompass symstats &lt;path&gt;           profile symbol-file sizes + parse cost per language
 codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)
 codecompass statusline [--wrap "..."] Claude Code status-line segment (index state)

@@ -128,6 +128,7 @@ codecompass watch   <path>            auto-reindex on file changes
 codecompass search  <path> <query> [-i]  literal text search (-i = case-insensitive)
 codecompass def     <path> <name>     go-to-definition (file:startLine-endLine)
 codecompass refs    <path> <name>     references (semantic C#/C++, lexical elsewhere)
+codecompass callees <path> <name>     in-repo methods a C# method calls (C# only)
 codecompass symbols <path> <substr>   symbol-name search
 codecompass survey  <path>            report what the size caps skip + suggest config
 codecompass init    <path>            write a documented .codecompass.json to edit
@@ -138,7 +139,7 @@ codecompass doctor  <path>            diagnose a repo's index (health + metadata
 codecompass cache   [list|gc|clear <path>|clear-all]   inspect/manage the per-user index cache
 codecompass report  <path> [--no-logs]  zip diagnostics + logs for a bug report (never source)
 codecompass logs                      show the log folder and files
-codecompass version                   print the build version (e.g. 1.0.52+a76d3245)
+codecompass version                   print the build version (1.0.<commit-count>+<short-sha>)
 ```
 
 ### Choosing `maxSymbolMb` from data
@@ -179,6 +180,7 @@ editing source:
 | `CODECOMPASS_MAX_SYMBOL_MB` | Skip tree-sitter symbol extraction above this size (default 1). Bounds per-file parse time; raise it if you have large *valid* code whose symbols you want (run `symstats` first). Raising it is safe: above 1 MB, files that are overwhelmingly numeric/hex data (generated arrays — slow to parse, zero symbols) are auto-skipped by content, so only large *real* code gets parsed. |
 | `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing entirely (default 2000, i.e. 2 GB). Files ≥128 MB are indexed by **streaming** (bounded memory), so a high cap won't blow up RAM; its real cost is read time on a full build (large files get re-read), so lower it per-repo if you don't want big generated files indexed. |
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
+| `CODECOMPASS_MAX_AUTO_MB` | Workspaces larger than this (default 100 MB) are left for a one-time CLI `codecompass index` instead of auto-indexing inside a tool call. |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if a build stalls or a single file is held longer than this (default 60, min 5). The warning names the exact file(s) each worker is stuck on, so a pathologically slow file is identified rather than guessed. |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
 | `CODECOMPASS_WALK_THREADS` | Concurrent directory reads during the walk (default min(cores, 8); 1 = serial). Over a high-latency **network share** this overlaps the per-directory round-trips (SMB2 lets many be in flight), which is the main lever on a slow `update`/`index` walk; no benefit locally. |
@@ -208,7 +210,7 @@ is always visible (`codecompass survey` / `codecompass logs`).
 
 Two tiers, both driven by one script — **`check.ps1`**:
 
-- **`./check.ps1`** — the fast xUnit suite via `dotnet test` (~180 tests, ~15 s). Run it constantly.
+- **`./check.ps1`** — the fast xUnit suite via `dotnet test` (~15 s). Run it constantly.
   This includes **crash/corruption fuzzing**: every on-disk cache artifact is byte-flipped and
   truncated in turn, asserting the index degrades gracefully (never crashes the process) and a rebuild
   always recovers; stray orphan/temp files are ignored.
@@ -289,6 +291,18 @@ union), so each translation unit gets its own flags. If the same file appears in
 first-listed wins (any valid parse resolves the symbol; we don't reproduce a specific target's object
 code). One thing it does *not* do: parse the same file multiple times under different configs to capture
 references inside both `#ifdef` branches. (Env: `CODECOMPASS_COMPILE_COMMANDS`, `;`-separated.)
+
+### Tuning C/C++ find-references (speed vs. coverage)
+
+`find_references` for C/C++ parses candidate translation units with clang, so a few knobs trade coverage
+for speed and memory. CodeCompass names the relevant one in its output when a query is affected, so you
+rarely set these blind.
+
+| Env var | Effect |
+|---|---|
+| `CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES` | Above this many candidate C/C++ files (default **400**) the semantic parse is skipped and the fast lexical layer answers instead (disclosed as lexical). A *latency* guard for pathologically-broad symbols in generated code — parsing hundreds-to-thousands of translation units would grind for minutes and fall back to lexical anyway. Set to **0** to always attempt a full semantic parse. |
+| `CODECOMPASS_CPP_SESSION_MEM_MB` | Working-set ceiling for the semantic pass across a session (default scales with RAM). Raise it to let broad queries parse more candidates before falling back to lexical. |
+| `CODECOMPASS_CPP_QUERY_MEM_MB` | How much a *single* query may grow the working set before it stops parsing further candidates and discloses partial coverage. |
 
 ## Staying fresh (out-of-session changes)
 
