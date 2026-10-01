@@ -374,7 +374,13 @@ public sealed class ClangCppAnalyzer : IDisposable
         var args = GetArgs(fullPath);
         var error = CXTranslationUnit.TryParse(index, fullPath, args,
             ReadOnlySpan<CXUnsavedFile>.Empty,
-            CXTranslationUnit_Flags.CXTranslationUnit_None,
+            // KeepGoing: don't abort the whole parse at the first FATAL diagnostic (typically a missing #include).
+            // Without it clang stops emitting AST at the fatal error, so any reference AFTER it in the TU is
+            // silently lost; with it the parse continues and those references are still captured (the unresolved
+            // #include is still recorded + disclosed via CollectUnresolvedIncludes). A completeness win for messy/
+            // partial trees - deterministic, no latency change, same references a clean parse would find plus the
+            // ones that used to fall off the cliff after a fatal error.
+            CXTranslationUnit_Flags.CXTranslationUnit_KeepGoing,
             out CXTranslationUnit tu);
         if (error != CXErrorCode.CXError_Success) return; // TU couldn't be produced at all - not counted as parsed
 
