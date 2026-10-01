@@ -36,6 +36,26 @@ public class ClangRefsFallbackTests
         Assert.Equal(r.CandidateTus, r.ParsedTus);
     }
 
+    // KeepGoing: a reference that sits AFTER a FATAL #include in the same TU must still be captured semantically.
+    // Without CXTranslationUnit_KeepGoing clang aborts the parse at the missing header, so the later call site is
+    // silently lost; with it, the parse continues and the (resolvable) reference is found - the unresolved include
+    // is still recorded + disclosed. Uses a RESOLVABLE symbol (declared here + defined next door) so the thing
+    // under test is purely "a reference past a fatal error survives", not an undeclared-symbol artifact (contrast
+    // Analyzer_MissingInclude_ReportsUnresolvedAndZeroSemantic above, where the symbol is genuinely undeclared).
+    [Fact]
+    public void Analyzer_ReferenceAfterFatalInclude_StillFoundSemantically()
+    {
+        using var repo = new TempRepo();
+        repo.Write("hot.c", "int hot(int x){ return x + 1; }\n");
+        repo.Write("use.c", "int hot(int);\n#include \"missing_after_decl.h\"\nint use(void){ return hot(7); }\n");
+
+        var r = new ClangCppAnalyzer(repo.Root).FindReferencesDetailed("hot");
+
+        Assert.Contains("missing_after_decl.h", r.UnresolvedIncludes);   // the fatal error WAS hit (and disclosed)
+        Assert.NotEmpty(r.Locations);                                    // ...yet the reference after it survived
+        Assert.Contains(r.Locations, l => l.RelativePath.Replace('\\', '/').EndsWith("use.c")); // the post-#include call site
+    }
+
     // End-to-end: the CLI `refs` command must NOT return a bare zero here - it must backfill lexical. Skips
     // softly if the CLI exe isn't built (bare `dotnet test`); the release gate builds it and runs this for real.
     [Fact]
