@@ -43,9 +43,18 @@ public static class ReferenceMerge
     /// covered): how many candidate TUs parsed, whether the memory budget stopped it, and which #includes were
     /// unresolved. Each host wraps these bits in its own surface prose (CLI stderr line vs MCP note); sharing
     /// the bits keeps the substance (wording, thresholds, header list) identical across both.</summary>
-    public static List<string> CppCoverageBits(int cppParsed, int cppCandidates, bool memoryStopped, IReadOnlyList<string> unresolvedIncludes)
+    public static List<string> CppCoverageBits(int cppParsed, int cppCandidates, bool memoryStopped, IReadOnlyList<string> unresolvedIncludes, bool tooManyCandidates = false)
     {
         var bits = new List<string>();
+        // A deliberate broad-symbol short-circuit: the semantic pass was skipped UP FRONT because the candidate
+        // set exceeded the limit (parsing it would grind for minutes and fall back to lexical anyway). Say so
+        // distinctly - and DON'T also emit the generic "0/N parsed"/memory-stop lines, which would misread the
+        // intentional skip as a failure. Name the knob so a caller who wants precision can override it.
+        if (tooManyCandidates)
+        {
+            bits.Add($"{cppCandidates:N0} candidate C/C++ file(s) exceeded the semantic-parse limit, so references are shown lexically (raise CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES, or set it to 0, to force a semantic parse)");
+            return bits;
+        }
         if (cppParsed < cppCandidates) bits.Add($"{cppParsed:N0}/{cppCandidates:N0} candidate C/C++ file(s) parsed");
         if (memoryStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_SESSION_MEM_MB for the per-session ceiling or CODECOMPASS_CPP_QUERY_MEM_MB for a single query)");
         if (unresolvedIncludes.Count > 0)
