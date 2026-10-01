@@ -202,27 +202,50 @@ paths-free bundle). Safe to run on someone else's proprietary code.</p>
 </ul>
 
 <h2>Performance</h2>
-<p class="muted">Measured on: <b>Intel Core i7-8700</b> (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro, .NET 8.
-A modern many-core laptop (e.g. 32 threads) will be substantially faster to build.
-These figures were recorded <b>before</b> the EcoQoS / E-core throttling opt-out, so build throughput is
-conservative here &mdash; expect higher on hybrid CPUs (up to ~2&times; where the OS was previously parking
-the process on efficiency cores).</p>
+<p class="muted">Measured on: <b>Intel Core i7-8700</b> (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro, .NET 8,
+with the EcoQoS / E-core throttling opt-out in effect. A modern many-core machine will be substantially faster to build.</p>
+
+<h3>Per-tool latency by repo (cold vs. warm)</h3>
+<p>Every tool, timed two ways, over seven pinned public repos plus a huge generated C/C++ corpus (local <b>and</b> over an
+SMB/UNC network share). Reproduce any row with <code>bench-matrix.ps1</code>, which fetches the public corpora on demand.</p>
+<ul>
+<li><b>cold</b> &mdash; a fresh CLI process per query. What you pay the <i>first</i> time a tool is used after launch: process
+start + memory-map open + (for <code>find_references</code>) a cold analyzer build. The only number a one-shot CLI user sees.</li>
+<li><b>warm</b> &mdash; the same query at steady state against one long-lived MCP server (how an agent uses it via Claude
+Code / Codex): the index is mapped and the semantic analyzer is resident.</li>
+</ul>
+<p>Each query cell is <b>cold / warm</b>, median milliseconds. <code>find_references</code> latency depends on the symbol, so the
+battery picks the <b>broadest</b> symbols (its worst case) and reports median and max; <b>refs 1st-call</b> is the one-time
+analyzer build paid on the session's first <code>find_references</code>.</p>
 <table>
-<thead><tr><th>Repo</th><th>Lang</th><th>Source</th><th>Build</th><th>MB/s</th><th>Query p50 / p95</th><th>Incremental</th><th>RAM (heap / peak)</th><th>Correct</th></tr></thead>
+<thead><tr><th>Repo</th><th>Lang</th><th>Files</th><th>Size</th><th>Build</th><th>search_code</th><th>find_definition</th><th>search_symbols</th><th>find_references (med)</th><th>find_references (max)</th><th>refs 1st-call</th></tr></thead>
 <tbody>
-<tr><td>requests</td><td>Python</td><td class="num">2.7 MB</td><td class="num">1.1 s</td><td class="num">2.5</td><td class="num">1.2 / 53 ms</td><td class="num">23 ms</td><td class="num">0 / 127 MB</td><td class="yes">PASS</td></tr>
-<tr><td>fmt</td><td>C++</td><td class="num">3.1 MB</td><td class="num">0.4 s</td><td class="num">8.6</td><td class="num">0.9 / 3 ms</td><td class="num">19 ms</td><td class="num">0 / 107 MB</td><td class="yes">PASS</td></tr>
-<tr><td>EF Core</td><td>C#</td><td class="num">63 MB</td><td class="num">3.7 s</td><td class="num">17</td><td class="num">1.5 / 16 ms</td><td class="num">20 ms</td><td class="num">3 / 170 MB</td><td class="yes">PASS</td></tr>
-<tr><td>TypeScript</td><td>TS</td><td class="num">325 MB</td><td class="num">21 s</td><td class="num">15</td><td class="num">1.3 / 3 ms</td><td class="num">60 ms</td><td class="num">38 / 270 MB</td><td class="yes">PASS</td></tr>
-<tr><td>Godot</td><td>C++</td><td class="num">168 MB</td><td class="num">9.5 s</td><td class="num">18</td><td class="num">0.9 / 9 ms</td><td class="num">23 ms</td><td class="num">5 / 587 MB</td><td class="yes">PASS</td></tr>
-<tr><td>Roslyn</td><td>C#</td><td class="num">344 MB</td><td class="num">15 s</td><td class="num">23</td><td class="num">1.3 / 3 ms</td><td class="num">32 ms</td><td class="num">12 / 332 MB</td><td class="yes">PASS</td></tr>
-<tr><td>LLVM</td><td>C/C++</td><td class="num">1.3 GB</td><td class="num">51 s</td><td class="num">25</td><td class="num">0.8 / 7 ms</td><td class="num">117 ms</td><td class="num">63 / 482 MB</td><td class="yes">PASS</td></tr>
+<tr><td>requests</td><td>Python</td><td class="num">118</td><td class="num">4.9 MB</td><td class="num">1.3 s</td><td class="num">199 / 3</td><td class="num">202 / 1</td><td class="num">202 / 1</td><td class="num">1014 / 6</td><td class="num">1023 / 12</td><td class="num">0.7 s</td></tr>
+<tr><td>fmt</td><td>C++</td><td class="num">207</td><td class="num">3.2 MB</td><td class="num">0.8 s</td><td class="num">213 / 3</td><td class="num">202 / 1</td><td class="num">202 / 1</td><td class="num">27830 / 18937</td><td class="num">32938 / 39873</td><td class="num">50 s</td></tr>
+<tr><td>EF Core</td><td>C#</td><td class="num">5,002</td><td class="num">82 MB</td><td class="num">4.2 s</td><td class="num">208 / 6</td><td class="num">202 / 1</td><td class="num">202 / 6</td><td class="num">14252 / 900</td><td class="num">18896 / 5644</td><td class="num">13 s</td></tr>
+<tr><td>TypeScript</td><td>TS</td><td class="num">72,171</td><td class="num">349 MB</td><td class="num">18.6 s</td><td class="num">404 / 25</td><td class="num">229 / 1</td><td class="num">257 / 13</td><td class="num">1484 / 96</td><td class="num">1649 / 109</td><td class="num">0.8 s</td></tr>
+<tr><td>Godot</td><td>C++</td><td class="num">9,937</td><td class="num">196 MB</td><td class="num">8.7 s</td><td class="num">402 / 7</td><td class="num">202 / 1</td><td class="num">202 / 9</td><td class="num">16452 / 14559</td><td class="num">22382 / 21090</td><td class="num">20 s</td></tr>
+<tr><td>Roslyn</td><td>C#</td><td class="num">19,980</td><td class="num">372 MB</td><td class="num">12.2 s</td><td class="num">245 / 18</td><td class="num">202 / 2</td><td class="num">238 / 32</td><td class="num">34139 / 1652</td><td class="num">69523 / 10316</td><td class="num">31 s</td></tr>
+<tr><td>LLVM</td><td>C/C++</td><td class="num">132,213</td><td class="num">1.5 GB</td><td class="num">41.4 s</td><td class="num">420 / 36</td><td class="num">406 / 3</td><td class="num">405 / 3</td><td class="num">2228 / 700</td><td class="num">104204 / 96073</td><td class="num">105 s</td></tr>
+<tr><td>generated C/C++ &mdash; <b>local</b></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">16m 22s</td><td class="num">811 / 4</td><td class="num">627 / 21</td><td class="num">605 / 2</td><td class="num">1826 / 251</td><td class="num">1888 / 256</td><td class="num">1.0 s</td></tr>
+<tr><td>generated C/C++ &mdash; <b>SMB/UNC</b></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">20m 38s</td><td class="num">2139 / 9</td><td class="num">1868 / 13</td><td class="num">1862 / 2</td><td class="num">5858 / 344</td><td class="num">6525 / 402</td><td class="num">4.1 s</td></tr>
 </tbody>
 </table>
-<p><b>How to read this:</b> <i>Build</i> is the first full index (parallel across cores; faster on more cores). <i>Query</i> is search
-latency &mdash; typically ~1 ms. <i>Incremental</i> is how fast a small edit is reflected (roughly flat regardless of repo size).
-<i>RAM</i> is managed heap / peak working set &mdash; note it stays small even for a 1.3 GB repo because the indexes are
-memory-mapped, not loaded into RAM. <i>Correct</i> = trigram search verified against a brute-force scan on the real files.</p>
+<p>The <b>generated C/C++</b> corpus is a synthetic stress tree &mdash; <b>66,337 files / ~88 GB</b>, single source files up to
+<b>1.4 GB</b> &mdash; indexed once on local disk and once over an SMB/UNC share, to show behaviour at extreme scale and across a network.</p>
+<p><b>How to read it:</b></p>
+<ul>
+<li><code>search_code</code> / <code>find_definition</code> / <code>search_symbols</code> are index-backed: warm they answer in
+<b>~1&ndash;36 ms</b> on every repo (even 132 k files, even over SMB). Cold is dominated by process start + map-open (~0.2&ndash;2 s)
+&mdash; exactly what the persistent MCP server amortizes away.</li>
+<li><code>find_references</code> on <b>C#</b> warms up dramatically: Roslyn's workspace is built once (the 13&ndash;31 s
+<i>refs 1st-call</i>), then resident, so calls drop from tens of seconds cold to <b>sub-second&ndash;few-seconds</b> warm.</li>
+<li><code>find_references</code> on <b>C/C++</b> shows little warm speedup: each call runs a <b>fresh clang subprocess</b> so the
+long-lived server never accumulates libclang's native memory (the deliberate memory-safety trade-off). A broad C/C++ query
+costs seconds <i>every</i> time &mdash; worst on template-heavy trees (fmt, LLVM). The flip side shows on the 66 k-file corpus:
+its broadest symbols trip the short-circuit to lexical, so warm refs land at <b>251 ms (local) / 344 ms (SMB)</b> &mdash;
+faster than 207-file fmt. Tune the cutoff with <code>CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES</code>.</li>
+</ul>
 <p>At ~25 MB/s a first index of a <b>dozens-of-GB</b> repo is on the order of minutes-to-tens-of-minutes (less on a many-core
 machine), and searching it afterward uses only a few hundred MB of RAM &mdash; comfortably within a 16 GB laptop.</p>
 
@@ -235,18 +258,18 @@ are all memory-mapped on disk, not loaded into RAM, so <b>searching</b> a repo t
 <code>CODECOMPASS_SEGMENT_MB</code> / <code>CODECOMPASS_THREADS</code>.
 </div>
 
-<h3>Query latency by repo shape (incl. network shares)</h3>
-<p class="muted">Measured on an <b>88 GB / 66,337-file</b> machine-generated C/C++ corpus (332k symbols, 29&nbsp;M trigram
+<h3>A closer look: <code>find_references</code> on the SMB/UNC row</h3>
+<p class="muted">The same <b>88 GB / 66,337-file</b> machine-generated C/C++ corpus (332k symbols, 29&nbsp;M trigram
 postings, single files up to 1.4&nbsp;GB, 2,925 over the 1&nbsp;MB symbol cap) indexed and queried <b>over an SMB/UNC
-share</b> on the machine above (32&nbsp;GB RAM) &mdash; the hard case: a huge tree on the far end of a network.</p>
+share</b> &mdash; the SMB/UNC row above, broken out per operation (cold CLI; warm figures are in the matrix).</p>
 <table>
-<thead><tr><th>Operation</th><th>Over UNC</th><th style="text-align:left">Why</th></tr></thead>
+<thead><tr><th>Operation</th><th>Over UNC (cold)</th><th style="text-align:left">Why</th></tr></thead>
 <tbody>
-<tr><td>First index</td><td class="num">~23 min</td><td style="text-align:left">64&nbsp;MB/s, read-bound over the wire; 3.8&nbsp;GB peak working set, 0 files dropped.</td></tr>
-<tr><td><code>search_code</code></td><td class="num">~1.9 s</td><td style="text-align:left">Trigram candidates + the block/positional sidecar &mdash; reads only candidate blocks, not whole files.</td></tr>
-<tr><td><code>find_definition</code></td><td class="num">~1.8 s</td><td style="text-align:left">Memory-mapped symbol index.</td></tr>
-<tr><td><code>search_symbols</code></td><td class="num">~1.4 s</td><td style="text-align:left">Memory-mapped symbol index.</td></tr>
-<tr><td><code>find_references</code></td><td class="num">~6.5 s</td><td style="text-align:left">Broad symbol (1,405 candidate C/C++ files) &mdash; see below.</td></tr>
+<tr><td>First index</td><td class="num">~20.6 min</td><td style="text-align:left">read-bound over the wire; 3.8&nbsp;GB peak working set, 0 files dropped.</td></tr>
+<tr><td><code>search_code</code></td><td class="num">~2.1 s</td><td style="text-align:left">Trigram candidates + the block/positional sidecar &mdash; reads only candidate blocks, not whole files. (~9 ms warm.)</td></tr>
+<tr><td><code>find_definition</code></td><td class="num">~1.9 s</td><td style="text-align:left">Memory-mapped symbol index. (~13 ms warm.)</td></tr>
+<tr><td><code>search_symbols</code></td><td class="num">~1.9 s</td><td style="text-align:left">Memory-mapped symbol index. (~2 ms warm.)</td></tr>
+<tr><td><code>find_references</code></td><td class="num">~5.9 s</td><td style="text-align:left">Broad symbol &mdash; short-circuited to lexical (~0.3 s warm); see below.</td></tr>
 </tbody>
 </table>
 <p><b>Why <code>find_references</code> is the outlier:</b> it is the only <i>parse-based</i> tool &mdash; for C/C++ it runs

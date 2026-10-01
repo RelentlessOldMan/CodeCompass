@@ -431,21 +431,57 @@ The command is fast, never errors out loudly, and publishing is off via `statusL
 ## Performance
 
 Measured on an **Intel Core i7-8700** (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro,
-.NET 8. A modern many-core laptop builds substantially faster.
+.NET 8, with the EcoQoS / E-core throttling opt-out in effect. A modern many-core machine builds
+substantially faster.
 
-> **Note:** these figures were recorded *before* the EcoQoS / E-core throttling opt-out, so build
-> throughput is conservative here — expect higher on hybrid CPUs (up to ~2× when the OS was
-> previously parking the process on efficiency cores).
+### Per-tool latency by repo (cold vs. warm)
 
-| Repo | Lang | Source | Build | MB/s | Query p50/p95 | RAM (heap/peak) |
-|---|---|--:|--:|--:|--:|--:|
-| requests | Python | 2.7 MB | 1.1 s | 2.5 | 1.2 / 53 ms | 0 / 127 MB |
-| fmt | C++ | 3.1 MB | 0.4 s | 8.6 | 0.9 / 3 ms | 0 / 107 MB |
-| EF Core | C# | 63 MB | 3.7 s | 17 | 1.5 / 16 ms | 3 / 170 MB |
-| TypeScript | TS | 325 MB | 21 s | 15 | 1.3 / 3 ms | 38 / 270 MB |
-| Godot | C++ | 168 MB | 9.5 s | 18 | 0.9 / 9 ms | 5 / 587 MB |
-| Roslyn | C# | 344 MB | 15 s | 23 | 1.3 / 3 ms | 12 / 332 MB |
-| LLVM | C/C++ | 1.3 GB | 51 s | 25 | 0.8 / 7 ms | 63 / 482 MB |
+Every tool, timed two ways, over seven pinned public repos plus a huge generated C/C++ corpus
+(local **and** over an SMB/UNC network share). Reproduce any row with
+[`bench-matrix.ps1`](bench-matrix.ps1) — it fetches the public corpora on demand and prints this table.
+
+- **cold** — a fresh CLI process per query (`codecompass search|def|symbols|refs`). What you pay the
+  *first* time a tool is used after launch: process start + memory-map open + (for `find_references`)
+  a cold analyzer build. The only number a one-shot CLI user ever sees.
+- **warm** — the same query at steady state against one long-lived MCP server (how an agent actually
+  uses it via Claude Code / Codex): the index is mapped and the semantic analyzer is resident.
+
+Each query cell is **cold / warm**, median milliseconds. `find_references` latency depends on the
+symbol, so the battery picks the **broadest** symbols in each repo (its worst case) and reports the
+median and the max; **refs 1st-call** is the one-time analyzer build paid on the session's first
+`find_references`.
+
+| Repo | Lang | Files | Size | Build | search_code | find_definition | search_symbols | find_references (med) | find_references (max) | refs 1st-call |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| requests | Python | 118 | 4.9 MB | 1.3 s | 199 / 3 | 202 / 1 | 202 / 1 | 1014 / 6 | 1023 / 12 | 0.7 s |
+| fmt | C++ | 207 | 3.2 MB | 0.8 s | 213 / 3 | 202 / 1 | 202 / 1 | 27830 / 18937 | 32938 / 39873 | 50 s |
+| EF Core | C# | 5,002 | 82 MB | 4.2 s | 208 / 6 | 202 / 1 | 202 / 6 | 14252 / 900 | 18896 / 5644 | 13 s |
+| TypeScript | TS | 72,171 | 349 MB | 18.6 s | 404 / 25 | 229 / 1 | 257 / 13 | 1484 / 96 | 1649 / 109 | 0.8 s |
+| Godot | C++ | 9,937 | 196 MB | 8.7 s | 402 / 7 | 202 / 1 | 202 / 9 | 16452 / 14559 | 22382 / 21090 | 20 s |
+| Roslyn | C# | 19,980 | 372 MB | 12.2 s | 245 / 18 | 202 / 2 | 238 / 32 | 34139 / 1652 | 69523 / 10316 | 31 s |
+| LLVM | C/C++ | 132,213 | 1.5 GB | 41.4 s | 420 / 36 | 406 / 3 | 405 / 3 | 2228 / 700 | 104204 / 96073 | 105 s |
+| generated C/C++ — **local** | C/C++ | 66,337 | 88 GB | 16m 22s | 811 / 4 | 627 / 21 | 605 / 2 | 1826 / 251 | 1888 / 256 | 1.0 s |
+| generated C/C++ — **SMB/UNC** | C/C++ | 66,337 | 88 GB | 20m 38s | 2139 / 9 | 1868 / 13 | 1862 / 2 | 5858 / 344 | 6525 / 402 | 4.1 s |
+
+The **generated C/C++** corpus is a synthetic stress tree — **66,337 files / ~88 GB**, with single
+source files up to **1.4 GB** — indexed once on local disk and once over an SMB/UNC share, to show
+behaviour at extreme scale and across a network.
+
+**How to read it:**
+
+- **`search_code` / `find_definition` / `search_symbols`** are index-backed: warm they answer in
+  **~1–36 ms** on every repo (even 132 k files, even over SMB). Cold is dominated by process start +
+  map-open (~0.2–2 s), which is exactly what the persistent MCP server exists to amortize away.
+- **`find_references` on C#** warms up dramatically — Roslyn's workspace is built once (the 13–31 s
+  *refs 1st-call*), then resident, so subsequent calls drop from tens of seconds cold to
+  **sub-second–few-seconds** warm (EF Core 900 ms, Roslyn 1.7 s).
+- **`find_references` on C/C++** shows little warm speedup: each call runs a **fresh clang subprocess**
+  so the long-lived server never accumulates libclang's native memory (the deliberate v1.0.176
+  memory-safety trade-off). So a broad C/C++ reference query costs seconds *every* time — worst on
+  template-heavy trees (fmt, LLVM). The flip side is visible on the 66 k-file corpus: its broadest
+  symbols trip the v1.0.210 short-circuit to lexical, so warm refs land at **251 ms (local) /
+  344 ms (SMB)** — *faster than 207-file fmt*. Tune this cutoff with
+  `CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES` (see above).
 
 **Scale check:** an aggregated **10.4 GB / ~1.1 million file** corpus indexed in **7m48s** (22 MB/s)
 using **792 MB heap / 2.2 GB peak working set**, with queries still ~1 ms (p95 7.9 ms). Memory stays
