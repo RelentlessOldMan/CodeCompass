@@ -234,6 +234,30 @@ are all memory-mapped on disk, not loaded into RAM, so <b>searching</b> a repo t
 <code>CODECOMPASS_SEGMENT_MB</code> / <code>CODECOMPASS_THREADS</code>.
 </div>
 
+<h3>Query latency by repo shape (incl. network shares)</h3>
+<p class="muted">Measured on an <b>88 GB / 66,337-file</b> machine-generated C/C++ corpus (332k symbols, 29&nbsp;M trigram
+postings, single files up to 1.4&nbsp;GB, 2,925 over the 1&nbsp;MB symbol cap) indexed and queried <b>over an SMB/UNC
+share</b> on the machine above (32&nbsp;GB RAM) &mdash; the hard case: a huge tree on the far end of a network.</p>
+<table>
+<thead><tr><th>Operation</th><th>Over UNC</th><th style="text-align:left">Why</th></tr></thead>
+<tbody>
+<tr><td>First index</td><td class="num">~23 min</td><td style="text-align:left">64&nbsp;MB/s, read-bound over the wire; 3.8&nbsp;GB peak working set, 0 files dropped.</td></tr>
+<tr><td><code>search_code</code></td><td class="num">~1.9 s</td><td style="text-align:left">Trigram candidates + the block/positional sidecar &mdash; reads only candidate blocks, not whole files.</td></tr>
+<tr><td><code>find_definition</code></td><td class="num">~1.8 s</td><td style="text-align:left">Memory-mapped symbol index.</td></tr>
+<tr><td><code>search_symbols</code></td><td class="num">~1.4 s</td><td style="text-align:left">Memory-mapped symbol index.</td></tr>
+<tr><td><code>find_references</code></td><td class="num">~6.5 s</td><td style="text-align:left">Broad symbol (1,405 candidate C/C++ files) &mdash; see below.</td></tr>
+</tbody>
+</table>
+<p><b>Why <code>find_references</code> is the outlier:</b> it is the only <i>parse-based</i> tool &mdash; for C/C++ it runs
+clang over the candidate translation units (Roslyn for C#), where the others just read memory-mapped indexes. On an
+ordinary symbol that is a handful of TUs and still ~1&ndash;2&nbsp;s. On a <i>pathologically-broad</i> symbol &mdash;
+hundreds to thousands of candidate files, typical of generated code &mdash; a full semantic parse would grind for minutes
+and, over a share, hit its memory budget partway and fall back to lexical anyway. So above
+<code>CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES</code> (default 400) the semantic pass is skipped up front and the fast
+lexical layer answers (~6.5&nbsp;s here, down from ~131&nbsp;s), with the result <b>disclosed as lexical</b>. Raise that
+knob (or set it to 0) to force a full semantic parse when you want precision over speed. The text and symbol lookups stay
+~1&ndash;2&nbsp;s regardless of repo size or the network.</p>
+
 <h2>Logs &amp; troubleshooting</h2>
 <p>CodeCompass keeps a self-limiting log on disk so problems can be diagnosed after the fact
 without watching it live. Everything lives in one folder &mdash; run <code>codecompass logs</code> to

@@ -71,6 +71,7 @@ public static class ClangSubprocess
         public int ParsedTus { get; set; }
         public List<string> UnresolvedIncludes { get; set; } = new();
         public bool MemoryStopped { get; set; }
+        public bool TooManyCandidates { get; set; }
     }
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
@@ -201,7 +202,7 @@ public static class ClangSubprocess
                 .Select(l => new SemanticLocation(l.RelativePath, l.Line, l.Column, l.LineText, l.Root ?? ""))
                 .ToList();
             result = new ClangCppAnalyzer.CppRefResult(locs, resp.CandidateTus, resp.ParsedTus,
-                resp.UnresolvedIncludes ?? new List<string>(), resp.MemoryStopped);
+                resp.UnresolvedIncludes ?? new List<string>(), resp.MemoryStopped, resp.TooManyCandidates);
             return true;
         }
         catch (Exception ex)
@@ -306,6 +307,7 @@ public static class ClangSubprocess
                 CandidateTus = res.CandidateTus,
                 ParsedTus = res.ParsedTus,
                 MemoryStopped = res.MemoryStopped,
+                TooManyCandidates = res.TooManyCandidates,
                 UnresolvedIncludes = res.UnresolvedIncludes.ToList(),
                 Locations = res.Locations.Select(l => new LocDto
                 {

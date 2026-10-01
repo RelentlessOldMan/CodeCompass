@@ -1083,7 +1083,7 @@ static int CmdRefs(string[] args)
     // logs, so a CLI run over a UNC root can be compared against a local run to localize a refs-count gap.
     if (RefsDebug.On)
         RefsDebug.Log($"CLI name='{name}' cppCand={cppRes.CandidateTus} cppParsed={cppRes.ParsedTus} " +
-            $"memStopped={cppRes.MemoryStopped} unresolvedIncludes={cppRes.UnresolvedIncludes.Count} " +
+            $"memStopped={cppRes.MemoryStopped} tooBroad={cppRes.TooManyCandidates} unresolvedIncludes={cppRes.UnresolvedIncludes.Count} " +
             $"cppIncomplete={cppIncomplete} csharpIncomplete={csharpIncomplete} => semC#={cs.Count} semC/C++={cpp.Count} lexical={lexical}");
 
     // Honest disclosure (same as MCP): if candidate C/C++ TUs failed to parse or had unresolved #includes,
@@ -1093,7 +1093,7 @@ static int CmdRefs(string[] args)
     // the same note in its returned result.
     if ((cppCandidates?.Count ?? 0) > 0)
     {
-        var bits = ReferenceMerge.CppCoverageBits(cppRes.ParsedTus, cppRes.CandidateTus, cppRes.MemoryStopped, cppRes.UnresolvedIncludes);
+        var bits = ReferenceMerge.CppCoverageBits(cppRes.ParsedTus, cppRes.CandidateTus, cppRes.MemoryStopped, cppRes.UnresolvedIncludes, cppRes.TooManyCandidates);
         if (bits.Count > 0)
             Console.Out.WriteLine("-- C/C++ coverage INCOMPLETE: " + string.Join("; ", bits) +
                 " (missing headers aren't in the tree - a low/zero C/C++ count may mean 'couldn't parse', not 'no references').");

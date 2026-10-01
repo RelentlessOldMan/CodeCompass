@@ -223,7 +223,7 @@ public static class CodeCompassTools
                 else if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase)) csCandidates.Add(full);
             }
         int cppCand = 0, cppParsed = 0;
-        bool cppMemStopped = false;
+        bool cppMemStopped = false, cppTooBroad = false;
         IReadOnlyList<string> cppUnresolved = System.Array.Empty<string>();
         if (cppCandidates.Count > 0)
         {
@@ -244,7 +244,7 @@ public static class CodeCompassTools
             foreach (var s in r.Locations)
                 hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
             cppCand = r.CandidateTus; cppParsed = r.ParsedTus; cppUnresolved = r.UnresolvedIncludes;
-            cppMemStopped = r.MemoryStopped;
+            cppMemStopped = r.MemoryStopped; cppTooBroad = r.TooManyCandidates;
         }
         // The C/C++ semantic pass is INCOMPLETE when it stopped for memory, some TUs didn't parse, OR there
         // were unresolved #includes (a TU can PARSE with errors yet resolve nothing, so cppParsed==cppCand
@@ -284,7 +284,7 @@ public static class CodeCompassTools
         // dropped hits" against the same query on the real share. No-op unless the flag is set.
         if (CodeCompass.Core.Diagnostics.RefsDebug.On)
             CodeCompass.Core.Diagnostics.RefsDebug.Log(
-                $"MCP name='{name}' cppCand={cppCand} cppParsed={cppParsed} memStopped={cppMemStopped} " +
+                $"MCP name='{name}' cppCand={cppCand} cppParsed={cppParsed} memStopped={cppMemStopped} tooBroad={cppTooBroad} " +
                 $"unresolvedIncludes={cppUnresolved.Count} cppIncomplete={cppIncomplete} csharpIncomplete={csharpIncomplete} => " +
                 $"semC#={hits.Count(h => h.Kind == 'c')} semC/C++={hits.Count(h => h.Kind == 'p')} " +
                 $"lexical={hits.Count(h => h.Kind == 'l')} total={hits.Count}");
@@ -297,7 +297,7 @@ public static class CodeCompassTools
         string cppNote = "";
         if (cppCandidates.Count > 0)
         {
-            var bits = ReferenceMerge.CppCoverageBits(cppParsed, cppCand, cppMemStopped, cppUnresolved);
+            var bits = ReferenceMerge.CppCoverageBits(cppParsed, cppCand, cppMemStopped, cppUnresolved, cppTooBroad);
             if (bits.Count > 0)
                 cppNote = " (Note: C/C++ coverage INCOMPLETE - " + string.Join("; ", bits) +
                           ". Missing headers aren't in the tree (no -I/compile DB can fix that), so a low or zero " +

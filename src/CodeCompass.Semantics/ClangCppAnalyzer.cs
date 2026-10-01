@@ -21,11 +21,15 @@ namespace CodeCompass.Semantics;
 /// TARGETED, not whole-repo. A reference to <c>Foo</c> can only live in a file whose text contains "Foo",
 /// and the trigram index already knows which files those are - so a query parses ONLY those candidate
 /// translation units, not the entire tree. That makes find-references on a 40k-file repo cost work
-/// proportional to how much the symbol is actually used (a handful of TUs), never a full-tree parse, with
-/// no arbitrary cap and nothing dropped. The heavy lifting (indexing all text) is done once at
+/// proportional to how much the symbol is actually used (a handful of TUs), never a full-tree parse. The one
+/// bound is a LATENCY guard (see <see cref="MaxSemanticCandidates"/>): when a supplied candidate set runs to
+/// hundreds of TUs (a pathologically-broad symbol) the semantic parse is skipped and the caller's lexical
+/// backfill answers instead (disclosed), rather than grinding for minutes to the same lexical result. The
+/// heavy lifting (indexing all text) is done once at
 /// `codecompass index` time; this layer just rides that index. Each parse is per-query and disposed
 /// immediately, so memory stays bounded to a few TUs. Callers supply the candidate files (from the trigram
-/// index); with none supplied it self-scans the tree (used by unit tests).
+/// index); with none supplied it self-scans the tree (used by unit tests, and the CLI on an unindexed root -
+/// the self-scan path has no lexical backfill, so the latency guard above never fires there).
 ///
 /// It can span several roots (a project plus its linked external roots): candidate TUs from any root are
 /// parsed into one USR model, so a reference in one root to a symbol defined in another resolves. Each
@@ -63,6 +67,23 @@ public sealed class ClangCppAnalyzer : IDisposable
         try { return new FileInfo(full).Length > MaxTuBytes(); } catch { return false; }
     }
 
+    // How many candidate TUs a single query may parse semantically before we skip the semantic pass ENTIRELY
+    // and let the (fast, index-driven) lexical layer answer. This is a LATENCY guard, distinct from the memory
+    // budget below (which bounds PEAK RSS): a symbol referenced across hundreds of candidate TUs would grind a
+    // semantic parse for minutes, hit the per-query memory budget partway, and fall back to lexical for the
+    // remainder anyway - so the semantic work is pure wasted latency for a result the lexical backfill produces
+    // in ~2 s. (Field-observed on a large generated corpus over UNC: 1,405 candidates -> 253 parsed in 131 s ->
+    // 0 semantic refs kept.) Above this count we short-circuit to lexical up front and disclose it. The default
+    // sits well above any real symbol's direct-reference footprint (a handful to a few dozen TUs) yet below the
+    // generated-corpus pathologies. Env CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES; 0 disables the guard (always
+    // attempt semantic, the pre-guard behaviour).
+    private static int MaxSemanticCandidates()
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES");
+        if (int.TryParse(env, out var n) && n >= 0) return n;
+        return 400;
+    }
+
     // How many candidate translation units to parse concurrently. Each parse can hold a large AST, so bound
     // the degree by AVAILABLE memory (NOT total - a busy box has far less real headroom; total was the hole
     // that let peak reach 16 GB) over a conservative per-TU reserve, capped at the core count and a modest
@@ -93,6 +114,7 @@ public sealed class ClangCppAnalyzer : IDisposable
         public int Candidates;
         public int Parsed;
         public bool MemoryStopped; // the semantic pass hit its memory budget and stopped before parsing every candidate
+        public bool TooManyCandidates; // the candidate set exceeded the semantic-parse limit, so the pass was skipped up front (latency guard)
         public readonly HashSet<string> UnresolvedIncludes = new(StringComparer.OrdinalIgnoreCase);
     }
 
@@ -101,7 +123,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     /// partial or empty result can be disclosed honestly instead of read as a confident zero.</summary>
     public readonly record struct CppRefResult(
         IReadOnlyList<SemanticLocation> Locations, int CandidateTus, int ParsedTus, IReadOnlyList<string> UnresolvedIncludes,
-        bool MemoryStopped = false);
+        bool MemoryStopped = false, bool TooManyCandidates = false);
 
     public ClangCppAnalyzer(string root) : this(new[] { root }) { }
 
@@ -155,7 +177,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     }
 
     private static CppRefResult Cover(Model m, List<SemanticLocation> locs) =>
-        new(locs, m.Candidates, m.Parsed, m.UnresolvedIncludes.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(), m.MemoryStopped);
+        new(locs, m.Candidates, m.Parsed, m.UnresolvedIncludes.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(), m.MemoryStopped, m.TooManyCandidates);
 
     /// <summary>Definitions of the C/C++ symbol <paramref name="name"/>. See <see cref="FindReferences"/>
     /// for <paramref name="candidateFiles"/>.</summary>
@@ -180,6 +202,24 @@ public sealed class ClangCppAnalyzer : IDisposable
     private Model BuildModel(string name, IReadOnlyCollection<string>? candidateFiles)
     {
         EnsureCompileDb();
+
+        // Pathologically-broad short-circuit (LATENCY guard, see MaxSemanticCandidates): a huge candidate set
+        // would grind for minutes, blow the memory budget partway, and fall back to lexical anyway. Skip the
+        // semantic parse entirely (Parsed stays 0, so IsCppPassIncomplete is true and the caller's lexical
+        // backfill answers fast) and flag it so the disclosure explains the deliberate skip.
+        // ONLY skip when the caller SUPPLIED a candidate list (the indexed MCP / CLI / subprocess-worker path).
+        // Two reasons this is gated on candidateFiles != null:
+        //  1. Safety net - that path has a LEXICAL backfill to catch the references we're skipping. The self-scan
+        //     path (candidateFiles == null: unit tests, or a CLI `refs` on an UNINDEXED root) has NO lexical
+        //     fallback, so skipping there would turn a slow-but-complete answer into a bare zero. It must parse.
+        //  2. Cost - the supplied count is an in-memory number from the trigram index, so we bail BEFORE
+        //     ResolveFiles stats each candidate (over UNC that's ~2 network round trips per file - pointless work
+        //     when we're about to skip). A post-ResolveFiles count would also be redundant: ResolveFiles only
+        //     ever shrinks the set, so anything it could catch is already caught here.
+        int maxSem = MaxSemanticCandidates();
+        if (maxSem > 0 && candidateFiles is not null && candidateFiles.Count > maxSem)
+            return new Model { Candidates = candidateFiles.Count, TooManyCandidates = true };
+
         var files = ResolveFiles(name, candidateFiles).ToList();
         var model = new Model { Candidates = files.Count };
         if (files.Count == 0) return model;
