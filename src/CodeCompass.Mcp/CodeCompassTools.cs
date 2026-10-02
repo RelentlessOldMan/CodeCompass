@@ -89,6 +89,11 @@ public static class CodeCompassTools
                 sb.Append($" (Note: {meta.FilesSymbolSkipped:N0} large/generated file(s) are text-searchable but " +
                           "had NO symbols extracted - a definition could be in one; try search_code, or run " +
                           "`codecompass survey`.)");
+            // Actionable staleness, surfaced where the agent sees it (not only in the central log / doctor):
+            // the index's OUTPUT logic is behind this binary, so a rebuild would change results. Content-version
+            // keyed, so it stays silent across ordinary product-version upgrades (no cry-wolf).
+            var behind = CodeCompass.Core.Storage.IndexMetaFile.BehindNote(meta, ServerContext.Root);
+            if (behind.Length > 0) sb.Append($" (Note: {behind}.)");
             return sb.ToString();
         }
         catch { /* meta is best-effort; a missing caveat just omits the note */ }
@@ -356,20 +361,39 @@ public static class CodeCompassTools
         // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
         // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
         var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1, ServerContext.ShutdownToken);
-        // Conditional-compilation disclosure (see find_references): FindCallees walks the method body via
-        // Roslyn, which parses with an empty preprocessor set and can't see inactive #if/#elif branches - so a
-        // call guarded by conditional compilation is SILENTLY missing. Lexical backfill can't help here (a
-        // callee is a resolved definition, not a text match), so disclose when the method's file(s) use it.
+        // Conditional-compilation handling (see find_references): FindCallees walks the method body via Roslyn,
+        // which parses with an empty preprocessor set and can't see inactive #if/#elif branches - so a call
+        // guarded by conditional compilation is SILENTLY missing (the forward/reverse asymmetry: refs finds the
+        // edge, callees doesn't). When the method's file(s) use conditional compilation, recover those calls by
+        // re-lexing the disabled regions and resolving each name in-repo - segregated + labeled "by name" since
+        // disabled text can't be semantically bound - and name the file(s) in the disclosure.
         var calleeCsCands = new List<string>();
+        var calleeCsDisplay = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
         foreach (var h in handles)
             foreach (var rel in h.Text.CandidateFiles(name))
                 if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase))
-                    calleeCsCands.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar))));
-        string calleeCsNote = SemanticCoverage.IsCSharpPassIncomplete(calleeCsCands)
-            ? " (Note: C# coverage INCOMPLETE - the method's file(s) use #if/#elif conditional compilation; callees " +
-              "in inactive branches aren't seen by the semantic pass, so some calls may be missing.)"
+                {
+                    var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
+                    calleeCsCands.Add(full); calleeCsDisplay[full] = DisplayPath(h, rel);
+                }
+        var calleeCond = SemanticCoverage.CSharpConditionalFiles(calleeCsCands);
+        var recovered = calleeCond.Count > 0
+            ? ServerContext.CSharp.FindCalleesInInactiveBranches(name, maxResults + 1, ServerContext.ShutdownToken)
+            : (IReadOnlyList<SemanticLocation>)System.Array.Empty<SemanticLocation>();
+        // Dedup recovered vs the FULL semantic list (incl. any truncated overflow row), so a call present in both
+        // an active and an inactive branch is never shown twice - and the disclosure counts what's actually shown.
+        var extraCallees = new List<SemanticLocation>();
+        if (recovered.Count > 0)
+        {
+            var semKeys = new System.Collections.Generic.HashSet<string>(
+                callees.Select(c => $"{DisplayPath(c)}:{c.Line}:{c.Column}"), System.StringComparer.OrdinalIgnoreCase);
+            extraCallees = recovered.Where(r => semKeys.Add($"{DisplayPath(r)}:{r.Line}:{r.Column}")).Take(maxResults).ToList();
+        }
+        string calleeCsNote = calleeCond.Count > 0
+            ? " (Note: " + ReferenceMerge.CSharpConditionalCalleesNote(
+                  calleeCond.Select(f => calleeCsDisplay.TryGetValue(f, out var d) ? d : System.IO.Path.GetFileName(f)).ToList(), extraCallees.Count) + ")"
             : "";
-        if (callees.Count == 0)
+        if (callees.Count == 0 && extraCallees.Count == 0)
             // Distinguish "no such symbol" from "found, but calls no repo code" - answering a bare
             // "nothing" to both is the silent-empty hazard that turns a typo into a false finding.
             return (handles.Any(h => h.Symbols.FindByName(name).Count > 0)
@@ -382,6 +406,13 @@ public static class CodeCompassTools
         var sb = new StringBuilder();
         foreach (var c in callees.Take(maxResults)) sb.AppendLine($"{DisplayPath(c)}:{c.Line}:{c.Column}: {c.LineText}");
         sb.Append(Footer(Math.Min(callees.Count, maxResults), truncated, "callee", "callees"));
+        // Segregated #if-recovered callees (resolved by name), already deduped against the full semantic list.
+        if (extraCallees.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine(ReferenceMerge.CSharpInactiveCalleesHeader(extraCallees.Count));
+            foreach (var r in extraCallees) sb.AppendLine($"{DisplayPath(r)}:{r.Line}:{r.Column}: {r.LineText}");
+        }
         sb.Append(calleeCsNote);
         return sb.ToString();
     });

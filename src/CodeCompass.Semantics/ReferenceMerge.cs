@@ -55,10 +55,34 @@ public static class ReferenceMerge
     public static string CSharpConditionalNote(IReadOnlyList<string> conditionalFilesDisplay)
     {
         if (conditionalFilesDisplay.Count == 0) return "";
-        var shown = string.Join(", ", conditionalFilesDisplay.Take(5));
-        if (conditionalFilesDisplay.Count > 5) shown += $", +{conditionalFilesDisplay.Count - 5} more";
-        return "C# coverage INCOMPLETE - conditional compilation (#if/#elif) in " + shown +
+        return "C# coverage INCOMPLETE - conditional compilation (#if/#elif) in " + FileList(conditionalFilesDisplay) +
                " hides inactive-branch references from the semantic pass (shown lexically where found), so a low count may miss #if-guarded uses.";
+    }
+
+    /// <summary>The find_callees twin of <see cref="CSharpConditionalNote"/>: names the conditional file(s) and
+    /// says what happened to the inactive-branch calls - recovered by name below (<paramref name="recoveredCount"/>
+    /// &gt; 0) or, if none resolved, simply possibly-missing. Shared so the CLI and MCP disclose identically.</summary>
+    public static string CSharpConditionalCalleesNote(IReadOnlyList<string> conditionalFilesDisplay, int recoveredCount)
+    {
+        if (conditionalFilesDisplay.Count == 0) return "";
+        string tail = recoveredCount > 0
+            ? "; calls guarded by it are recovered by name below (may include unrelated same-named declarations)"
+            : "; calls guarded by it aren't seen by the semantic pass, so some may be missing";
+        return "C# coverage INCOMPLETE - conditional compilation (#if/#elif) in " + FileList(conditionalFilesDisplay) + tail + ".";
+    }
+
+    /// <summary>Header for the segregated section of callees recovered from inactive <c>#if</c>/<c>#elif</c>
+    /// branches - resolved by NAME (disabled text can't be semantically bound, so the repo-wide name match can
+    /// surface unrelated same-named methods/types), kept separate from the authoritative semantic list and
+    /// flagged for verification.</summary>
+    public static string CSharpInactiveCalleesHeader(int count) =>
+        $"-- {count} more callee(s) in #if/#elif-guarded branches, resolved by NAME (may include unrelated same-named declarations; verify with find_definition):";
+
+    private static string FileList(IReadOnlyList<string> files)
+    {
+        var shown = string.Join(", ", files.Take(5));
+        if (files.Count > 5) shown += $", +{files.Count - 5} more";
+        return shown;
     }
 
     /// <summary>The honest C/C++ coverage caveats for a query as a list of bit strings (empty if fully

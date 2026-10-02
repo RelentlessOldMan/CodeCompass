@@ -68,4 +68,17 @@ public static class IndexMetaFile
         current = BuildInfo.IndexerContentVersion;
         return meta is not null && builtWith < current;
     }
+
+    /// <summary>A one-line caveat when the index's OUTPUT logic is behind the running binary (a rebuild would
+    /// materially change results), or empty when it's current/unknown. Shared by the CLI query commands and the
+    /// MCP <c>CoverageCaveat</c> so both disclose the actionable staleness at QUERY time - not only in
+    /// <c>doctor</c> and the central log - closing the "quietly serving a stale index" gap. Like doctor it keys
+    /// on the CONTENT version, NEVER the git-derived product version (which bumps every commit), so it stays
+    /// silent across ordinary release upgrades and doesn't cry wolf.</summary>
+    public static string BehindNote(IndexMeta? meta, string root)
+    {
+        if (!IndexerBehind(meta, out int builtWith, out int current)) return "";
+        return $"this index was built by an older indexer (content v{builtWith} < v{current}); a rebuild would " +
+               $"change results (recall/symbols may be under-reported) - run: codecompass index \"{root}\"";
+    }
 }
