@@ -215,12 +215,13 @@ public static class CodeCompassTools
         // real footprint, never a whole-tree parse. Empty candidate set => no C/C++ work at all.
         var cppCandidates = new List<string>();
         var csCandidates = new List<string>();
+        var csDisplay = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
         foreach (var h in handles)
             foreach (var rel in h.Text.CandidateFiles(name))
             {
                 var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
                 if (IsCppSourceFile(rel)) cppCandidates.Add(full);
-                else if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase)) csCandidates.Add(full);
+                else if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase)) { csCandidates.Add(full); csDisplay[full] = DisplayPath(h, rel); }
             }
         int cppCand = 0, cppParsed = 0;
         bool cppMemStopped = false, cppTooBroad = false;
@@ -258,7 +259,11 @@ public static class CodeCompassTools
         // Roslyn parses with an empty preprocessor set, so it silently misses references in inactive #if/#elif
         // branches. When any candidate .cs uses conditional compilation, treat the C# pass as incomplete so
         // the lexical backfill covers .cs too (deduped) and we disclose it - the C# twin of cppIncomplete.
-        bool csharpIncomplete = SemanticCoverage.IsCSharpPassIncomplete(csCandidates);
+        var csConditional = SemanticCoverage.CSharpConditionalFiles(csCandidates);
+        bool csharpIncomplete = csConditional.Count > 0;
+        // Per-query comment/string classifier so the lexical backfill skips <see cref> doc-comment / string-literal
+        // hits in covered-language files (the v1.0.212 precision regression); reads + caches each file once.
+        var spanFilter = new LexicalSpanFilter();
         var semKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.OrdinalIgnoreCase);
@@ -271,9 +276,11 @@ public static class CodeCompassTools
                 // can't consume the whole budget and starve the real references (the UNC refs-count gap).
                 foreach (var m in h.Text.Search(name, probe * 5, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true))
                 {
-                    // Shared filter (same as the CLI): skip semantic-covered files unless the C/C++ pass was
-                    // incomplete, skip build noise, require a whole-word match.
-                    if (!ReferenceMerge.IsLexicalReference(m.Path, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete)) continue;
+                    // Shared filter (same as the CLI): skip semantic-covered files unless that language's pass was
+                    // incomplete, skip build noise, require a whole-word match, and skip comment/string spans. The
+                    // span filter reads the file, so give it the absolute path; display/dedup keep the relative one.
+                    var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, m.Path.Replace('/', System.IO.Path.DirectorySeparatorChar)));
+                    if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete, spanFilter, m.Line)) continue;
                     var key = $"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}";
                     if (!semKeys.Add(key)) continue;                             // already found semantically - don't double-count
                     hits.Add(($"{key}: {m.LineText}", 'l'));
@@ -312,9 +319,8 @@ public static class CodeCompassTools
         // C# conditional-compilation disclosure: Roslyn can't see inactive #if/#elif branches, so a semantic
         // count may miss #if-guarded references (shown lexically where the backfill found them).
         string csNote = csharpIncomplete
-            ? " (Note: C# coverage INCOMPLETE - candidate file(s) use #if/#elif conditional compilation; the " +
-              "semantic pass doesn't see references in inactive branches (shown lexically where found), so a low " +
-              "count may miss #if-guarded uses.)"
+            ? " (Note: " + ReferenceMerge.CSharpConditionalNote(
+                  csConditional.Select(f => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f)).ToList()) + ")"
             : "";
 
         if (hits.Count == 0)

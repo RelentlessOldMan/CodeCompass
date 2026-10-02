@@ -92,6 +92,67 @@ public class CSharpConditionalRefsTests
         Assert.Equal(0, int.Parse(m.Groups[2].Value));             // no lexical backfill on a clean C# repo
     }
 
+    // v1.0.212 regression (field report v3): the lexical backfill is NOT comment/string-aware, so once the C#
+    // pass is flagged incomplete (any candidate .cs uses #if), refs re-admits XML-doc <see cref="X"/> mentions -
+    // the exact noise v1.0.100's marquee fix removed and the tool's own description promises to ignore. The fix
+    // must keep the #if recall win (the guarded call site IS found) while dropping the doc-comment hit. The #if
+    // and the doc comment live in the SAME file so the file is a trigram candidate (which is what trips the
+    // incompleteness flag - the minimal repros in the report missed this by putting #if in an unrelated file).
+    [Fact]
+    public void Cli_Refs_DocCommentHit_NotReturned_EvenWhenIncomplete()
+    {
+        var cli = FindCliExe();
+        if (cli is null) return;
+
+        using var repo = new TempRepo();
+        repo.Write("kernel.cs", "namespace N { public class KernelMgrXyz { } }\n");
+        // caller.cs: a #if branch (trips csharpIncomplete) whose guarded line is a REAL use of KernelMgrXyz, plus
+        // a <see cref> doc comment that must NOT be counted. The guarded use is what the lexical backfill exists
+        // to recover; the doc comment is what it must still exclude.
+        repo.Write("caller.cs",
+            "namespace N {\n public class User {\n" +
+            "  /// Sends work to <see cref=\"KernelMgrXyz\"/>.\n" +            // DOC COMMENT - must be excluded
+            "  public void B() { }\n" +
+            "#if DEBUG\n" +
+            "  public object A() { return new KernelMgrXyz(); }\n" +          // #if-guarded REAL use - must be found
+            "#endif\n }\n}\n");
+
+        Assert.Equal(0, RunCli(cli, "index", repo.Root, out _, out _));
+        Assert.Equal(0, RunCli(cli, "refs", repo.Root, out var stdout, out var stderr, "KernelMgrXyz"));
+        var all = stdout + "\n" + stderr;
+
+        Assert.Contains("C# coverage INCOMPLETE", all);                      // #if present -> incompleteness disclosed
+        Assert.Contains("return new KernelMgrXyz()", all);                   // the #if-guarded use IS recovered (the win)
+        Assert.DoesNotContain("see cref", all);                             // ...but the doc-comment mention is NOT a reference
+    }
+
+    // The honest-disclosure fix: the #if warning must NAME the file(s) that actually use conditional compilation,
+    // so a user who greps the result files and finds no #if can see where it really is (report v3 finding: the
+    // warning fired on a query whose result files contained zero #if, because a different candidate file had it).
+    [Fact]
+    public void Cli_Refs_IfDisclosure_NamesTheConditionalFile()
+    {
+        var cli = FindCliExe();
+        if (cli is null) return;
+
+        using var repo = new TempRepo();
+        // The symbol's definition + a clean use (no #if here).
+        repo.Write("widget.cs", "namespace N { public class WidgetZzz { public static int Use() => new WidgetZzz().GetHashCode(); } }\n");
+        // A SEPARATE candidate file (mentions WidgetZzz so it's in the trigram candidate set) that carries the #if.
+        repo.Write("guarded.cs",
+            "namespace N { public class GuardConsumer {\n#if DEBUG\n  WidgetZzz w;\n#endif\n } }\n");
+
+        Assert.Equal(0, RunCli(cli, "index", repo.Root, out _, out _));
+        Assert.Equal(0, RunCli(cli, "refs", repo.Root, out var stdout, out var stderr, "WidgetZzz"));
+        var all = stdout + "\n" + stderr;
+
+        // Assert on the DISCLOSURE line specifically (the file also appears as a recovered result line, which is
+        // not what we're testing): the "C# coverage INCOMPLETE" line must itself name the conditional file.
+        var disclosure = all.Split('\n').FirstOrDefault(l => l.Contains("C# coverage INCOMPLETE"));
+        Assert.NotNull(disclosure);
+        Assert.Contains("guarded.cs", disclosure);                          // the disclosure names the real #if file
+    }
+
     private static int RunCli(string exe, string cmd, string repo, out string stdout, out string stderr, string? arg = null)
     {
         var psi = new ProcessStartInfo

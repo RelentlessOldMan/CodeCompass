@@ -1060,7 +1060,13 @@ static int CmdRefs(string[] args)
     // it SILENTLY misses references guarded by conditional compilation. When any candidate .cs uses it, treat
     // the C# pass as incomplete: backfill lexical for .cs too (deduped) and disclose - the C# twin of the
     // C/C++ incomplete->lexical rule. No conditional compilation => unchanged (semantic-only, no comment noise).
-    bool csharpIncomplete = csCandidates is not null && SemanticCoverage.IsCSharpPassIncomplete(csCandidates);
+    var csConditional = csCandidates is not null
+        ? SemanticCoverage.CSharpConditionalFiles(csCandidates)
+        : (IReadOnlyList<string>)System.Array.Empty<string>();
+    bool csharpIncomplete = csConditional.Count > 0;
+    // Classifies comment/string spans in covered-language candidate files so the backfill below skips hits that
+    // live in them (an <see cref> doc-comment or a "name" in a string literal is not a reference). One per query.
+    var spanFilter = new LexicalSpanFilter();
     var semKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var s in cs) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
     foreach (var s in cpp) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
@@ -1072,7 +1078,10 @@ static int CmdRefs(string[] args)
         // fix for the deterministic local-vs-UNC refs-count gap - see ReferenceMerge.MaxLexicalHitsPerFile.
         foreach (var m in index!.Search(name, 1000, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true))
         {
-            if (!ReferenceMerge.IsLexicalReference(m.Path, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete)) continue;
+            // Absolute path for the span filter (it reads the file to classify comments/strings); display + dedup
+            // stay on the repo-relative m.Path. Extension-based gates in IsLexicalReference are unaffected.
+            var full = Path.GetFullPath(Path.Combine(root, m.Path.Replace('/', Path.DirectorySeparatorChar)));
+            if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete, spanFilter, m.Line)) continue;
             if (!semKeys.Add($"{m.Path}:{m.Line}:{m.Column}")) continue;                       // already found semantically
             Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
             lexical++;
@@ -1102,8 +1111,8 @@ static int CmdRefs(string[] args)
     // count may miss #if-guarded call sites (shown lexically where the backfill found them). Fires to STDOUT
     // alongside the hits, same as the C/C++ caveat, so a `refs > out.txt` keeps the qualifier.
     if (csharpIncomplete)
-        Console.Out.WriteLine("-- C# coverage INCOMPLETE: candidate file(s) use #if/#elif conditional compilation; " +
-            "the semantic pass doesn't see references in inactive branches (shown lexically where found) - a low count may miss #if-guarded uses.");
+        Console.Out.WriteLine("-- " + ReferenceMerge.CSharpConditionalNote(
+            csConditional.Select(f => Path.GetRelativePath(root, f)).ToList()));
 
     Console.Error.WriteLine($"-- {cs.Count} C# + {cpp.Count} C/C++ semantic + {lexical} lexical reference(s)");
     return 0;
