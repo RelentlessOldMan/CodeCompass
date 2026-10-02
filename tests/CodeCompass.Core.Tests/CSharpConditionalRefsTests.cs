@@ -153,6 +153,55 @@ public class CSharpConditionalRefsTests
         Assert.Contains("guarded.cs", disclosure);                          // the disclosure names the real #if file
     }
 
+    // #3 (field report v3): find_callees missed calls inside inactive #if branches (the forward/reverse
+    // asymmetry - refs found the edge, callees didn't). Now those calls are recovered by re-lexing the disabled
+    // region and resolving each name in-repo, shown in a segregated "by name" section, and the disclosure names
+    // the conditional file. The ONLY call to Lib.Helper() lives inside #if DEBUG (inactive under Roslyn's empty
+    // preprocessor set), so the semantic pass sees zero callees for Entry.
+    [Fact]
+    public void Cli_Callees_IfGuardedCall_RecoveredByName_AndDisclosed()
+    {
+        var cli = FindCliExe();
+        if (cli is null) return;
+
+        using var repo = new TempRepo();
+        repo.Write("lib.cs", "namespace N { public static class Lib { public static int Helper() => 1; } }\n");
+        repo.Write("caller.cs",
+            "namespace N {\n public static class C {\n  public static int Entry() {\n#if DEBUG\n" +
+            "    return Lib.Helper();\n#endif\n    return 0;\n  }\n }\n}\n");
+
+        Assert.Equal(0, RunCli(cli, "index", repo.Root, out _, out _));
+        Assert.Equal(0, RunCli(cli, "callees", repo.Root, out var stdout, out var stderr, "Entry"));
+        var all = stdout + "\n" + stderr;
+
+        Assert.Contains("C# coverage INCOMPLETE", all);                      // conditional compilation disclosed
+        Assert.Contains("caller.cs", all);                                  // ...and the #if file is named
+        Assert.Contains("resolved by NAME", all);                           // the segregated recovered section
+        Assert.Contains("lib.cs", all);                                     // the recovered callee's definition
+        Assert.Contains("Helper", all);
+    }
+
+    // Complement: a method with no conditional compilation recovers nothing and discloses nothing (no overfiring,
+    // no "by name" noise on a clean call graph).
+    [Fact]
+    public void Cli_Callees_CleanMethod_NoRecoverySection_NoDisclosure()
+    {
+        var cli = FindCliExe();
+        if (cli is null) return;
+
+        using var repo = new TempRepo();
+        repo.Write("m.cs",
+            "namespace N { public static class H3 {\n public static int Leaf() => 1;\n public static int Top() => Leaf();\n } }\n");
+
+        Assert.Equal(0, RunCli(cli, "index", repo.Root, out _, out _));
+        Assert.Equal(0, RunCli(cli, "callees", repo.Root, out var stdout, out var stderr, "Top"));
+        var all = stdout + "\n" + stderr;
+
+        Assert.Contains("Leaf", all);                                       // the real callee resolves semantically
+        Assert.DoesNotContain("C# coverage INCOMPLETE", all);
+        Assert.DoesNotContain("resolved by NAME", all);
+    }
+
     private static int RunCli(string exe, string cmd, string repo, out string stdout, out string stderr, string? arg = null)
     {
         var psi = new ProcessStartInfo

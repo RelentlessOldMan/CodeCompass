@@ -145,6 +145,94 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         return result;
     }
 
+    /// <summary>Callees that <see cref="FindCallees"/> CANNOT see because they sit inside inactive
+    /// <c>#if</c>/<c>#elif</c> branches - Roslyn parses those as disabled text, so the semantic walk never
+    /// visits them and a <c>#if</c>-guarded call is silently missing (the forward/reverse asymmetry: <c>refs</c>
+    /// finds the edge, <c>callees</c> doesn't). We recover them HONESTLY: re-lex each disabled region with
+    /// Roslyn (so comments/strings/verbatim are handled for free and only real invocations/constructions are
+    /// picked up), then resolve each discovered NAME against the repo. Resolution is by name, not semantic
+    /// binding (disabled text can't be bound), so it may surface more than one same-named declaration - callers
+    /// MUST label these as "resolved by name" and segregate them from the authoritative semantic list. Empty
+    /// when the method has no disabled regions, so callers can gate on conditional compilation and skip the work.</summary>
+    public IReadOnlyList<SemanticLocation> FindCalleesInInactiveBranches(string name, int max = 100, System.Threading.CancellationToken ct = default)
+    {
+        var (_, project) = EnsureBuilt();
+        var result = new List<SemanticLocation>();
+
+        // 1. Harvest call-like names from the DISABLED regions of each method named `name`.
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var symbol in FindDeclarations(project, name, ct))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (symbol is not IMethodSymbol) continue;
+            foreach (var syntaxRef in symbol.DeclaringSyntaxReferences)
+            {
+                var decl = syntaxRef.GetSyntax();
+                var disabled = new System.Text.StringBuilder();
+                foreach (var tr in decl.DescendantTrivia(descendIntoTrivia: true))
+                    if (tr.IsKind(SyntaxKind.DisabledTextTrivia)) disabled.Append(tr.ToFullString()).Append('\n');
+                if (disabled.Length == 0) continue;
+
+                // Wrap in a block so a sequence of guarded statements parses as one; Roslyn is error-tolerant, so
+                // partial fragments still yield their invocation/object-creation nodes (and real comments/strings
+                // in the branch never masquerade as calls).
+                var block = SyntaxFactory.ParseStatement("{\n" + disabled + "\n}");
+                foreach (var node in block.DescendantNodes())
+                {
+                    string? callee = node switch
+                    {
+                        InvocationExpressionSyntax inv => SimpleCalleeName(inv.Expression),
+                        ObjectCreationExpressionSyntax oc => TypeName(oc.Type),
+                        _ => null,
+                    };
+                    if (!string.IsNullOrEmpty(callee) && callee != name) names.Add(callee!);
+                }
+            }
+        }
+        if (names.Count == 0) return result;
+
+        // 2. Resolve each name to its in-repo definition(s). By name only - disabled text can't be semantically
+        // bound - so overloads/same-named decls across the repo all surface; that's the labeled caveat.
+        var seen = new HashSet<(string, int, int)>();
+        foreach (var n in names)
+        {
+            ct.ThrowIfCancellationRequested();
+            foreach (var sym in FindDeclarations(project, n, ct))
+            {
+                if (sym is not (IMethodSymbol or INamedTypeSymbol)) continue;
+                foreach (var loc in sym.Locations)
+                {
+                    if (!loc.IsInSource) continue; // in-repo only, same noise filter as FindCallees
+                    var s = ToLocation(loc);
+                    if (seen.Add((s.RelativePath, s.Line, s.Column)))
+                    {
+                        result.Add(s with { LineText = string.IsNullOrEmpty(s.LineText) ? sym.Name : $"{sym.Name}  {s.LineText}" });
+                        if (result.Count >= max) return result;
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    // The invoked simple name of a call expression: `Foo()` -> Foo, `x.Foo()` -> Foo. Anything else (e.g. a
+    // delegate held in an element access) yields null and is skipped - we only recover plainly-named calls.
+    private static string? SimpleCalleeName(ExpressionSyntax expr) => expr switch
+    {
+        IdentifierNameSyntax id => id.Identifier.Text,
+        MemberAccessExpressionSyntax ma => ma.Name.Identifier.Text,
+        _ => null,
+    };
+
+    // The simple name of a constructed type: `Foo` / `A.Foo` / `Foo<T>` -> Foo.
+    private static string? TypeName(TypeSyntax type) => type switch
+    {
+        IdentifierNameSyntax id => id.Identifier.Text,
+        GenericNameSyntax g => g.Identifier.Text,
+        QualifiedNameSyntax q => q.Right.Identifier.Text,
+        _ => null,
+    };
+
     // True if the reference sits inside a documentation comment (an XML-doc <see cref="..."/> or the
     // like). Roslyn resolves those to the real symbol, but for a "find usages" answer they are comment
     // mentions, not code that uses the symbol - so we drop them to keep the semantic result honest.

@@ -910,6 +910,15 @@ static void NoteLinkedRootsNotSearched(string root)
                                 "use the CodeCompass MCP tools for federated search across linked roots.");
 }
 
+// Actionable staleness, disclosed at QUERY time (not only via doctor): the loaded index's OUTPUT logic is behind
+// this binary, so a rebuild would change results. This is exactly what a benchmarker running an old-built index
+// under a new binary needs to see. Content-version keyed, so a mere product-version difference stays silent.
+static void WarnIfIndexerBehind(string root)
+{
+    var note = IndexMetaFile.BehindNote(IndexMetaFile.Read(root), root);
+    if (note.Length > 0) Console.Error.WriteLine("-- NOTE: " + note);
+}
+
 static int CmdSearch(string[] args)
 {
     if (args.Length < 3) return Usage();
@@ -940,6 +949,7 @@ static int CmdSearch(string[] args)
     Console.Error.WriteLine(truncated
         ? $"-- showing first {cap}; MORE EXIST (narrow the query) in {sw.Elapsed.TotalMilliseconds:F0} ms"
         : $"-- {matches.Count} match(es) in {sw.Elapsed.TotalMilliseconds:F0} ms");
+    WarnIfIndexerBehind(root);
     if (trace is not null)
     {
         static double Mb(long b) => b / 1048576.0;
@@ -977,6 +987,7 @@ static int CmdDef(string[] args)
         Console.WriteLine($"{loc}:{symbol.Column}: {symbol.Kind} {symbol.Name}");
     }
     Console.Error.WriteLine($"-- {matches.Count} definition(s)");
+    WarnIfIndexerBehind(root);
     return 0;
 }
 
@@ -993,6 +1004,7 @@ static int CmdSymbols(string[] args)
     foreach (var symbol in matches)
         Console.WriteLine($"{symbol.RelativePath}:{symbol.Line}:{symbol.Column}: {symbol.Kind} {symbol.Name}");
     Console.Error.WriteLine($"-- {matches.Count} symbol(s)");
+    WarnIfIndexerBehind(root);
     return 0;
 }
 
@@ -1115,6 +1127,7 @@ static int CmdRefs(string[] args)
             csConditional.Select(f => Path.GetRelativePath(root, f)).ToList()));
 
     Console.Error.WriteLine($"-- {cs.Count} C# + {cpp.Count} C/C++ semantic + {lexical} lexical reference(s)");
+    WarnIfIndexerBehind(root);
     return 0;
 }
 
@@ -1127,21 +1140,40 @@ static int CmdCallees(string[] args)
 
     // The in-repo methods a C# method calls, resolved semantically (C# only - the MCP find_callees twin).
     // Cold-built each run from the CLI; the MCP server keeps the analyzer warm across calls.
-    var callees = new RoslynCSharpAnalyzer(root).FindCallees(name);
+    var analyzer = new RoslynCSharpAnalyzer(root);
+    var callees = analyzer.FindCallees(name);
     foreach (var c in callees)
         Console.WriteLine($"{c.RelativePath}:{c.Line}:{c.Column}: {c.LineText}");
-    // Conditional-compilation disclosure: FindCallees walks the method body via Roslyn, which can't see
-    // inactive #if/#elif branches - so calls guarded by conditional compilation are silently missing. If the
-    // method's candidate .cs file(s) use it, say so (lexical backfill can't recover a callee, only disclose).
-    bool calleeCsIncomplete = RepositoryIndexer.TryLoad(root, out var cidx, out _)
-        && SemanticCoverage.IsCSharpPassIncomplete(
+    // Conditional compilation: FindCallees walks the method body via Roslyn, which parses with an empty
+    // preprocessor set and can't see inactive #if/#elif branches - so a guarded call is silently missing (refs
+    // finds the edge, callees doesn't). When the method's candidate .cs file(s) use it, recover those calls by
+    // re-lexing the disabled regions + resolving each name in-repo (segregated + labeled "by name"), and name
+    // the file(s) in the disclosure.
+    var calleeCond = RepositoryIndexer.TryLoad(root, out var cidx, out _)
+        ? SemanticCoverage.CSharpConditionalFiles(
             cidx!.CandidateFiles(name)
                 .Where(rel => rel.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
-                .Select(rel => Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)))));
-    if (calleeCsIncomplete)
-        Console.Out.WriteLine("-- C# coverage INCOMPLETE: the method's file(s) use #if/#elif conditional compilation; " +
-            "callees in inactive branches aren't seen by the semantic pass - some calls may be missing.");
+                .Select(rel => Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)))))
+        : (IReadOnlyList<string>)Array.Empty<string>();
+    var recovered = calleeCond.Count > 0 ? analyzer.FindCalleesInInactiveBranches(name) : (IReadOnlyList<SemanticLocation>)Array.Empty<SemanticLocation>();
+    // Dedup recovered vs the semantic callees (so a call in both an active and an inactive branch isn't doubled),
+    // then disclose using the count actually shown.
+    var extra = new List<SemanticLocation>();
+    if (recovered.Count > 0)
+    {
+        var semKeys = new HashSet<string>(callees.Select(c => $"{c.RelativePath}:{c.Line}:{c.Column}"), StringComparer.OrdinalIgnoreCase);
+        extra = recovered.Where(r => semKeys.Add($"{r.RelativePath}:{r.Line}:{r.Column}")).ToList();
+        if (extra.Count > 0)
+        {
+            Console.Out.WriteLine(ReferenceMerge.CSharpInactiveCalleesHeader(extra.Count));
+            foreach (var r in extra) Console.WriteLine($"{r.RelativePath}:{r.Line}:{r.Column}: {r.LineText}");
+        }
+    }
+    if (calleeCond.Count > 0)
+        Console.Out.WriteLine("-- " + ReferenceMerge.CSharpConditionalCalleesNote(
+            calleeCond.Select(f => Path.GetRelativePath(root, f)).ToList(), extra.Count));
     Console.Error.WriteLine($"-- {callees.Count} callee(s) (C# only)");
+    WarnIfIndexerBehind(root);
     return 0;
 }
 
