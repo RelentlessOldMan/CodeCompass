@@ -205,6 +205,67 @@ public class RoslynSemanticTests
         Assert.Empty(analyzer.FindReferences("Nonexistent"));
     }
 
+    // #3 (v1.0.216): callees hidden in inactive #if/#elif branches. Roslyn parses them as disabled text, so the
+    // semantic FindCallees never sees them; FindCalleesInInactiveBranches re-lexes the disabled region and
+    // resolves each discovered NAME in-repo. In-process coverage of the recovery arms (simple invocation,
+    // member-access, object-creation with identifier/generic/qualified type names) and the max cap - the Cli_*
+    // subprocess tests prove the end-to-end wiring but coverlet can't instrument a child process.
+    [Fact]
+    public void FindCalleesInInactiveBranches_RecoversGuardedCalls_ByName()
+    {
+        using var repo = new TempRepo();
+        repo.Write("Targets.cs", """
+        namespace App;
+        public class Gizmo { public void Spin() { } }
+        public class Box<T> { }
+        """);
+        repo.Write("Login.cs", """
+        namespace App;
+        public class Login
+        {
+            public void Go()
+            {
+        #if NET6_0_OR_GREATER
+                Assist();                 // simple invocation -> Assist
+                var g = new Gizmo();      // object creation, identifier type -> Gizmo
+                g.Spin();                 // member-access callee -> Spin
+                var b = new Box<int>();   // object creation, generic type -> Box
+                var g2 = new App.Gizmo(); // object creation, qualified type -> Gizmo
+                a[0]();                   // element-access invocation -> no simple name (skipped)
+                var z = new int();        // predefined-type construction -> no simple name (skipped)
+        #endif
+            }
+            public void Assist() { }
+        }
+        """);
+
+        var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+
+        // The semantic pass is blind to everything inside the inactive branch.
+        Assert.DoesNotContain(analyzer.FindCallees("Go"), c => c.LineText.Contains("Spin") || c.LineText.Contains("Gizmo"));
+
+        var recovered = analyzer.FindCalleesInInactiveBranches("Go");
+        Assert.Contains(recovered, c => c.LineText.Contains("Assist"));  // simple invocation recovered by name
+        Assert.Contains(recovered, c => c.LineText.Contains("Spin"));    // member-access callee recovered by name
+        Assert.Contains(recovered, c => c.LineText.Contains("Gizmo"));   // object creation (identifier + qualified type)
+        Assert.Contains(recovered, c => c.LineText.Contains("Box"));     // object creation, generic type
+
+        // The max cap is honored - recovery stops once the budget is reached.
+        Assert.Single(analyzer.FindCalleesInInactiveBranches("Go", max: 1));
+    }
+
+    [Fact]
+    public void FindCalleesInInactiveBranches_CleanMethod_IsEmpty()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace App; public class C { public void M() { System.Console.WriteLine(); } }");
+        var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        // No disabled region => nothing to recover (callers gate on conditional compilation and skip the work).
+        Assert.Empty(analyzer.FindCalleesInInactiveBranches("M"));
+        // Unknown name => empty, never throws.
+        Assert.Empty(analyzer.FindCalleesInInactiveBranches("NoSuchMethod"));
+    }
+
     [Fact]
     public void Dispose_ReleasesModel_AndRebuildsLazilyOnReuse()
     {

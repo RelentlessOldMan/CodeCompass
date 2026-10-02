@@ -94,6 +94,58 @@ public class LexicalSpanFilterTests
         Assert.False(f.IsInCommentOrString(path, 1, Col(line, "Widget")));   // real ref must survive
     }
 
+    // A '\' escape inside a string (an escaped char AND a trailing-backslash line continuation) must keep the
+    // scanner INSIDE the string - so a whole-word hit after the escape, or on the continued line, is still
+    // classified as string and suppressed. Pins the escape/continuation branches of the C-family string scanner.
+    [Fact]
+    public void CFamily_StringWithEscapesAndContinuation_WidgetStaysSuppressed()
+    {
+        using var repo = new TempRepo();
+        var lines = new[]
+        {
+            "const char* a = \"x\\ty widget\";",   // 1  escaped \t then widget - still inside the string
+            "const char* b = \"abc\\",              // 2  trailing backslash = line continuation...
+            "widget more\";",                        // 3  ...the string continues here, widget still inside it
+        };
+        repo.Write("a.c", string.Join("\n", lines) + "\n");
+        var path = System.IO.Path.Combine(repo.Root, "a.c");
+        var f = new LexicalSpanFilter();
+        Assert.True(f.IsInCommentOrString(path, 1, Col(lines[0], "widget")));  // after an escaped char, still string
+        Assert.True(f.IsInCommentOrString(path, 3, Col(lines[2], "widget")));  // after \-continuation, still string
+    }
+
+    // Fail-OPEN invariant: a stray apostrophe that does NOT close within the short char-literal bound is NOT a
+    // char literal - it's code. The scanner must bail to code rather than run to EOL, or it would swallow and
+    // suppress a real reference after it (the catastrophic false-negative the design forbids).
+    [Fact]
+    public void CFamily_UnterminatedCharLiteral_FailsOpenToCode_RealRefSurvives()
+    {
+        using var repo = new TempRepo();
+        var line = "x = ' no closing quote here at all; Widget w;";   // ' preceded by space, never closes in bound
+        repo.Write("a.cpp", line + "\n");
+        var path = System.IO.Path.Combine(repo.Root, "a.cpp");
+        var f = new LexicalSpanFilter();
+        Assert.False(f.IsInCommentOrString(path, 1, Col(line, "Widget")));   // real ref must survive
+    }
+
+    // Fail-OPEN invariant for raw strings: an R"-opener with no '(' before end-of-line is malformed. ScanRawString
+    // must bail (recording only what it consumed) rather than consume to EOF, so a real reference on a later line
+    // is not swallowed.
+    [Fact]
+    public void CFamily_MalformedRawString_BailsWithoutSwallowing_RealRefSurvives()
+    {
+        using var repo = new TempRepo();
+        var lines = new[]
+        {
+            "const char* s = R\"nodelim",   // 1  R" opener but no '(' before EOL -> malformed, must bail here
+            "int Widget(void){return 0;}",  // 2  real code on the next line - must NOT be suppressed
+        };
+        repo.Write("a.c", string.Join("\n", lines) + "\n");
+        var path = System.IO.Path.Combine(repo.Root, "a.c");
+        var f = new LexicalSpanFilter();
+        Assert.False(f.IsInCommentOrString(path, 2, Col(lines[1], "Widget")));   // real ref must survive
+    }
+
     [Fact]
     public void NonCoveredLanguage_IsNeverSuppressed()
     {
