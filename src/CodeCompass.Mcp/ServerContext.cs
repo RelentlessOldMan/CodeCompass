@@ -40,6 +40,23 @@ public static class ServerContext
     private static ClangCppAnalyzer? _cpp;
     private static RepositoryWatcher? _watcher;
 
+    // Teardown signal. A long rebuild (RepositoryIndexer.Build) and the semantic queries observe this token;
+    // a re-point (Init) or shutdown (StopLiveIndex) cancels it so those operations bail PROMPTLY instead of
+    // running to completion - which is what otherwise makes the file-watcher's Dispose barrier (it waits out an
+    // in-flight OnChanges rebuild) hang for minutes, and what lets a stale-root query keep pegging a core. A
+    // fresh source is armed on each cancel so subsequent work on the new/continuing context is not pre-cancelled.
+    private static CancellationTokenSource _shutdownCts = new();
+
+    /// <summary>The current teardown token (see <see cref="_shutdownCts"/>). Read at each cancellable call so a
+    /// re-point/shutdown that swaps the source cancels in-flight work started under the previous one.</summary>
+    internal static CancellationToken ShutdownToken => _shutdownCts.Token;
+
+    // Cancel any in-flight build/semantic query and arm a fresh token. Lock-free (so it can run before taking Rw
+    // and before disposing the watcher, whose Dispose would otherwise block on the very rebuild we're cancelling).
+    // The stale source is left for GC rather than disposed: an in-flight op may still read its token for a beat,
+    // and a timer-less CancellationTokenSource is cheap to drop.
+    private static void CancelInFlight() => Interlocked.Exchange(ref _shutdownCts, new CancellationTokenSource()).Cancel();
+
     // Idle-eviction of the (large) semantic analyzers: a background timer drops them after a stretch
     // with no semantic query so a long session doesn't pin hundreds of MB / GB it's no longer using.
     private static long _lastSemanticUseMs;
@@ -102,6 +119,10 @@ public static class ServerContext
 
     public static void Init(string root)
     {
+        // Re-point: cancel any in-flight build/query for the PREVIOUS root FIRST (lock-free), so the oldWatcher
+        // disposal below doesn't block for a multi-minute rebuild and a stale-root semantic query stops pegging
+        // a core. A fresh token is armed for the new root. Must precede the write lock and the watcher dispose.
+        CancelInFlight();
         RepositoryWatcher? oldWatcher;
         RoslynCSharpAnalyzer? oldCs;
         ClangCppAnalyzer? oldCpp;
@@ -256,11 +277,12 @@ public static class ServerContext
         SegmentedSymbolIndex? ns = null;
         try
         {
-            if (batch.FullReconcile) { var b = RepositoryIndexer.Build(linkedRoot); nt = b.Text; ns = b.Symbols; }
+            if (batch.FullReconcile) { var b = RepositoryIndexer.Build(linkedRoot, ct: ShutdownToken); nt = b.Text; ns = b.Symbols; }
             else { var u = RepositoryIndexer.UpdatePaths(linkedRoot, batch.ChangedFullPaths); nt = u.Text; ns = u.Symbols; }
             SwapLinked(linkedRoot, nt, ns);
             nt = null; ns = null; // ownership transferred to _linked
         }
+        catch (OperationCanceledException) { Log.For(linkedRoot).Info("linked root update canceled (re-point/shutdown)"); }
         catch (Exception ex) { Log.For(linkedRoot).Error("linked root live update failed", ex); }
         finally { nt?.Dispose(); ns?.Dispose(); BuildGate.Release(); }
     }
@@ -322,6 +344,13 @@ public static class ServerContext
             // and serialize a raw stack trace - leaking internal cache/repo paths and giving the agent an
             // unactionable error. Contain it to a short, path-free message and log the detail for diagnosis.
             try { return op(handles); }
+            catch (OperationCanceledException)
+            {
+                // The teardown token tripped mid-query (a re-point or shutdown), so a long semantic pass bailed.
+                // This is expected, not a failure - return a neutral status instead of the alarming
+                // "rebuild the index" message the generic handler would give.
+                return "The workspace is being re-pointed or the server is shutting down; retry the query in a moment.";
+            }
             catch (Exception ex)
             {
                 try { Log.Global.Warn($"query op failed: {ex.GetType().Name}: {ex.Message}"); } catch { }
@@ -343,6 +372,9 @@ public static class ServerContext
     /// <summary>Stop live indexing and release the watcher (clean shutdown / re-point).</summary>
     public static void StopLiveIndex()
     {
+        // Cancel an in-flight rebuild FIRST so the watcher's Dispose barrier (which waits out a running
+        // OnChanges) returns promptly on shutdown instead of blocking for the whole rebuild.
+        CancelInFlight();
         RepositoryWatcher? w;
         Rw.EnterWriteLock();
         try { w = _watcher; _watcher = null; }
@@ -550,10 +582,18 @@ public static class ServerContext
         try
         {
             int epoch = Volatile.Read(ref _epoch);
-            var built = RepositoryIndexer.Build(Root); // off-lock; old index still serves reads
+            var built = RepositoryIndexer.Build(Root, ct: ShutdownToken); // off-lock; old index still serves reads
             if (Swap(built.Text, built.Symbols, epoch))
                 Log.For(Root).Info($"manual reindex complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
             return built.Stats;
+        }
+        catch (OperationCanceledException)
+        {
+            // Re-point/shutdown during a manual reindex: abandon the rebuild and return an empty stat rather
+            // than throwing out of the tool call. The old index keeps serving; the new context (if a re-point)
+            // builds fresh.
+            Log.For(Root).Info("manual reindex canceled (re-point/shutdown)");
+            return new IndexStats(0, 0L, 0L, 0, 0d, 0L, Environment.ProcessorCount);
         }
         finally
         {
@@ -693,9 +733,15 @@ public static class ServerContext
         {
             int epoch = Volatile.Read(ref _epoch);
             var built = RepositoryIndexer.Build(Root,
-                (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); });
+                (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); }, ShutdownToken);
             ok = Swap(built.Text, built.Symbols, epoch);
             if (ok) Log.For(Root).Info($"background build complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+        }
+        catch (OperationCanceledException)
+        {
+            // Re-point/shutdown cancelled this build; the context is being replaced (Init resets state for the
+            // new root) or torn down. Abandon quietly - do NOT fall back to the CLI-build state.
+            Log.For(Root).Info("background build canceled (re-point/shutdown)");
         }
         catch (Exception ex)
         {
@@ -900,9 +946,15 @@ public static class ServerContext
             int epoch = Volatile.Read(ref _epoch);
             SegmentedIndex nt;
             SegmentedSymbolIndex ns;
-            if (batch.FullReconcile) { var b = RepositoryIndexer.Build(Root); nt = b.Text; ns = b.Symbols; }
-            else { var c = RepositoryIndexer.Compact(Root); nt = c.Text; ns = c.Symbols; }
+            if (batch.FullReconcile) { var b = RepositoryIndexer.Build(Root, ct: ShutdownToken); nt = b.Text; ns = b.Symbols; }
+            else { var c = RepositoryIndexer.Compact(Root, ShutdownToken); nt = c.Text; ns = c.Symbols; }
             ok = Swap(nt, ns, epoch);
+        }
+        catch (OperationCanceledException)
+        {
+            // Re-point/shutdown cancelled the reconcile rebuild. Leave the currently-installed index serving and
+            // don't drain pending work - the context is being replaced (Init) or torn down.
+            Log.For(Root).Info("reconcile canceled (re-point/shutdown)");
         }
         catch (Exception ex)
         {
@@ -972,7 +1024,8 @@ public static class ServerContext
                 Rw.EnterWriteLock();
                 try { _rebuilding = true; } finally { Rw.ExitWriteLock(); }
                 BuildGate.Wait(); // serialize with any other rebuild
-                try { int epoch = Volatile.Read(ref _epoch); var b = RepositoryIndexer.Build(Root); Swap(b.Text, b.Symbols, epoch); }
+                try { int epoch = Volatile.Read(ref _epoch); var b = RepositoryIndexer.Build(Root, ct: ShutdownToken); Swap(b.Text, b.Symbols, epoch); }
+                catch (OperationCanceledException) { Log.For(Root).Info("drained reconcile canceled (re-point/shutdown)"); return; }
                 catch (Exception ex) { Log.For(Root).Error("drained reconcile failed", ex); return; }
                 finally
                 {

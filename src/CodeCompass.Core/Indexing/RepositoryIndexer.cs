@@ -33,7 +33,7 @@ public static class RepositoryIndexer
     private const int RebuildThreshold = 2000;
 
     public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, IndexStats Stats) Build(
-        string root, Action<int, long>? onProgress = null)
+        string root, Action<int, long>? onProgress = null, System.Threading.CancellationToken ct = default)
     {
         root = Path.GetFullPath(root);
         CodeCompassConfig.Load(root);
@@ -159,9 +159,15 @@ public static class RepositoryIndexer
         // crawls because many individually-slow files are being parsed in parallel (e.g. big numeric
         // data-blob sources at ~1s/MB) - that is bounded by the symbol-size cap, not by scheduling
         // (confirmed on a real 90GB repo: NoBuffering made no difference to that case).
+        try
+        {
         Parallel.ForEach(
             Partitioner.Create(files, EnumerablePartitionerOptions.NoBuffering),
-            new ParallelOptions { MaxDegreeOfParallelism = cores },
+            // CancellationToken: a re-point/shutdown cancels the server's token so a long rebuild bails
+            // promptly - freeing the file-watcher's Dispose barrier and not racing teardown - instead of
+            // running to completion. ParallelOptions stops scheduling further files and throws
+            // OperationCanceledException once the token trips; the finally below still tears the build down.
+            new ParallelOptions { MaxDegreeOfParallelism = cores, CancellationToken = ct },
             () => new BuildWorker(),
             (file, _, worker) =>
             {
@@ -308,12 +314,31 @@ public static class RepositoryIndexer
                 }
                 worker.Extractor.Dispose();
             });
-
-        sw.Stop();
-        progressTimer?.Dispose();
-        buildDone.Set();           // stop the watchdog thread
-        watchdog.Join(1000);
-        buildDone.Dispose();
+            ct.ThrowIfCancellationRequested(); // cancelled during, or right after, the loop (before the persist below)
+        }
+        catch (OperationCanceledException)
+        {
+            // Aborted mid-build by a re-point/shutdown. Delete the segment/sidecar files THIS cancelled build
+            // flushed: they are its own NEW (higher-numbered) segments, never referenced by any manifest (we
+            // never reached persist), so removing them is safe - and it prevents both cache litter and the
+            // manifest-less recovery path (SegmentedIndex.Load) later mistaking them for live segments, which
+            // would resurrect stale/duplicate docs. The live index's own manifest + segments are untouched.
+            foreach (var (_, n) in textSegFiles) TryDeleteCacheFile(dir, n);
+            foreach (var (_, n) in symSegFiles) TryDeleteCacheFile(dir, n);
+            foreach (var n in posSidecars) TryDeleteCacheFile(dir, n);
+            throw;
+        }
+        finally
+        {
+            // Always tear down the watchdog thread + progress timer, even if the parallel build threw
+            // (including OperationCanceledException on a re-point/shutdown) - otherwise a cancelled build
+            // would leak the dedicated watchdog thread and the progress Timer.
+            sw.Stop();
+            progressTimer?.Dispose();
+            buildDone.Set();           // stop the watchdog thread
+            watchdog.Join(1000);
+            buildDone.Dispose();
+        }
         onProgress?.Invoke(progressFiles, progressBytes);
 
         if (walker.OverCapSkipped > 0)
@@ -382,6 +407,11 @@ public static class RepositoryIndexer
         files.Add((num, name));
         w.Symbols = new SymbolSegmentBuilder();
     }
+
+    // Best-effort removal of a cache file (a segment/sidecar an aborted build flushed). Never throws - a file
+    // that's already gone or momentarily locked is fine to leave; the next full build's CleanupOrphans gets it.
+    private static void TryDeleteCacheFile(string dir, string name)
+    { try { File.Delete(Path.Combine(dir, name)); } catch { } }
 
     /// <summary>
     /// True when the incremental path should compact by doing a full rebuild. Every incremental
@@ -647,17 +677,26 @@ public static class RepositoryIndexer
     /// files - the cheap way to reclaim the segments/tombstones a long incremental session builds up.
     /// Falls back to a full build if no index exists yet. Caller owns/disposes the returned instances.
     /// </summary>
-    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols) Compact(string root)
+    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols) Compact(string root, System.Threading.CancellationToken ct = default)
     {
         root = Path.GetFullPath(root);
         if (!TryLoad(root, out var text, out var symbols))
         {
-            var b = Build(root);
+            var b = Build(root, ct: ct); // first-time compaction falls back to a full (cancellable) build
             return (b.Text, b.Symbols);
         }
-        text.Compact();
-        symbols.Compact();
-        return (text, symbols);
+        // Checked at the merge boundaries so a re-point/shutdown abandons the compaction (each index's on-disk
+        // manifest stays internally consistent; a compacted text + not-yet-compacted symbols both load fine).
+        // Dispose the loaded handles on cancel so a teardown doesn't leak the mmaps.
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            text.Compact();
+            ct.ThrowIfCancellationRequested();
+            symbols.Compact();
+            return (text, symbols);
+        }
+        catch (OperationCanceledException) { text.Dispose(); symbols.Dispose(); throw; }
     }
 
     private static (SegmentedIndex, SegmentedSymbolIndex, UpdateStats) FullRebuild(

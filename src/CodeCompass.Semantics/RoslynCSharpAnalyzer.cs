@@ -60,11 +60,11 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     }
 
     /// <summary>Definitions of <paramref name="name"/> declared in the C# sources.</summary>
-    public IReadOnlyList<SemanticLocation> FindDefinitions(string name)
+    public IReadOnlyList<SemanticLocation> FindDefinitions(string name, System.Threading.CancellationToken ct = default)
     {
         var (_, project) = EnsureBuilt();
         var result = new List<SemanticLocation>();
-        foreach (var symbol in FindDeclarations(project, name))
+        foreach (var symbol in FindDeclarations(project, name, ct))
             foreach (var loc in symbol.Locations)
                 if (loc.IsInSource)
                     result.Add(ToLocation(loc));
@@ -72,15 +72,15 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     }
 
     /// <summary>True (semantic) references to any C# symbol named <paramref name="name"/>.</summary>
-    public IReadOnlyList<SemanticLocation> FindReferences(string name, int max = 200)
+    public IReadOnlyList<SemanticLocation> FindReferences(string name, int max = 200, System.Threading.CancellationToken ct = default)
     {
         var (solution, project) = EnsureBuilt();
         var result = new List<SemanticLocation>();
         var seen = new HashSet<(string, int, int)>();
 
-        foreach (var symbol in FindDeclarations(project, name))
+        foreach (var symbol in FindDeclarations(project, name, ct))
         {
-            var referenced = SymbolFinder.FindReferencesAsync(symbol, solution).GetAwaiter().GetResult();
+            var referenced = SymbolFinder.FindReferencesAsync(symbol, solution, ct).GetAwaiter().GetResult();
             foreach (var r in referenced)
             {
                 foreach (var rl in r.Locations)
@@ -107,16 +107,17 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     /// framework/external calls are omitted. That resolution is exactly what a syntactic call graph
     /// cannot do (it returns every same-named overload in the repo); here each result is the callee's
     /// own definition, so an agent can jump straight to the next hop without reading the body.</summary>
-    public IReadOnlyList<SemanticLocation> FindCallees(string name, int max = 100)
+    public IReadOnlyList<SemanticLocation> FindCallees(string name, int max = 100, System.Threading.CancellationToken ct = default)
     {
         var (_, project) = EnsureBuilt();
         var result = new List<SemanticLocation>();
-        var compilation = project.GetCompilationAsync().GetAwaiter().GetResult();
+        var compilation = project.GetCompilationAsync(ct).GetAwaiter().GetResult();
         if (compilation is null) return result;
 
         var seen = new HashSet<(string, int, int)>();
-        foreach (var symbol in FindDeclarations(project, name))
+        foreach (var symbol in FindDeclarations(project, name, ct))
         {
+            ct.ThrowIfCancellationRequested(); // bail promptly on shutdown/re-point between symbols
             if (symbol is not IMethodSymbol) continue;
             foreach (var syntaxRef in symbol.DeclaringSyntaxReferences)
             {
@@ -157,8 +158,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         return false;
     }
 
-    private static IEnumerable<ISymbol> FindDeclarations(Project project, string name) =>
-        SymbolFinder.FindDeclarationsAsync(project, name, ignoreCase: false).GetAwaiter().GetResult();
+    private static IEnumerable<ISymbol> FindDeclarations(Project project, string name, System.Threading.CancellationToken ct = default) =>
+        SymbolFinder.FindDeclarationsAsync(project, name, ignoreCase: false, ct).GetAwaiter().GetResult();
 
     private (Solution Solution, Project Project) EnsureBuilt()
     {

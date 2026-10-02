@@ -149,14 +149,14 @@ public sealed class ClangCppAnalyzer : IDisposable
     /// <summary>True (semantic) references to the C/C++ symbol <paramref name="name"/>. <paramref
     /// name="candidateFiles"/> is the set of files that might contain it (absolute paths, from the trigram
     /// index); only those TUs are parsed. Null => self-scan the tree (unit tests / no index available).</summary>
-    public IReadOnlyList<SemanticLocation> FindReferences(string name, IReadOnlyCollection<string>? candidateFiles = null, int max = 200)
-        => FindReferencesDetailed(name, candidateFiles, max).Locations;
+    public IReadOnlyList<SemanticLocation> FindReferences(string name, IReadOnlyCollection<string>? candidateFiles = null, int max = 200, System.Threading.CancellationToken ct = default)
+        => FindReferencesDetailed(name, candidateFiles, max, ct).Locations;
 
     /// <summary>As <see cref="FindReferences"/> but also returns the coverage the query achieved (candidate
     /// TUs, how many parsed, unresolved includes) so callers can disclose a partial/empty result honestly.</summary>
-    public CppRefResult FindReferencesDetailed(string name, IReadOnlyCollection<string>? candidateFiles = null, int max = 200)
+    public CppRefResult FindReferencesDetailed(string name, IReadOnlyCollection<string>? candidateFiles = null, int max = 200, System.Threading.CancellationToken ct = default)
     {
-        var model = BuildModel(name, candidateFiles);
+        var model = BuildModel(name, candidateFiles, ct);
         var result = new List<SemanticLocation>();
         if (model.UsrsByName.TryGetValue(name, out var usrs))
         {
@@ -199,7 +199,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     // so memory and time scale with the symbol's actual footprint, not the repo size. Candidate TUs are
     // parsed CONCURRENTLY (each is an independent parse - the dominant cost on register-heavy files), into
     // thread-local models merged at the end; degree is RAM-bounded so peak stays in check.
-    private Model BuildModel(string name, IReadOnlyCollection<string>? candidateFiles)
+    private Model BuildModel(string name, IReadOnlyCollection<string>? candidateFiles, System.Threading.CancellationToken ct = default)
     {
         EnsureCompileDb();
 
@@ -271,12 +271,15 @@ public sealed class ClangCppAnalyzer : IDisposable
 
         if (files.Count == 1)
         {
+            ct.ThrowIfCancellationRequested(); // shutdown/re-point: abort before a (possibly long) single-TU parse
             if (OverBudget()) model.MemoryStopped = true;
             else { try { ParseInto(files[0], model); } catch { } }
             return model;
         }
 
-        var opts = new ParallelOptions { MaxDegreeOfParallelism = ParseDegree() };
+        // CancellationToken: a shutdown/re-point cancels the server token so an in-flight C/C++ parse bails
+        // (ParallelOptions throws OperationCanceledException) instead of pegging cores while teardown waits.
+        var opts = new ParallelOptions { MaxDegreeOfParallelism = ParseDegree(), CancellationToken = ct };
         bool stopped = false; // set (idempotently) when the budget trips; read after the loop joins
         Parallel.ForEach(files, opts,
             () => new Model(),                                         // thread-local model
