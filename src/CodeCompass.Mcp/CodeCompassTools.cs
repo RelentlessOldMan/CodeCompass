@@ -206,7 +206,7 @@ public static class CodeCompassTools
         // the lexical fallback iterates each root's text index (linked hits shown as absolute paths).
         int probe = maxResults + 1;
         var hits = new List<(string Line, char Kind)>();
-        foreach (var s in ServerContext.CSharp.FindReferences(name, probe))
+        foreach (var s in ServerContext.CSharp.FindReferences(name, probe, ServerContext.ShutdownToken))
             hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
 
         // C/C++ semantic is TARGETED: a reference to `name` can only be in a file whose text contains it,
@@ -237,10 +237,13 @@ public static class CodeCompassTools
             if (ClangSubprocess.Enabled && worker is null)
                 CodeCompass.Core.Diagnostics.Log.Global.Warn("clang subprocess enabled but worker exe (CodeCompass.Cli) not found next to the server; using in-process (memory may grow across broad C/C++ queries)");
             if (worker is not null &&
-                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, ClangSubprocess.TimeoutSeconds(), out var sub))
+                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, ClangSubprocess.TimeoutSeconds(), out var sub, ServerContext.ShutdownToken))
                 r = sub;
             else
-                r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe);
+                r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe, ServerContext.ShutdownToken);
+            // A shutdown/re-point may have killed the subprocess (or cancelled the in-process parse) mid-query;
+            // surface that as a cancellation so the query abandons cleanly rather than returning a partial result.
+            ServerContext.ShutdownToken.ThrowIfCancellationRequested();
             foreach (var s in r.Locations)
                 hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
             cppCand = r.CandidateTus; cppParsed = r.ParsedTus; cppUnresolved = r.UnresolvedIncludes;
@@ -346,7 +349,7 @@ public static class CodeCompassTools
         maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
         // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
         // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
-        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1);
+        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1, ServerContext.ShutdownToken);
         // Conditional-compilation disclosure (see find_references): FindCallees walks the method body via
         // Roslyn, which parses with an empty preprocessor set and can't see inactive #if/#elif branches - so a
         // call guarded by conditional compilation is SILENTLY missing. Lexical backfill can't help here (a

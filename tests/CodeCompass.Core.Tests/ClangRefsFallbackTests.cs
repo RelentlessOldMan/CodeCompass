@@ -105,6 +105,39 @@ public class ClangRefsFallbackTests
         Assert.Equal(0, lexical); // covered files fully resolved => no lexical backfill, no double-count
     }
 
+    // Unified teardown token (query side): a shutdown/re-point cancels the server token, and a long semantic
+    // query must observe it and bail instead of pegging a core while teardown waits on the read lock. A
+    // pre-cancelled token must make the C/C++ parse throw OperationCanceledException (ParallelOptions on the
+    // multi-TU loop / the single-TU guard), not run to completion.
+    [Fact]
+    public void ClangAnalyzer_CancelledToken_BailsPromptly()
+    {
+        using var repo = new TempRepo();
+        repo.Write("hot.c", "int hot(int x){ return x + 1; }\n");
+        for (int i = 0; i < 6; i++)
+            repo.Write($"use_{i}.c", $"int hot(int);\nint u{i}(void){{ return hot({i}); }}\n");
+
+        using var cts = new System.Threading.CancellationTokenSource();
+        cts.Cancel(); // pre-cancelled: the parse must bail
+
+        Assert.ThrowsAny<OperationCanceledException>(() =>
+            new ClangCppAnalyzer(repo.Root).FindReferencesDetailed("hot", candidateFiles: null, max: 200, ct: cts.Token));
+    }
+
+    // Same for the C# (Roslyn) query path: the token threads into SymbolFinder, so a pre-cancelled token aborts.
+    [Fact]
+    public void RoslynAnalyzer_CancelledToken_BailsPromptly()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class C { void M() { Helper(); } void Helper() { } } }");
+
+        using var cts = new System.Threading.CancellationTokenSource();
+        cts.Cancel();
+
+        Assert.ThrowsAny<OperationCanceledException>(() =>
+            new RoslynCSharpAnalyzer(repo.Root).FindReferences("Helper", 200, cts.Token));
+    }
+
     private static int RunCli(string exe, string cmd, string repo, out string stdout, out string stderr, string? arg = null)
     {
         var psi = new ProcessStartInfo

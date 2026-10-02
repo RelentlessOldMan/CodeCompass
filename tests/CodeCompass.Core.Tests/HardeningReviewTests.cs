@@ -400,4 +400,21 @@ public class HardeningReviewTests
         }
         finally { text.Dispose(); symbols.Dispose(); }
     }
+
+    // Unified teardown token: Build observes a CancellationToken so a re-point/shutdown can abort an in-flight
+    // rebuild PROMPTLY (ParallelOptions.CancellationToken on the parse loop) - which is what frees the file
+    // watcher's Dispose barrier instead of blocking for the whole multi-minute rebuild. A pre-cancelled token
+    // must make Build throw OperationCanceledException rather than index the tree; the test completing at all
+    // also proves the watchdog/progress-timer teardown runs in the finally (a leak/deadlock there would hang it).
+    [Fact]
+    public void Build_CancelledToken_BailsPromptlyWithoutHanging()
+    {
+        using var repo = new TempRepo();
+        for (int i = 0; i < 50; i++) repo.Write($"f{i}.cs", $"class C{i} {{ void M{i}() {{ }} }}\n");
+
+        using var cts = new System.Threading.CancellationTokenSource();
+        cts.Cancel(); // pre-cancelled: the rebuild must bail, not run to completion
+
+        Assert.ThrowsAny<OperationCanceledException>(() => RepositoryIndexer.Build(repo.Root, null, cts.Token));
+    }
 }

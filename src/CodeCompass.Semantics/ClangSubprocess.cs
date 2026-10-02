@@ -109,7 +109,8 @@ public static class ClangSubprocess
     /// <summary>Run the C/C++ reference pass in a child process. Returns true and sets <paramref name="result"/>
     /// on success; false on any failure (caller should fall back to in-process). Never throws.</summary>
     public static bool TryFindReferences(string workerExe, IReadOnlyList<string> roots, string name,
-        IReadOnlyCollection<string>? candidates, int max, int timeoutSeconds, out ClangCppAnalyzer.CppRefResult result)
+        IReadOnlyCollection<string>? candidates, int max, int timeoutSeconds, out ClangCppAnalyzer.CppRefResult result,
+        System.Threading.CancellationToken ct = default)
     {
         result = default;
         Process? p = null;
@@ -144,6 +145,14 @@ public static class ClangSubprocess
 
             p = Process.Start(psi);
             if (p is null) { Log.Global.Warn("clang subprocess: Process.Start returned null; using in-process fallback"); return false; }
+
+            // Teardown cancellation: a shutdown/re-point kills the child promptly so a long C/C++ parse doesn't
+            // keep the read lock (blocking the re-point's write lock) until the per-query timeout. The caller
+            // re-checks the token after this returns and surfaces the cancellation; here we just stop the work.
+            // (If already cancelled, Register runs the kill synchronously.)
+            using var cancelKill = ct.CanBeCanceled
+                ? ct.Register(() => { try { if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { } })
+                : default;
 
             // Drain stdout/stderr asynchronously BEFORE waiting, so a large result set can't deadlock the
             // child on a full pipe buffer. stdout is read with a byte/char ceiling: the result set is already
