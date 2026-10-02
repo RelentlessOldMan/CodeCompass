@@ -31,12 +31,34 @@ public static class ReferenceMerge
     /// what stops a symbol whose semantic resolution silently missed part of the tree from being reported as a
     /// bare zero, without over-firing lexical on the OTHER language that resolved cleanly. Callers dedup by
     /// their own display key and emit.</summary>
-    public static bool IsLexicalReference(string path, string lineText, int column1Based, int nameLength, bool cppIncomplete, bool csharpIncomplete)
+    public static bool IsLexicalReference(string path, string lineText, int column1Based, int nameLength, bool cppIncomplete, bool csharpIncomplete,
+        LexicalSpanFilter? spanFilter = null, int line1Based = 0)
     {
         bool languageIncomplete = SemanticCoverage.IsCSharp(path) ? csharpIncomplete : cppIncomplete;
         return !(SemanticCoverage.IsCovered(path) && !languageIncomplete)
            && ReferenceFileFilter.IsCodeReference(path)
-           && WordBoundary.IsWholeWord(lineText, column1Based - 1, nameLength);
+           && WordBoundary.IsWholeWord(lineText, column1Based - 1, nameLength)
+           // On the covered languages (where this fires only because the semantic pass was incomplete) a whole-word
+           // hit inside a comment or string is NOT a reference - the semantic pass excludes exactly those, and the
+           // tool's description promises the same. Skip them so the backfill recovers #if-guarded USES without
+           // re-admitting <see cref> doc-comment / string-literal noise. No filter (or a position we can't map) ->
+           // keep the hit, never drop a real reference.
+           && (spanFilter is null || line1Based <= 0 || !spanFilter.IsInCommentOrString(path, line1Based, column1Based));
+    }
+
+    /// <summary>The honest C# conditional-compilation caveat for a query, or empty when none applies. Roslyn
+    /// builds its model with an EMPTY preprocessor set, so references in inactive <c>#if</c>/<c>#elif</c> branches
+    /// are invisible to the semantic pass (shown lexically where the backfill finds them). Unlike the old generic
+    /// wording, this NAMES the candidate file(s) that actually use conditional compilation - a user who greps the
+    /// result files and finds no <c>#if</c> can see where it really is (the trip file is often a candidate that
+    /// isn't itself a result). Each host wraps the returned bare clause in its own surface prose.</summary>
+    public static string CSharpConditionalNote(IReadOnlyList<string> conditionalFilesDisplay)
+    {
+        if (conditionalFilesDisplay.Count == 0) return "";
+        var shown = string.Join(", ", conditionalFilesDisplay.Take(5));
+        if (conditionalFilesDisplay.Count > 5) shown += $", +{conditionalFilesDisplay.Count - 5} more";
+        return "C# coverage INCOMPLETE - conditional compilation (#if/#elif) in " + shown +
+               " hides inactive-branch references from the semantic pass (shown lexically where found), so a low count may miss #if-guarded uses.";
     }
 
     /// <summary>The honest C/C++ coverage caveats for a query as a list of bit strings (empty if fully

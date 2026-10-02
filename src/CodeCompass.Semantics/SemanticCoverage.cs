@@ -66,6 +66,23 @@ public static class SemanticCoverage
         return false;
     }
 
+    /// <summary>The candidate <c>.cs</c> files that actually use conditional compilation - the evidence behind
+    /// <see cref="IsCSharpPassIncomplete"/>. The disclosure names these so a user who greps the result files and
+    /// finds no <c>#if</c> can see which candidate really carries it (a trip file is often a trigram candidate
+    /// that isn't itself a result). Returns full paths in candidate order; callers map to a display form. An
+    /// empty list means the C# pass was complete (no backfill, no disclosure).</summary>
+    public static IReadOnlyList<string> CSharpConditionalFiles(IEnumerable<string> candidateFullPaths)
+    {
+        var hits = new List<string>();
+        foreach (var p in candidateFullPaths)
+        {
+            if (!IsCSharp(p)) continue;
+            try { if (HasCSharpConditionalCompilation(File.ReadAllText(p))) hits.Add(p); }
+            catch { /* unreadable candidate: can't prove incompleteness from it */ }
+        }
+        return hits;
+    }
+
     /// <summary>
     /// Whether a C/C++ <c>find_references</c> pass was INCOMPLETE, i.e. a low/zero semantic count may mean
     /// "couldn't look," not "no references" - so the lexical layer should backfill C/C++ files instead of
