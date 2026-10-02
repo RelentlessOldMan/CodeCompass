@@ -50,27 +50,15 @@ public static class SemanticCoverage
         }
     }
 
-    /// <summary>Whether the C# semantic pass may be INCOMPLETE for this query: true if ANY candidate .cs file
-    /// uses conditional compilation, since Roslyn can't see inactive <c>#if</c> branches. Early-exits on the
-    /// first hit. Reads candidate files (bounded to those that could contain the symbol); unreadable files are
-    /// skipped. Mirrors <see cref="IsCppPassIncomplete"/> as the single source of truth for "backfill lexical
-    /// + disclose rather than trust a possibly-partial C# semantic result."</summary>
-    public static bool IsCSharpPassIncomplete(IEnumerable<string> candidateFullPaths)
-    {
-        foreach (var p in candidateFullPaths)
-        {
-            if (!IsCSharp(p)) continue;
-            try { if (HasCSharpConditionalCompilation(File.ReadAllText(p))) return true; }
-            catch { /* unreadable candidate: can't prove incompleteness from it */ }
-        }
-        return false;
-    }
-
-    /// <summary>The candidate <c>.cs</c> files that actually use conditional compilation - the evidence behind
-    /// <see cref="IsCSharpPassIncomplete"/>. The disclosure names these so a user who greps the result files and
-    /// finds no <c>#if</c> can see which candidate really carries it (a trip file is often a trigram candidate
-    /// that isn't itself a result). Returns full paths in candidate order; callers map to a display form. An
-    /// empty list means the C# pass was complete (no backfill, no disclosure).</summary>
+    /// <summary>The candidate <c>.cs</c> files that use conditional compilation - the C# twin of
+    /// <see cref="IsCppPassIncomplete"/> and the SINGLE source of truth for "the C# semantic pass may be
+    /// incomplete, so backfill lexical + disclose rather than trust a possibly-partial result." Roslyn can't see
+    /// inactive <c>#if</c>/<c>#elif</c> branches, so any such candidate means a guarded reference/call may be
+    /// missing; an empty list means the pass was complete (no backfill, no disclosure). The disclosure NAMES these
+    /// so a user who greps the result files and finds no <c>#if</c> can see which candidate really carries it (a
+    /// trip file is often a trigram candidate that isn't itself a result). Full paths in candidate order; callers
+    /// take <c>.Count &gt; 0</c> for the incomplete flag and map the paths to a display form. Reads each candidate
+    /// (bounded to those that could contain the symbol); unreadable files are skipped.</summary>
     public static IReadOnlyList<string> CSharpConditionalFiles(IEnumerable<string> candidateFullPaths)
     {
         var hits = new List<string>();
