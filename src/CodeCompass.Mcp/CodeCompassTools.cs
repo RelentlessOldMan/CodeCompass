@@ -60,6 +60,25 @@ public static class CodeCompassTools
     private static string DisplayPath(ServerContext.IndexHandle h, string rel) =>
         h.IsPrimary ? rel : System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
 
+    // Is a semantic hit's owning root currently in this query's scope? The C#/C++ analyzers span ALL roots
+    // (so cross-root resolution keeps working), so when a session focus is active we must filter the DISPLAYED
+    // semantic hits to the focused set ourselves - mirroring the handle filter QueryAll already applies to the
+    // lexical/symbol paths. SemanticLocation.Root is "" for the primary root, else the linked root's path.
+    private static bool InScope(IReadOnlyList<ServerContext.IndexHandle> handles, string semRoot)
+    {
+        // Empty Root => a primary-root hit: in scope iff the primary handle survived the focus filter. Resolve
+        // this first so NormPath (Path.GetFullPath, which throws on "") is only ever called on a real path.
+        bool primary = string.IsNullOrEmpty(semRoot);
+        foreach (var h in handles)
+        {
+            if (primary) { if (h.IsPrimary) return true; }
+            else if (!h.IsPrimary && string.Equals(NormPath(h.Root), NormPath(semRoot), StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    private static string NormPath(string p) => System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(p));
+
     // A semantic hit's display path. The analyzers span all roots; a hit in the primary root carries an
     // empty Root (repo-relative), a hit in a linked root carries that root (shown absolute) - same
     // addressing convention as the lexical/symbol federation above.
@@ -211,8 +230,10 @@ public static class CodeCompassTools
         // the lexical fallback iterates each root's text index (linked hits shown as absolute paths).
         int probe = maxResults + 1;
         var hits = new List<(string Line, char Kind)>();
+        // The analyzer spans every root; when a focus is active, keep only hits whose owning root is in scope.
         foreach (var s in ServerContext.CSharp.FindReferences(name, probe, ServerContext.ShutdownToken))
-            hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
+            if (InScope(handles, s.Root))
+                hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
 
         // C/C++ semantic is TARGETED: a reference to `name` can only be in a file whose text contains it,
         // and the trigram index lists exactly those files. So gather the candidate C/C++ sources across all
@@ -360,7 +381,9 @@ public static class CodeCompassTools
         maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
         // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
         // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
-        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1, ServerContext.ShutdownToken);
+        // The analyzer spans every root; under an active focus keep only callees whose DEFINITION is in scope.
+        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1, ServerContext.ShutdownToken)
+            .Where(c => InScope(handles, c.Root)).ToList();
         // Conditional-compilation handling (see find_references): FindCallees walks the method body via Roslyn,
         // which parses with an empty preprocessor set and can't see inactive #if/#elif branches - so a call
         // guarded by conditional compilation is SILENTLY missing (the forward/reverse asymmetry: refs finds the
@@ -379,6 +402,7 @@ public static class CodeCompassTools
         var calleeCond = SemanticCoverage.CSharpConditionalFiles(calleeCsCands);
         var recovered = calleeCond.Count > 0
             ? ServerContext.CSharp.FindCalleesInInactiveBranches(name, maxResults + 1, ServerContext.ShutdownToken)
+                .Where(r => InScope(handles, r.Root)).ToList()
             : (IReadOnlyList<SemanticLocation>)System.Array.Empty<SemanticLocation>();
         // Dedup recovered vs the FULL semantic list (incl. any truncated overflow row), so a call present in both
         // an active and an inactive branch is never shown twice - and the disclosure counts what's actually shown.
@@ -461,14 +485,20 @@ public static class CodeCompassTools
     [McpServerTool(Name = "manage_links")]
     [Description("Configure LINKED ROOTS - external directories outside this workspace (a shared library, a " +
                  "sibling repo, a third-party drop on another drive) whose code is federated into this " +
-                 "workspace's searches. action: \"list\" (default) shows the current linked roots + index " +
-                 "status; \"add\" attaches a directory (and indexes it, or defers if very large); \"remove\" " +
-                 "detaches one. 'path' is the external directory (required for add/remove). Changes take " +
-                 "effect on the NEXT query this session. Searching across links is automatic - this only " +
-                 "configures which roots are federated; it does not itself run a search.")]
+                 "workspace's searches. action: \"list\" (default) shows the linked roots, index status, and " +
+                 "the current focus; \"add\" attaches a directory (and indexes it, or defers if very large); " +
+                 "\"remove\" detaches one; \"focus\" SCOPES searches to a subset of roots (see below). 'path' " +
+                 "is the external directory (required for add/remove). Changes take effect on the NEXT query " +
+                 "this session. Searching across links is otherwise automatic.\n" +
+                 "FOCUS - when you link several big repos into one workspace but want to search only one at a " +
+                 "time: action=\"focus\" path=\"<repo>\" scopes every subsequent search to that root (the " +
+                 "wrapper project + any other linked roots are excluded); 'path' matches a repo folder name, a " +
+                 "path fragment, or a full path, and accepts a comma-separated list to focus several at once. " +
+                 "action=\"focus\" with NO path clears it (searches federate across all roots again). Scoped " +
+                 "results disclose what was excluded, so a narrowed search is never mistaken for 'not found'.")]
     public static string ManageLinks(
-        [Description("What to do: list | add | remove (default list).")] string action = "list",
-        [Description("The external directory to add or remove (absolute path). Required for add/remove.")] string? path = null,
+        [Description("What to do: list | add | remove | focus (default list).")] string action = "list",
+        [Description("For add/remove: the external directory (absolute path). For focus: repo name(s)/path(s) to scope to (comma-separated); omit to clear focus.")] string? path = null,
         [Description("On remove, also delete the linked root's index if no other workspace uses it (reclaim disk).")] bool purge = false)
     {
         var project = ServerContext.Root;
@@ -479,10 +509,46 @@ public static class CodeCompassTools
             case "list":
             {
                 var links = LinkManager.List(project);
-                if (links.Count == 0) return $"No linked roots for {project}. Use action=\"add\" with a path to federate an external directory.";
+                var focus = ServerContext.CurrentFocus;
+                if (links.Count == 0)
+                    return $"No linked roots for {project}. Use action=\"add\" with a path to federate an external directory." +
+                           (focus.Count > 0 ? $"\n(Focus is set to {focus.Count} root(s), but there are no links.)" : "");
                 var sb = new StringBuilder($"Linked roots for {project}:\n");
                 foreach (var l in links) sb.AppendLine($"  {l.Path}  [{l.Status}]");
+                sb.Append(focus.Count > 0
+                    ? $"Focus: ACTIVE - searches scoped to {focus.Count} root(s): {string.Join(", ", focus)}. Clear with action=focus (no path)."
+                    : "Focus: off - searches federate across the project + all linked roots. Scope to one with action=focus path=\"<repo>\".");
                 return sb.ToString().TrimEnd();
+            }
+            case "focus":
+            {
+                // The focusable universe: the project (wrapper) root + every configured linked root.
+                var universe = new List<string> { project };
+                universe.AddRange(LinkStore.Read(project));
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    ServerContext.ClearFocus();
+                    return $"Focus cleared - searches federate across all {universe.Count} root(s) again.";
+                }
+                var tokens = path.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                var matched = new List<string>();
+                var unmatched = new List<string>();
+                foreach (var tok in tokens)
+                {
+                    var found = CodeCompass.Core.Storage.RootScope.Match(universe, tok);
+                    if (found.Count == 0) unmatched.Add(tok);
+                    else matched.AddRange(found);
+                }
+                if (unmatched.Count > 0)
+                    return $"No root matches: {string.Join(", ", unmatched)}. Known roots: {string.Join(", ", universe)}. " +
+                           "Focus unchanged - pass a repo folder name, a path fragment, or an absolute path.";
+                matched = matched.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                ServerContext.SetFocus(matched);
+                int excluded = universe.Count - matched.Count;
+                return excluded > 0
+                    ? $"Focused on {matched.Count} of {universe.Count} root(s): {string.Join(", ", matched)}. " +
+                      $"{excluded} root(s) excluded from searches until you clear focus (action=focus, no path)."
+                    : $"Focus set to all {universe.Count} root(s) - nothing is excluded (clear with action=focus, no path).";
             }
             case "add":
             {
@@ -506,7 +572,7 @@ public static class CodeCompassTools
                 return sb.ToString();
             }
             default:
-                return $"Unknown action '{action}'. Use list, add, or remove.";
+                return $"Unknown action '{action}'. Use list, add, remove, or focus.";
         }
     }
 }
