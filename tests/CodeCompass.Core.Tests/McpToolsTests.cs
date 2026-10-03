@@ -926,4 +926,169 @@ public class McpToolsTests
         Assert.True(ready, $"index never became ready; last status: {status}");
         Assert.Contains("Widget", CodeCompassTools.FindDefinition("Widget"));
     }
+
+    // #75: session focus. A wrapper project links several big repos but the user wants to search only one at
+    // a time. manage_links action=focus scopes every subsequent search to the chosen root(s); the excluded
+    // roots' hits disappear and the result discloses the scoping so a narrowed search isn't read as "absent".
+    [Fact]
+    public void Focus_ScopesLexicalSearch_ExcludesOtherRoots_AndDiscloses()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class ProjectOnlyWidget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class ExternalOnlyGizmo { } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            // Unscoped: both roots are searchable, no scoping disclosure.
+            Assert.Contains("ProjectOnlyWidget", CodeCompassTools.SearchCode("ProjectOnlyWidget"));
+            Assert.Contains("ExternalOnlyGizmo", CodeCompassTools.SearchCode("ExternalOnlyGizmo"));
+            Assert.DoesNotContain("Scoped to", CodeCompassTools.SearchCode("ProjectOnlyWidget"));
+
+            // Focus on the linked root (by absolute path): the project (wrapper) root falls out of scope.
+            var focusMsg = CodeCompassTools.ManageLinks("focus", external.Root);
+            Assert.Contains("Focused on", focusMsg);
+
+            // The project-only symbol is now out of scope: not found, AND the no-match reply discloses the scope.
+            var scopedProj = CodeCompassTools.SearchCode("ProjectOnlyWidget");
+            Assert.DoesNotContain("src/App.cs", scopedProj);
+            Assert.Contains("Scoped to", scopedProj);
+            // The linked root stays in scope and is still fully searchable.
+            var scopedExt = CodeCompassTools.SearchCode("ExternalOnlyGizmo");
+            Assert.Contains("ExternalOnlyGizmo", scopedExt);
+            Assert.Contains("Scoped to", scopedExt);
+
+            // Clearing focus restores full federation and removes the disclosure.
+            var clearMsg = CodeCompassTools.ManageLinks("focus");
+            Assert.Contains("cleared", clearMsg);
+            var cleared = CodeCompassTools.SearchCode("ProjectOnlyWidget");
+            Assert.Contains("src/App.cs", cleared);
+            Assert.DoesNotContain("Scoped to", cleared);
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    [Fact]
+    public void Focus_ScopesSemanticFindReferences_ByOwningRoot()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        // A type defined in the project is used (new Shared()) in BOTH roots; same namespace, so the
+        // all-roots analyzer resolves both. Focus must show only the usages in the focused root.
+        project.Write("src/P.cs", "namespace N { public class Shared { } public class PUse { public void M() { var x = new Shared(); } } }");
+        external.Write("lib/E.cs", "namespace N { public class EUse { public void M() { var x = new Shared(); } } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            // Unscoped: both usage sites resolve.
+            var all = CodeCompassTools.FindReferences("Shared");
+            Assert.Contains("P.cs", all);
+            Assert.Contains("E.cs", all);
+
+            // Focus the linked root: only its usage survives; the project usage is filtered out.
+            CodeCompassTools.ManageLinks("focus", external.Root);
+            var ext = CodeCompassTools.FindReferences("Shared");
+            Assert.Contains("E.cs", ext);
+            Assert.DoesNotContain("P.cs", ext);
+            Assert.Contains("Scoped to", ext);
+
+            // Focus the project (by its folder name): now only the project usage survives.
+            CodeCompassTools.ManageLinks("focus", System.IO.Path.GetFileName(project.Root));
+            var proj = CodeCompassTools.FindReferences("Shared");
+            Assert.Contains("P.cs", proj);
+            Assert.DoesNotContain("E.cs", proj);
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    [Fact]
+    public void Focus_UnknownToken_LeavesFocusUnchanged_AndListReportsState()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class Gizmo { } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            // list shows focus off by default.
+            Assert.Contains("Focus: off", CodeCompassTools.ManageLinks("list"));
+
+            // A token that matches no root is rejected without changing state.
+            var bad = CodeCompassTools.ManageLinks("focus", "no-such-repo");
+            Assert.Contains("No root matches", bad);
+            Assert.Contains("Widget", CodeCompassTools.SearchCode("Widget")); // still unscoped - project searchable
+
+            // A real focus is reflected by list.
+            CodeCompassTools.ManageLinks("focus", external.Root);
+            Assert.Contains("Focus: ACTIVE", CodeCompassTools.ManageLinks("list"));
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    [Fact]
+    public void Focus_SelectingAllRoots_ExcludesNothing_AndCarriesNoScopeNote()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class ProjWidget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class ExtGizmo { } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            // Focusing on EVERY root is a no-op scope: both roots stay searchable and no exclusion is disclosed.
+            var msg = CodeCompassTools.ManageLinks("focus", $"{project.Root},{external.Root}");
+            Assert.Contains("nothing is excluded", msg);
+            var r1 = CodeCompassTools.SearchCode("ProjWidget");
+            Assert.Contains("src/App.cs", r1);
+            Assert.DoesNotContain("Scoped to", r1);          // focus selected all => no scope note
+            Assert.Contains("ExtGizmo", CodeCompassTools.SearchCode("ExtGizmo"));
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    [Fact]
+    public void Focus_OnNotYetIndexedRoot_SaysSo_RatherThanBlackholeTheQuery()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class Gizmo { } }");
+        // Link the external root but DON'T build its index - it's configured (so focus can name it) but not loaded.
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            // Focus resolves against the configured links, so this succeeds...
+            Assert.Contains("Focused on", CodeCompassTools.ManageLinks("focus", external.Root));
+            // ...but the focused root isn't loaded, so a search says so instead of returning a bare "no match"
+            // (which would read as "the symbol doesn't exist").
+            var res = CodeCompassTools.SearchCode("Widget");
+            Assert.Contains("none of the focused root(s) are indexed", res);
+            Assert.DoesNotContain("src/App.cs", res); // the project is out of scope, so its hit must not leak
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
 }

@@ -81,6 +81,15 @@ public static class ServerContext
     }
     private static List<LinkedRoot> _linked = new();
 
+    // Session focus (manage_links action=focus): when non-null, queries are SCOPED to just these roots
+    // (normalized absolute paths) instead of federating across all of them - the "I'm working in repo A
+    // today, search only A" lever for a wrapper project that links several giant repos. null => no focus =>
+    // federate every root (the default). Deliberately transient/session-lived: a focus is a mode, not
+    // persisted config, so it resets on restart and on a re-point (Init clears it). A volatile reference
+    // swap makes it readable lock-free from inside a query op, which already holds the Rw read lock and
+    // must not re-enter it (NoRecursion would throw).
+    private static volatile HashSet<string>? _focus;
+
     private static IndexState _state = IndexState.NotStarted;
     private static int _progressFiles;
     private static long _progressBytes;
@@ -146,6 +155,7 @@ public static class ServerContext
             _pendingPaths.Clear();
             _pendingReconcile = false;
             _rebuilding = false;
+            _focus = null; // a focus names the PREVIOUS project's roots - stale after a re-point; start unscoped
             _epoch++; // re-point: any in-flight build for the previous root is now stale (discarded at Swap)
         }
         finally { Rw.ExitWriteLock(); }
@@ -324,10 +334,43 @@ public static class ServerContext
         catch (Exception ex) { Log.For(linkedRoot).Warn($"linked root reconcile skipped: {ex.Message}"); }
     }
 
+    // Normalize a root path for value comparison against the focus set (absolute, no trailing separator) -
+    // identical rule to RootScope.Normalize, which produces the stored focus entries.
+    private static string NormalizeRoot(string p) => RootScope.Normalize(p);
+
+    /// <summary>Scope subsequent queries to <paramref name="roots"/> (normalized absolute paths). An empty
+    /// set clears focus (back to federating all roots). See <see cref="_focus"/>.</summary>
+    internal static void SetFocus(IEnumerable<string> roots)
+    {
+        var set = new HashSet<string>(roots.Select(NormalizeRoot), StringComparer.OrdinalIgnoreCase);
+        _focus = set.Count > 0 ? set : null;
+    }
+
+    /// <summary>Clear the session focus - queries federate across all roots again.</summary>
+    internal static void ClearFocus() => _focus = null;
+
+    /// <summary>The roots currently in focus (empty => no focus is set, all roots are queried).</summary>
+    internal static IReadOnlyCollection<string> CurrentFocus =>
+        (IReadOnlyCollection<string>?)_focus ?? Array.Empty<string>();
+
+    // Appended to EVERY scoped query result (even a "no match") so a narrowed search is never misread as
+    // "doesn't exist" - the same honesty discipline as the coverage caveats. Empty when no focus is active
+    // or when the focus happens to select every root (nothing excluded). Called from inside the read lock.
+    private static string FocusDisclosure(int totalRoots, IReadOnlyList<IndexHandle> inScope)
+    {
+        if (_focus is null || inScope.Count >= totalRoots) return "";
+        var names = string.Join(", ", inScope.Select(h => Path.GetFileName(NormalizeRoot(h.Root))));
+        int excluded = totalRoots - inScope.Count;
+        return $"\n(Scoped to {names}; {excluded} other root(s) excluded from this search. " +
+               "Clear with manage_links action=focus.)";
+    }
+
     /// <summary>
     /// Federated read: run <paramref name="op"/> against the primary index plus every loaded linked
     /// index, under the read lock. The op merges results itself (linked hits are shown with absolute
     /// paths - see the tools). Returns the human-readable status if the primary index isn't ready.
+    /// When a session focus is set, the handle set is restricted to the focused roots and the result
+    /// discloses what was excluded.
     /// </summary>
     internal static string QueryAll(Func<IReadOnlyList<IndexHandle>, string> op)
     {
@@ -337,13 +380,24 @@ public static class ServerContext
         try
         {
             if (_state != IndexState.Ready || _text is null || _symbols is null) return StatusMessage();
-            var handles = new List<IndexHandle>(1 + _linked.Count) { new(Root, _text, _symbols, IsPrimary: true) };
-            foreach (var lr in _linked) handles.Add(new IndexHandle(lr.Root, lr.Text, lr.Symbols, IsPrimary: false));
+            var all = new List<IndexHandle>(1 + _linked.Count) { new(Root, _text, _symbols, IsPrimary: true) };
+            foreach (var lr in _linked) all.Add(new IndexHandle(lr.Root, lr.Text, lr.Symbols, IsPrimary: false));
+
+            // Session focus: restrict the federated set to the roots the user scoped to. null => all roots.
+            var focus = _focus;
+            var handles = focus is null ? all : all.Where(h => focus.Contains(NormalizeRoot(h.Root))).ToList();
+            if (focus is not null && handles.Count == 0)
+                // Focus names only root(s) that aren't indexed/loaded yet - say so rather than let the op
+                // return a bare "no match" over nothing, which would read as "the symbol doesn't exist."
+                return "Focus is set, but none of the focused root(s) are indexed/loaded. Clear it with " +
+                       "manage_links action=focus (no path), or build the focused root's index.";
+            string focusNote = FocusDisclosure(all.Count, handles);
+
             // Every tool funnels through here. An unexpected throw inside op (a clang edge case, a corrupt
             // segment surfacing mid-read, an OOM in a semantic pass) would otherwise escape to the MCP framework
             // and serialize a raw stack trace - leaking internal cache/repo paths and giving the agent an
             // unactionable error. Contain it to a short, path-free message and log the detail for diagnosis.
-            try { return op(handles); }
+            try { return op(handles) + focusNote; }
             catch (OperationCanceledException)
             {
                 // The teardown token tripped mid-query (a re-point or shutdown), so a long semantic pass bailed.
