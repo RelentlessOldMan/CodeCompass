@@ -1085,10 +1085,9 @@ static int CmdRefs(string[] args)
         foreach (var rel in index!.CandidateFiles(name))
         {
             var full = Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)));
-            var ext = Path.GetExtension(rel);
-            if (ext is ".c" or ".cc" or ".cpp" or ".cxx" or ".c++")
+            if (ClangCppAnalyzer.IsCppSource(rel))
                 cppCandidates.Add(full);
-            else if (ext.Equals(".cs", StringComparison.OrdinalIgnoreCase))
+            else if (Path.GetExtension(rel).Equals(".cs", StringComparison.OrdinalIgnoreCase))
                 csCandidates.Add(full);
         }
     }

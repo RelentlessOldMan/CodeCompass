@@ -77,17 +77,15 @@ public static class CodeCompassTools
     private static bool InScope(IReadOnlyList<ServerContext.IndexHandle> handles, string semRoot)
     {
         // Empty Root => a primary-root hit: in scope iff the primary handle survived the focus filter. Resolve
-        // this first so NormPath (Path.GetFullPath, which throws on "") is only ever called on a real path.
+        // this first so SameDir (Path.GetFullPath, which throws on "") is only ever called on a real path.
         bool primary = string.IsNullOrEmpty(semRoot);
         foreach (var h in handles)
         {
             if (primary) { if (h.IsPrimary) return true; }
-            else if (!h.IsPrimary && string.Equals(NormPath(h.Root), NormPath(semRoot), StringComparison.OrdinalIgnoreCase)) return true;
+            else if (!h.IsPrimary && PathSafety.SameDir(h.Root, semRoot)) return true;
         }
         return false;
     }
-
-    private static string NormPath(string p) => System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(p));
 
     // A semantic hit's display path. The analyzers span all roots; a hit in the primary root carries an
     // empty Root (repo-relative), a hit in a linked root carries that root (shown absolute) - same
@@ -136,17 +134,8 @@ public static class CodeCompassTools
         return sb.ToString();
     }
 
-    // A whole-word text match in a data/doc file or a build artifact isn't a code reference - shared with
-    // the CLI `refs` via CodeCompass.Core.Text.ReferenceFileFilter so both filter identically.
-    private static bool IsCodeReferenceFile(string path) => ReferenceFileFilter.IsCodeReference(path);
-
-    // C/C++ translation-unit extensions (headers are parsed via #include, not directly) - the files the
-    // clang layer parses, and thus the candidates worth handing it for a targeted find-references.
-    private static readonly HashSet<string> CppSourceExtensions = new(StringComparer.OrdinalIgnoreCase)
-    { ".c", ".cc", ".cpp", ".cxx", ".c++" };
-
-    private static bool IsCppSourceFile(string path) =>
-        CppSourceExtensions.Contains(System.IO.Path.GetExtension(path));
+    // The C/C++ translation units clang parses (headers come in via #include) - the candidates worth handing it.
+    private static bool IsCppSourceFile(string path) => ClangCppAnalyzer.IsCppSource(path);
 
     // Result footer that distinguishes an exact count from a truncated one, so the agent knows
     // whether it has seen everything or must refine the query. `shown` is how many we actually list.
@@ -376,7 +365,7 @@ public static class CodeCompassTools
                 cppNote = " (Note: C/C++ coverage INCOMPLETE - " + string.Join("; ", bits) +
                           ". Missing headers aren't in the tree (no -I/compile DB can fix that), so a low or zero " +
                           "C/C++ count may mean 'couldn't parse', not 'no references' - add the headers for full coverage.)";
-            else if (!ServerContext.Cpp.HasCompileDb)
+            else if (!ClangCppAnalyzer.ProbeCompileDb(ServerContext.AllRootsForQuery()))
                 cppNote = " (Note: no compile_commands.json found - C/C++ references resolved with best-effort " +
                           "flags and may be imprecise; add one for precise results.)";
         }

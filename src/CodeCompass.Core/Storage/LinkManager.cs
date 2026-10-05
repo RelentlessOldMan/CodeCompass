@@ -137,7 +137,7 @@ public static class LinkManager
     internal static string? SensitiveLinkTarget(string linked)
     {
         if (Environment.GetEnvironmentVariable("CODECOMPASS_ALLOW_ANY_LINK") is "1" or "true") return null;
-        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(linked));
+        var full = PathSafety.NormalizeDir(linked);
         var root = Path.GetPathRoot(full);
         if (root is not null && string.Equals(Path.TrimEndingDirectorySeparator(root), full, StringComparison.OrdinalIgnoreCase))
             return $"{full} is a drive or share root - link the project directory instead.";

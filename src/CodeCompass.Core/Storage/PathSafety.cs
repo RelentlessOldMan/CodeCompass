@@ -33,12 +33,19 @@ public static class PathSafety
     /// already covered by another root, and (federation) to confirm a result path belongs to a known root.</summary>
     public static bool IsUnderOrEqual(string child, string parent)
     {
-        var c = Normalize(child);
-        var p = Normalize(parent);
+        var c = NormalizeDir(child);
+        var p = NormalizeDir(parent);
         if (string.Equals(c, p, StringComparison.OrdinalIgnoreCase)) return true;
         var rel = Path.GetRelativePath(p, c);
         return rel != "." && !rel.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(rel);
     }
 
-    private static string Normalize(string p) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p));
+    /// <summary>The one normalization for a directory used as an identity (a root, a link, a cache dir): absolute,
+    /// no trailing separator. Every root comparison goes through this so federation, focus, links and the analyzers
+    /// can never disagree about whether two spellings name the same directory.</summary>
+    public static string NormalizeDir(string p) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p));
+
+    /// <summary>Do two spellings name the same directory? (Normalized, case-insensitive - Windows.)</summary>
+    public static bool SameDir(string a, string b) =>
+        string.Equals(NormalizeDir(a), NormalizeDir(b), StringComparison.OrdinalIgnoreCase);
 }

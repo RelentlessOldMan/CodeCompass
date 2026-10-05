@@ -323,22 +323,28 @@ public sealed class TrigramIndex
 
         var idx = new TrigramIndex { RepoRoot = r.ReadString() };
 
+        // Counts come from the file: validate them and cap every pre-size, so a corrupt/hostile file fails as
+        // corrupt (EndOfStream) instead of forcing a multi-GB allocation up front. (Mirrors SegmentedIndex's loaders.)
         int docCount = r.ReadInt32();
-        idx._docPaths.Capacity = docCount;
+        if (docCount < 0) throw new InvalidDataException($"corrupt index: negative document count ({docCount})");
+        idx._docPaths.Capacity = Math.Min(docCount, 4096);
         for (int i = 0; i < docCount; i++) idx._docPaths.Add(r.ReadString());
 
         int triCount = r.ReadInt32();
+        if (triCount < 0) throw new InvalidDataException($"corrupt index: negative trigram count ({triCount})");
         for (int i = 0; i < triCount; i++)
         {
             long key = r.ReadInt64();
             int n = r.ReadInt32();
-            var list = new List<int>(n);
+            if (n < 0) throw new InvalidDataException($"corrupt index: negative posting count ({n})");
+            var list = new List<int>(Math.Min(n, 4096));
             int prev = 0;
             for (int j = 0; j < n; j++) { prev += r.ReadInt32(); list.Add(prev); }
             idx._postings[key] = list;
         }
 
         int delCount = r.ReadInt32();
+        if (delCount < 0) throw new InvalidDataException($"corrupt index: negative deletion count ({delCount})");
         for (int i = 0; i < delCount; i++) idx._deleted.Add(r.ReadInt32());
 
         // Rebuild live path -> docId (ascending, so the newest live doc for a path wins).

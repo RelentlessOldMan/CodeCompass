@@ -292,6 +292,35 @@ public static class CodeCompassConfig
                 if (!string.IsNullOrWhiteSpace(d)) yield return d.Trim();
     }
 
+    // ---- C/C++ semantic-pass knobs (environment only; see README "Tuning C/C++ find-references") ----------------
+
+    /// <summary>Largest C/C++ source handed to clang (default 2 MB); larger candidates are searched lexically and
+    /// disclosed. CODECOMPASS_CPP_MAX_TU_MB.</summary>
+    public static long CppMaxTuBytes() => (EnvLong("CODECOMPASS_CPP_MAX_TU_MB") is > 0 and var mb ? mb : 2) * 1024 * 1024;
+
+    /// <summary>Candidate-TU count above which the semantic pass is skipped up front (latency guard; default 400,
+    /// 0 = never skip). CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES.</summary>
+    public static int CppMaxSemanticCandidates() => EnvInt("CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES") is >= 0 and var n ? n : 400;
+
+    /// <summary>Explicit concurrent TU parses, or null to size by available memory. CODECOMPASS_CPP_PARSE_THREADS.</summary>
+    public static int? CppParseThreads() => EnvInt("CODECOMPASS_CPP_PARSE_THREADS") is > 0 and var n ? n : null;
+
+    /// <summary>Explicit per-session clang memory ceiling in MB, or null to scale with RAM. CODECOMPASS_CPP_SESSION_MEM_MB.</summary>
+    public static long? CppSessionMemMb() => EnvLong("CODECOMPASS_CPP_SESSION_MEM_MB") is > 0 and var mb ? mb : null;
+
+    /// <summary>Explicit per-query clang growth budget in MB, or null to scale with free memory. CODECOMPASS_CPP_QUERY_MEM_MB.</summary>
+    public static long? CppQueryMemMb() => EnvLong("CODECOMPASS_CPP_QUERY_MEM_MB") is > 0 and var mb ? mb : null;
+
+    /// <summary>Parse C/C++ in a short-lived worker process (default on). CODECOMPASS_CPP_SUBPROCESS=0/false/off.</summary>
+    public static bool CppSubprocessEnabled()
+    {
+        var v = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_SUBPROCESS");
+        return !(v is "0" || string.Equals(v, "false", StringComparison.OrdinalIgnoreCase) || string.Equals(v, "off", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>C/C++ worker timeout in seconds (default 300, clamped 5-3600). CODECOMPASS_CPP_WORKER_TIMEOUT_SEC.</summary>
+    public static int CppWorkerTimeoutSec() => EnvInt("CODECOMPASS_CPP_WORKER_TIMEOUT_SEC") is > 0 and var s ? Math.Clamp(s, 5, 3600) : 300;
+
     /// <summary>Directory names to index even though a default rule skips them: CODECOMPASS_KEEP + config keepDirs.</summary>
     public static IEnumerable<string> KeptDirs() => KeptDirs(_current);
     public static IEnumerable<string> KeptDirs(RepoConfig cfg)

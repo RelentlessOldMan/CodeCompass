@@ -121,7 +121,7 @@ public sealed class IndexWriteLock : IDisposable
         catch (UnauthorizedAccessException) { return null; }
     }
 
-    private static string Key(string cacheDir) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(cacheDir));
+    private static string Key(string cacheDir) => PathSafety.NormalizeDir(cacheDir);
 }
 
 /// <summary>

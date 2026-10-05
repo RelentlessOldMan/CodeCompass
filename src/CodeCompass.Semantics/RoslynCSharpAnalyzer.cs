@@ -44,7 +44,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     /// <summary>Span multiple roots (project + linked external roots) in one compilation, so references
     /// resolve across the boundary. The first root is treated as primary by callers for path display.</summary>
     public RoslynCSharpAnalyzer(IReadOnlyList<string> roots) =>
-        _roots = roots.Select(r => Path.TrimEndingDirectorySeparator(Path.GetFullPath(r))).ToList();
+        _roots = roots.Select(CodeCompass.Core.Storage.PathSafety.NormalizeDir).ToList();
 
     /// <summary>Release the in-memory solution/compilation (hundreds of MB to GB on a large repo). Safe
     /// to call while the instance is being discarded; a fresh instance rebuilds lazily on next use.</summary>
@@ -59,8 +59,9 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         }
     }
 
-    /// <summary>Definitions of <paramref name="name"/> declared in the C# sources.</summary>
-    public IReadOnlyList<SemanticLocation> FindDefinitions(string name, System.Threading.CancellationToken ct = default)
+    /// <summary>Definitions of <paramref name="name"/> declared in the C# sources. Test oracle only: find_definition
+    /// uses the tree-sitter symbol index - don't wire a tool to this assuming parity.</summary>
+    internal IReadOnlyList<SemanticLocation> FindDefinitions(string name, System.Threading.CancellationToken ct = default)
     {
         var (_, project) = EnsureBuilt(ct);
         var result = new List<SemanticLocation>();

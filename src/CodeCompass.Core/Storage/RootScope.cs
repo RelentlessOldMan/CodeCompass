@@ -38,5 +38,5 @@ public static class RootScope
     }
 
     /// <summary>Normalize a root for value comparison: absolute, no trailing separator.</summary>
-    public static string Normalize(string p) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p));
+    public static string Normalize(string p) => PathSafety.NormalizeDir(p);
 }

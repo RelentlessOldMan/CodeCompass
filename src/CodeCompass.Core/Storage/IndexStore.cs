@@ -25,9 +25,11 @@ public static class IndexStore
         return Path.Combine(baseDir, "CodeCompass");
     }
 
-    /// <summary>Stable short key for a repo path (used for its cache dir and per-repo log name).</summary>
+    /// <summary>Stable short key for a repo path (used for its cache dir and per-repo log name). Normalized like every
+    /// other root identity (PathSafety.NormalizeDir): "C:\repo" and "C:\repo\" used to hash to two separate caches -
+    /// two diverging indexes of one repo (e.g. a Claude Code and a Codex session spelling the root differently).</summary>
     public static string RepoKey(string repoRoot) => Convert.ToHexString(
-        SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(repoRoot).ToLowerInvariant())))[..16];
+        SHA256.HashData(Encoding.UTF8.GetBytes(PathSafety.NormalizeDir(repoRoot).ToLowerInvariant())))[..16];
 
     public static string GetCacheDir(string repoRoot)
     {

@@ -24,14 +24,7 @@ namespace CodeCompass.Semantics;
 public static class ClangSubprocess
 {
     /// <summary>On by default; set CODECOMPASS_CPP_SUBPROCESS=0 to force the in-process analyzer.</summary>
-    public static bool Enabled
-    {
-        get
-        {
-            var v = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_SUBPROCESS");
-            return !(v is "0" || string.Equals(v, "false", StringComparison.OrdinalIgnoreCase) || string.Equals(v, "off", StringComparison.OrdinalIgnoreCase));
-        }
-    }
+    public static bool Enabled => CodeCompass.Core.Config.CodeCompassConfig.CppSubprocessEnabled();
 
     /// <summary>Path to the worker exe (the CLI, next to whatever is running), or null if not found.</summary>
     public static string? WorkerExePath()
@@ -291,11 +284,7 @@ public static class ClangSubprocess
 
     /// <summary>Per-query worker timeout in seconds (env CODECOMPASS_CPP_WORKER_TIMEOUT_SEC, default 300),
     /// clamped to a sane range.</summary>
-    public static int TimeoutSeconds()
-    {
-        var v = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_WORKER_TIMEOUT_SEC");
-        return int.TryParse(v, out var s) && s > 0 ? Math.Clamp(s, 5, 3600) : 300;
-    }
+    public static int TimeoutSeconds() => CodeCompass.Core.Config.CodeCompassConfig.CppWorkerTimeoutSec();
 
     /// <summary>Worker entry point (invoked as `CodeCompass.Cli.exe clang-refs-worker`). Reads a RefRequest
     /// from stdin, runs the in-process analyzer, writes a RefResponse to stdout. This process is disposable:

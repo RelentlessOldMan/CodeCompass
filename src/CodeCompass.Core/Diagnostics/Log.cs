@@ -210,6 +210,9 @@ public sealed class DiskLogger
         {
             mutex = new Mutex(false, mutexName);
             try { held = mutex.WaitOne(200); } catch (AbandonedMutexException) { held = true; }
+            // Another process is rotating right now: rotating too would rename/delete over its files. Keep appending
+            // to the over-size file; the next write retries.
+            if (!held) return;
 
             fi.Refresh();
             if (!fi.Exists || fi.Length < max) return; // another process already rotated

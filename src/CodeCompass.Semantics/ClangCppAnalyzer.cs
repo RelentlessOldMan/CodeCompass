@@ -40,6 +40,10 @@ public sealed class ClangCppAnalyzer : IDisposable
     private static readonly HashSet<string> SourceExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".c", ".cc", ".cpp", ".cxx", ".c++" };
 
+    /// <summary>Is this a C/C++ translation unit (a file clang parses directly; headers come in via #include)? The one
+    /// definition callers use to pick C/C++ candidates for a targeted find_references.</summary>
+    public static bool IsCppSource(string path) => SourceExtensions.Contains(Path.GetExtension(path));
+
     private readonly IReadOnlyList<string> _roots; // absolute; [0] is the primary (project) root
     private readonly object _gate = new();
     private readonly object _mergeLock = new();  // guards merging a thread-local model into the shared one
@@ -53,12 +57,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     // at once is what drove a broad find_references to ~16 GB (a token referenced across 200x 2-8 MB files,
     // ~4 GB per TU x degree 4). Above this cap the file is left to the LEXICAL reference layer (still found,
     // just not clang-confirmed), so memory stays bounded without dropping results. Env CODECOMPASS_CPP_MAX_TU_MB.
-    internal static long MaxTuBytes()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_MAX_TU_MB");
-        if (long.TryParse(env, out var mb) && mb > 0) return mb * 1024 * 1024;
-        return 2L * 1024 * 1024;
-    }
+    internal static long MaxTuBytes() => CodeCompassConfig.CppMaxTuBytes();
 
     // True if this source file is too large for a bounded semantic parse - skip clang, let the lexical
     // reference layer (memory-bounded) handle it. Stat failure -> not skipped (let the parse attempt decide).
@@ -77,12 +76,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     // sits well above any real symbol's direct-reference footprint (a handful to a few dozen TUs) yet below the
     // generated-corpus pathologies. Env CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES; 0 disables the guard (always
     // attempt semantic, the pre-guard behaviour).
-    private static int MaxSemanticCandidates()
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES");
-        if (int.TryParse(env, out var n) && n >= 0) return n;
-        return 400;
-    }
+    private static int MaxSemanticCandidates() => CodeCompassConfig.CppMaxSemanticCandidates();
 
     // How many candidate translation units to parse concurrently. Each parse can hold a large AST, so bound
     // the degree by AVAILABLE memory (NOT total - a busy box has far less real headroom; total was the hole
@@ -91,8 +85,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     // CODECOMPASS_CPP_PARSE_THREADS overrides.
     private static int ParseDegree()
     {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_PARSE_THREADS");
-        if (int.TryParse(env, out var n) && n > 0) return n;
+        if (CodeCompassConfig.CppParseThreads() is int n) return n;
         long avail = CodeCompass.Core.Diagnostics.SystemMemory.AvailableCommitBytes();
         if (avail <= 0) { try { avail = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { avail = 8L * 1024 * 1024 * 1024; } }
         int byMem = (int)Math.Max(1, (avail / 2) / (1500L * 1024 * 1024));
@@ -131,11 +124,19 @@ public sealed class ClangCppAnalyzer : IDisposable
     /// <summary>Span multiple roots (project + linked external roots). The first root is primary (callers
     /// use it for path display).</summary>
     public ClangCppAnalyzer(IReadOnlyList<string> roots) =>
-        _roots = roots.Select(r => Path.TrimEndingDirectorySeparator(Path.GetFullPath(r))).ToList();
+        _roots = roots.Select(PathSafety.NormalizeDir).ToList();
 
     /// <summary>Whether a compile_commands.json was found for any root. Cheap (no parsing). Callers use it
     /// to disclose that C/C++ resolution is best-effort without one.</summary>
     public bool HasCompileDb { get { EnsureCompileDb(); return _hasCompileDb; } }
+
+    /// <summary>The same question without an analyzer instance: does any root have a compile_commands.json to use? (A
+    /// file-existence probe - for wording a disclosure, it must not construct and pin a whole analyzer.)</summary>
+    public static bool ProbeCompileDb(IEnumerable<string> roots)
+    {
+        try { return roots.Any(r => CodeCompassConfig.CompileCommandsFiles(r, CodeCompassConfig.ReadFrom(r)).Any()); }
+        catch { return false; }
+    }
 
     public void Dispose()
     {
@@ -184,8 +185,9 @@ public sealed class ClangCppAnalyzer : IDisposable
         new(locs, m.Candidates, m.Parsed, m.UnresolvedIncludes.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(), m.MemoryStopped, m.TooManyCandidates, m.SkippedTooBig);
 
     /// <summary>Definitions of the C/C++ symbol <paramref name="name"/>. See <see cref="FindReferences"/>
-    /// for <paramref name="candidateFiles"/>.</summary>
-    public IReadOnlyList<SemanticLocation> FindDefinitions(string name, IReadOnlyCollection<string>? candidateFiles = null)
+    /// for <paramref name="candidateFiles"/>. Test oracle only: find_definition uses the tree-sitter symbol index -
+    /// don't wire a tool to this assuming parity.</summary>
+    internal IReadOnlyList<SemanticLocation> FindDefinitions(string name, IReadOnlyCollection<string>? candidateFiles = null)
     {
         var model = BuildModel(name, candidateFiles);
         var result = new List<SemanticLocation>();
@@ -244,8 +246,7 @@ public sealed class ClangCppAnalyzer : IDisposable
         // then returned true before parsing a SINGLE candidate - a near-total downgrade to lexical-only.
         // Scale with RAM instead; the free-commit Floor below is the real hard OOM guard, this is the coarse cap.)
         long absCeiling;
-        var sessMb = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_SESSION_MEM_MB");
-        if (long.TryParse(sessMb, out var sm) && sm > 0) absCeiling = sm * 1024 * 1024;
+        if (CodeCompassConfig.CppSessionMemMb() is long sm) absCeiling = sm * 1024 * 1024;
         else absCeiling = Math.Clamp(totalRam / 2, 2L << 30, 32L << 30);
 
         // Per-QUERY growth cap: bounds how much ONE query may grow the working set, so a single broad sweep
@@ -253,8 +254,7 @@ public sealed class ClangCppAnalyzer : IDisposable
         // overridable. Upper bound tracks the session ceiling (was a flat 1.5 GB, which on a big box limited
         // even the FIRST cold query to ~14 of 881 candidates).
         long growthBudget;
-        var envMb = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_QUERY_MEM_MB");
-        if (long.TryParse(envMb, out var mb) && mb > 0) growthBudget = mb * 1024 * 1024;
+        if (CodeCompassConfig.CppQueryMemMb() is long mb) growthBudget = mb * 1024 * 1024;
         else
         {
             // Floor is normally 512 MB, but never above the session ceiling - otherwise a small

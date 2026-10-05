@@ -409,7 +409,7 @@ public static class ServerContext
         foreach (var raw in desiredRaw)
         {
             string norm;
-            try { norm = Path.TrimEndingDirectorySeparator(Path.GetFullPath(raw)); } catch { continue; } // skip a bad path
+            try { norm = PathSafety.NormalizeDir(raw); } catch { continue; } // skip a bad path
             if (seen.Add(norm)) desired.Add(norm); // same path listed twice -> federate it once, acquire ownership once
         }
 
@@ -456,9 +456,7 @@ public static class ServerContext
     }
 
     // Case-insensitive absolute-path equality (both sides absolutized + trailing-separator-trimmed).
-    private static bool PathEq(string a, string b) =>
-        string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)),
-                      Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)), StringComparison.OrdinalIgnoreCase);
+    private static bool PathEq(string a, string b) => PathSafety.SameDir(a, b);
 
     // A linked root we own: a debounced batch of edits -> update THAT root's own index on disk (its own
     // cache/snapshot), then swap the federated handle. Mirrors the project's OnChanges but simpler - a
@@ -674,26 +672,8 @@ public static class ServerContext
     }
 
     /// <summary>
-    /// Run a read-only operation against the ready indexes under a read lock. If the index
-    /// isn't ready, returns the human-readable status instead (still indexing / needs CLI build).
-    /// </summary>
-    public static string Query(Func<SegmentedIndex, SegmentedSymbolIndex, string> op)
-    {
-        EnsureStartedLocked();
-        Rw.EnterReadLock();
-        try
-        {
-            if (_state != IndexState.Ready || _text is null || _symbols is null)
-                return StatusMessage();
-            return op(_text, _symbols);
-        }
-        finally { Rw.ExitReadLock(); }
-    }
-
-    /// <summary>
-    /// Readiness probe (used by tests and status reporting). Returns the current index refs
-    /// when ready; otherwise a status string. Do not run a long search on the returned refs
-    /// without a read lock - prefer <see cref="Query"/> for that.
+    /// Readiness probe (test seam). Returns the current index refs when ready; otherwise a status string. Do not run
+    /// a long search on the returned refs without a read lock - real queries go through <see cref="QueryAll"/>.
     /// </summary>
     public static bool TryGet(out SegmentedIndex text, out SegmentedSymbolIndex symbols, out string status)
     {
@@ -708,22 +688,6 @@ public static class ServerContext
             }
             text = null!; symbols = null!; status = StatusMessage();
             return false;
-        }
-        finally { Rw.ExitReadLock(); }
-    }
-
-    public static string StatusLine()
-    {
-        EnsureStartedLocked();
-        Rw.EnterReadLock();
-        try
-        {
-            return _state switch
-            {
-                IndexState.Ready => $"ready - {_text!.DocumentCount:N0} files indexed",
-                IndexState.Building => BuildingMessage(),
-                _ => CliBuildMessage(),
-            };
         }
         finally { Rw.ExitReadLock(); }
     }

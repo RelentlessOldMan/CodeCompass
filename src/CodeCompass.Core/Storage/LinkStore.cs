@@ -117,8 +117,7 @@ public static class LinkStore
         AtomicFile.WriteText(Path.Combine(IndexStore.GetCacheDir(projectRoot), Name),
                              w => w.Write(JsonSerializer.Serialize(roots)));
 
-    private static string Normalize(string p) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p));
+    private static string Normalize(string p) => PathSafety.NormalizeDir(p);
 
-    private static bool PathsEqual(string a, string b) =>
-        string.Equals(Normalize(a), Normalize(b), StringComparison.OrdinalIgnoreCase);
+    private static bool PathsEqual(string a, string b) => PathSafety.SameDir(a, b);
 }
