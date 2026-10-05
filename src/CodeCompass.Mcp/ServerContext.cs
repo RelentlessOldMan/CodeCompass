@@ -376,17 +376,23 @@ public static class ServerContext
     // exclusive handle and demote us to reader). A transient unreadable read keeps the current set intact.
     private static void MaybeReconcileLinks()
     {
-        long sig = LinkStore.Signature(Root);
-        if (_linksChecked && sig == Volatile.Read(ref _linksSig)) return; // unchanged: the hot path, no lock
-        lock (_linkedGate)
+        // Also runs fire-and-forget (Task.Run) after builds: contain and log a failure HERE, where its cause is known,
+        // instead of leaving a faulted task to surface (detached from it) at some later GC.
+        try
         {
-            sig = LinkStore.Signature(Root);
-            if (_linksChecked && sig == _linksSig) return; // another thread just reconciled it
-            if (!LinkStore.TryRead(Root, out var desired)) return; // couldn't read (racing the atomic write) - keep set, retry next query
-            ReconcileTo(desired);
-            Volatile.Write(ref _linksSig, sig);
-            _linksChecked = true;
+            long sig = LinkStore.Signature(Root);
+            if (_linksChecked && sig == Volatile.Read(ref _linksSig)) return; // unchanged: the hot path, no lock
+            lock (_linkedGate)
+            {
+                sig = LinkStore.Signature(Root);
+                if (_linksChecked && sig == _linksSig) return; // another thread just reconciled it
+                if (!LinkStore.TryRead(Root, out var desired)) return; // couldn't read (racing the atomic write) - keep set, retry next query
+                ReconcileTo(desired);
+                Volatile.Write(ref _linksSig, sig);
+                _linksChecked = true;
+            }
         }
+        catch (Exception ex) { Log.For(Root).Warn($"linked-root reconcile skipped: {ex.Message}"); }
     }
 
     // Bring the federated set in line with the desired link list (caller holds _linkedGate). Each newly-added
@@ -586,8 +592,15 @@ public static class ServerContext
     /// When a session focus is set, the handle set is restricted to the focused roots and the result
     /// discloses what was excluded.
     /// </summary>
-    internal static string QueryAll(Func<IReadOnlyList<IndexHandle>, string> op)
+    /// <para>The op receives ONE cancellation token for its whole run: the teardown token captured once here (a
+    /// re-point re-arms <see cref="ShutdownToken"/>, so re-reading it mid-query would hand later stages a fresh,
+    /// uncancelled token and let a stale query run to completion while Init waits on the write lock), linked with the
+    /// MCP request's own token (the client cancelled or timed out the call - stop burning the clang/Roslyn pass).</para>
+    internal static string QueryAll(Func<IReadOnlyList<IndexHandle>, CancellationToken, string> op, CancellationToken requestCt = default)
     {
+        var teardown = ShutdownToken;
+        using var linkedCts = requestCt.CanBeCanceled ? CancellationTokenSource.CreateLinkedTokenSource(teardown, requestCt) : null;
+        var ct = linkedCts?.Token ?? teardown;
         EnsureStartedLocked();
         MaybePromoteToOwner();  // take over live indexing if the session that held it has exited
         MaybeReloadExternal();  // another process (session / terminal command) committed a write -> serve it, not a stale copy
@@ -614,7 +627,11 @@ public static class ServerContext
             // segment surfacing mid-read, an OOM in a semantic pass) would otherwise escape to the MCP framework
             // and serialize a raw stack trace - leaking internal cache/repo paths and giving the agent an
             // unactionable error. Contain it to a short, path-free message and log the detail for diagnosis.
-            try { return op(handles) + focusNote; }
+            try { return op(handles, ct) + focusNote; }
+            catch (OperationCanceledException) when (requestCt.IsCancellationRequested && !teardown.IsCancellationRequested)
+            {
+                return "The request was cancelled.";
+            }
             catch (OperationCanceledException)
             {
                 // The teardown token tripped mid-query (a re-point or shutdown), so a long semantic pass bailed.

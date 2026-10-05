@@ -311,6 +311,26 @@ public class SemanticHonestyTests
         finally { ServerContext.Init(repo.Root); }
     }
 
+    // Review P1-7: the MCP request's own token reaches the semantic passes - an abandoned/cancelled call stops instead
+    // of burning a full Roslyn build or clang parse under the read lock, and says what happened.
+    [Fact]
+    public void CancelledRequest_StopsTheSemanticPass_AndSaysSo()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class C { void Ping() { } void M() { Ping(); } } }");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            ServerContext.EvictSemanticAnalyzersNow(); // the next query must build the model - and the request is cancelled
+            using var cts = new System.Threading.CancellationTokenSource();
+            cts.Cancel();
+            Assert.Equal("The request was cancelled.", CodeCompassTools.FindReferences("Ping", cancellationToken: cts.Token));
+            Assert.Contains("a.cs", CodeCompassTools.FindReferences("Ping")); // an uncancelled call still works
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
     [Fact]
     public void FocusNote_UsesFullPaths_WhenTwoRootsShareAFolderName()
     {

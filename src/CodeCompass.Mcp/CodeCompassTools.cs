@@ -28,8 +28,9 @@ public static class CodeCompassTools
     public static string SearchCode(
         [Description("Literal substring to find.")] string query,
         [Description("Maximum number of results.")] int maxResults = 50,
-        [Description("Whether the match is case-sensitive (default true). Set false to match any case.")] bool caseSensitive = true)
-        => ServerContext.QueryAll(handles =>
+        [Description("Whether the match is case-sensitive (default true). Set false to match any case.")] bool caseSensitive = true,
+        CancellationToken cancellationToken = default)
+        => ServerContext.QueryAll((handles, ct) =>
     {
         // Whitespace-only queries have no trigrams, so they'd fall to a full-corpus scan returning noise at
         // high I/O cost - reject them like the other tools do (IsNullOrWhiteSpace, not IsNullOrEmpty).
@@ -54,7 +55,7 @@ public static class CodeCompassTools
         foreach (var (h, m) in hits.Take(maxResults)) sb.AppendLine($"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}: {m.LineText}");
         sb.Append(Footer(Math.Min(hits.Count, maxResults), truncated, "match", "matches"));
         return sb.ToString();
-    });
+    }, cancellationToken);
 
     // The trigram index can't narrow a query shorter than one trigram: every file becomes a candidate and is READ
     // (hours over a large share, under the read lock). search_code refuses such queries; the reference tools skip the
@@ -156,8 +157,9 @@ public static class CodeCompassTools
                  "Returns 'file:startLine-endLine: Kind Name'; for a single small definition it also " +
                  "inlines the source so you don't need to open the file. Use this for go-to-definition.")]
     public static string FindDefinition(
-        [Description("Exact symbol name (case-sensitive).")] string name)
-        => ServerContext.QueryAll(handles =>
+        [Description("Exact symbol name (case-sensitive).")] string name,
+        CancellationToken cancellationToken = default)
+        => ServerContext.QueryAll((handles, ct) =>
     {
         if (string.IsNullOrWhiteSpace(name)) return "Provide a symbol name.";
         // Federate go-to-definition across the primary + linked roots.
@@ -187,7 +189,7 @@ public static class CodeCompassTools
         }
         else sb.Append($"({matches.Count} definitions)");
         return sb.ToString();
-    });
+    }, cancellationToken);
 
     private const int SnippetMaxLines = 40;
 
@@ -231,8 +233,9 @@ public static class CodeCompassTools
                  "not treated as references). Returns ranked 'file:line:col: line'.")]
     public static string FindReferences(
         [Description("Symbol/identifier to find references to (case-sensitive).")] string name,
-        [Description("Maximum number of results.")] int maxResults = 100)
-        => ServerContext.QueryAll(handles =>
+        [Description("Maximum number of results.")] int maxResults = 100,
+        CancellationToken cancellationToken = default)
+        => ServerContext.QueryAll((handles, ct) =>
     {
         if (string.IsNullOrWhiteSpace(name)) return "Provide a symbol/identifier to find references to.";
         maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
@@ -246,7 +249,7 @@ public static class CodeCompassTools
         // The analyzer spans every root (so cross-root references resolve); under a focus only in-scope hits count -
         // filtered INSIDE the analyzer, before its `probe` cut, so out-of-scope hits can't crowd in-scope ones out.
         var csharp = ServerContext.CSharp;
-        foreach (var s in csharp.FindReferences(name, probe, ServerContext.ShutdownToken, s => InScope(handles, s.Root)))
+        foreach (var s in csharp.FindReferences(name, probe, ct, s => InScope(handles, s.Root)))
             hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
 
         // C/C++ semantic is TARGETED: a reference to `name` can only be in a file whose text contains it,
@@ -283,13 +286,13 @@ public static class CodeCompassTools
             if (ClangSubprocess.Enabled && worker is null)
                 CodeCompass.Core.Diagnostics.Log.Global.Warn("clang subprocess enabled but worker exe (CodeCompass.Cli) not found next to the server; using in-process (memory may grow across broad C/C++ queries)");
             if (worker is not null &&
-                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, ClangSubprocess.TimeoutSeconds(), out var sub, ServerContext.ShutdownToken))
+                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, ClangSubprocess.TimeoutSeconds(), out var sub, ct))
                 r = sub;
             else
-                r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe, ServerContext.ShutdownToken);
+                r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe, ct);
             // A shutdown/re-point may have killed the subprocess (or cancelled the in-process parse) mid-query;
             // surface that as a cancellation so the query abandons cleanly rather than returning a partial result.
-            ServerContext.ShutdownToken.ThrowIfCancellationRequested();
+            ct.ThrowIfCancellationRequested();
             foreach (var s in r.Locations)
                 if (InScope(handles, s.Root))
                     hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
@@ -392,7 +395,7 @@ public static class CodeCompassTools
         sb.Append(cppNote);
         sb.Append(csNote);
         return sb.ToString();
-    });
+    }, cancellationToken);
 
     [McpServerTool(Name = "find_callees")]
     [Description("List the in-repo methods a C# method CALLS (its callees), resolved SEMANTICALLY: " +
@@ -403,15 +406,16 @@ public static class CodeCompassTools
                  "nothing - use find_definition then read.")]
     public static string FindCallees(
         [Description("Exact C# method name (case-sensitive).")] string name,
-        [Description("Maximum number of callees.")] int maxResults = 50)
-        => ServerContext.QueryAll(handles =>
+        [Description("Maximum number of callees.")] int maxResults = 50,
+        CancellationToken cancellationToken = default)
+        => ServerContext.QueryAll((handles, ct) =>
     {
         if (string.IsNullOrWhiteSpace(name)) return "Provide a C# method name.";
         maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
         // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
         // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
         // The analyzer spans every root; under an active focus keep only callees whose DEFINITION is in scope.
-        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1, ServerContext.ShutdownToken, c => InScope(handles, c.Root)).ToList();
+        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1, ct, c => InScope(handles, c.Root)).ToList();
         // Conditional-compilation handling (see find_references): FindCallees walks the method body via Roslyn,
         // which parses with an empty preprocessor set and can't see inactive #if/#elif branches - so a call
         // guarded by conditional compilation is SILENTLY missing (the forward/reverse asymmetry: refs finds the
@@ -431,7 +435,7 @@ public static class CodeCompassTools
                 }
         var calleeCond = SemanticCoverage.CSharpConditionalFiles(calleeCsCands);
         var recovered = calleeCond.Count > 0
-            ? ServerContext.CSharp.FindCalleesInInactiveBranches(name, maxResults + 1, ServerContext.ShutdownToken, r => InScope(handles, r.Root)).ToList()
+            ? ServerContext.CSharp.FindCalleesInInactiveBranches(name, maxResults + 1, ct, r => InScope(handles, r.Root)).ToList()
             : (IReadOnlyList<SemanticLocation>)System.Array.Empty<SemanticLocation>();
         // Dedup recovered vs the FULL semantic list (incl. any truncated overflow row), so a call present in both
         // an active and an inactive branch is never shown twice - and the disclosure counts what's actually shown.
@@ -471,15 +475,16 @@ public static class CodeCompassTools
         }
         sb.Append(calleeCsNote);
         return sb.ToString();
-    });
+    }, cancellationToken);
 
     [McpServerTool(Name = "search_symbols")]
     [Description("Search symbol names by case-insensitive substring. " +
                  "Returns 'file:line:col: Kind Name'. Use this to discover related definitions.")]
     public static string SearchSymbols(
         [Description("Substring to match against symbol names (case-insensitive).")] string query,
-        [Description("Maximum number of results.")] int maxResults = 50)
-        => ServerContext.QueryAll(handles =>
+        [Description("Maximum number of results.")] int maxResults = 50,
+        CancellationToken cancellationToken = default)
+        => ServerContext.QueryAll((handles, ct) =>
     {
         if (string.IsNullOrWhiteSpace(query)) return "Provide a symbol-name substring to search for.";
         maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
@@ -498,7 +503,7 @@ public static class CodeCompassTools
         foreach (var (h, s) in matches.Take(maxResults)) sb.AppendLine($"{DisplayPath(h, s.RelativePath)}:{s.Line}:{s.Column}: {s.Kind} {s.Name}");
         sb.Append(Footer(Math.Min(matches.Count, maxResults), truncated, "symbol", "symbols"));
         return sb.ToString();
-    });
+    }, cancellationToken);
 
     [McpServerTool(Name = "reindex")]
     [Description("Rebuild the CodeCompass index for this workspace from scratch. Also reports index " +

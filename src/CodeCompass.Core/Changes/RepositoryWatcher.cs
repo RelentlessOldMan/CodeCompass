@@ -20,10 +20,11 @@ public sealed class RepositoryWatcher : IDisposable
     private readonly Action<ChangeBatch> _onFlush;
     private readonly int _debounceMs;
     private readonly IgnoreRules _ignore;
-    private readonly FileSystemWatcher _fsw;
+    private FileSystemWatcher _fsw; // replaced (under _timerGate) if it dies - see OnError
 
     private readonly object _pendingGate = new();
-    private readonly HashSet<string> _pending = new(StringComparer.OrdinalIgnoreCase);
+    // Ordinal: a case-only rename (Foo.cs -> foo.cs) must deliver BOTH spellings, or the index keeps the stale casing.
+    private readonly HashSet<string> _pending = new(StringComparer.Ordinal);
     private bool _overflow;
 
     private readonly object _timerGate = new();
@@ -41,19 +42,32 @@ public sealed class RepositoryWatcher : IDisposable
         _maxWaitMs = Math.Max(debounceMs * 10, 5000); // fire at least this often under a sustained storm
         _ignore = ignore ?? new IgnoreRules();
 
-        _fsw = new FileSystemWatcher(_root)
+        _fsw = CreateFsw();
+    }
+
+    private FileSystemWatcher CreateFsw()
+    {
+        var fsw = new FileSystemWatcher(_root)
         {
             IncludeSubdirectories = true,
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite,
+            InternalBufferSize = 64 * 1024, // the 8 KB default overflows on any sizable sync (forcing full reconciles)
         };
-        _fsw.Changed += OnEvent;
-        _fsw.Created += OnEvent;
-        _fsw.Deleted += OnEvent;
-        _fsw.Renamed += OnRenamed;
-        _fsw.Error += OnError;
+        fsw.Changed += OnEvent;
+        fsw.Created += OnEvent;
+        fsw.Deleted += OnEvent;
+        fsw.Renamed += OnRenamed;
+        fsw.Error += OnError;
+        return fsw;
     }
 
     public void Start() => _fsw.EnableRaisingEvents = true;
+
+    /// <summary>How many times a dead watcher was replaced (diagnostics / tests).</summary>
+    public int Restarts => Volatile.Read(ref _restarts);
+    private int _restarts;
+
+    internal void RaiseErrorForTest(Exception ex) => OnError(this, new ErrorEventArgs(ex));
 
     private void OnEvent(object sender, FileSystemEventArgs e)
     {
@@ -72,8 +86,39 @@ public sealed class RepositoryWatcher : IDisposable
 
     private void OnError(object sender, ErrorEventArgs e)
     {
+        // Either way events were lost, so the next flush reconciles the whole tree.
         lock (_pendingGate) _overflow = true;
         Schedule();
+        if (e.GetException() is InternalBufferOverflowException) return; // the watcher keeps running after an overflow
+
+        // Anything else (a share hiccup on a UNC root, an invalidated directory handle) leaves the watcher DEAD: it never
+        // raises another event while EnableRaisingEvents still reads true, so the index would silently drift from the
+        // tree for the rest of the session. Replace it (off the event thread - we're inside the dying watcher's handler).
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            FileSystemWatcher? dead = null;
+            try
+            {
+                lock (_timerGate)
+                {
+                    if (_disposed) return;
+                    var fresh = CreateFsw();
+                    fresh.EnableRaisingEvents = true;
+                    dead = _fsw;
+                    _fsw = fresh;
+                    Interlocked.Increment(ref _restarts);
+                }
+                Diagnostics.Log.For(_root).Warn($"file watcher failed ({e.GetException()?.GetType().Name}: {e.GetException()?.Message}); restarted it and queued a full reconcile");
+            }
+            catch (Exception ex)
+            {
+                Diagnostics.Log.For(_root).Warn($"file watcher failed and could not be restarted ({ex.Message}); live updates are OFF until the session restarts - run 'codecompass update' after changes");
+            }
+            finally
+            {
+                if (dead is not null) { try { dead.EnableRaisingEvents = false; } catch { } try { dead.Dispose(); } catch { } }
+            }
+        });
     }
 
     private void Record(string fullPath)
@@ -147,9 +192,12 @@ public sealed class RepositoryWatcher : IDisposable
         // the thread pool could run _onFlush after Dispose returns - and touch state the caller
         // is about to tear down (disposed mmap indexes). Note: Dispose never holds _timerGate and
         // _flushGate at the same time, so it can't deadlock against Flush (which nests the other way).
-        try { _fsw.EnableRaisingEvents = false; } catch { }
-        try { _fsw.Dispose(); } catch { }
-        lock (_timerGate) { _disposed = true; _timer?.Dispose(); _timer = null; }
+        // Mark disposed and take the CURRENT watcher under _timerGate first, so a concurrent restart (OnError) can't
+        // install a replacement after we've let go of the old one and leak it.
+        FileSystemWatcher fsw;
+        lock (_timerGate) { _disposed = true; _timer?.Dispose(); _timer = null; fsw = _fsw; }
+        try { fsw.EnableRaisingEvents = false; } catch { }
+        try { fsw.Dispose(); } catch { }
         lock (_flushGate) { /* drains any Flush currently running; later Flushes see _disposed */ }
     }
 }
