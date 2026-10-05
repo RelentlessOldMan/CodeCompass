@@ -22,6 +22,15 @@ public static class ReferenceMerge
     /// pathological high-hit files. Passed to <c>SegmentedIndex.Search(..., maxPerFile:)</c> by both paths.</summary>
     public const int MaxLexicalHitsPerFile = 16;
 
+    /// <summary>Dedup keys (<c>display:line:col</c>) for the C# DECLARATIONS of the queried name, from the symbol
+    /// index. Callers seed their already-seen set with these so the lexical backfill skips them: Roslyn never reports
+    /// a declaration as a reference, so when #if makes the C# pass "incomplete" the backfill must not re-admit
+    /// `public class X` / its ctor as references (field report v4). Exact name-token position, so a real use that
+    /// merely shares the declaration's line is still counted.</summary>
+    public static IEnumerable<string> CSharpDeclarationKeys(IEnumerable<CodeCompass.Core.Symbols.Symbol> definitions, Func<string, string> display) =>
+        definitions.Where(s => SemanticCoverage.IsCSharp(s.RelativePath))
+                   .Select(s => $"{display(s.RelativePath)}:{s.Line}:{s.Column}");
+
     /// <summary>A trigram hit qualifies as a LEXICAL reference to a symbol of length <paramref name="nameLength"/>
     /// when: it is NOT in a semantically-covered file whose language pass was COMPLETE, it is a code file (not
     /// build noise like .lst/.bak/.o), and it is a whole-word match (not a substring). Incompleteness is

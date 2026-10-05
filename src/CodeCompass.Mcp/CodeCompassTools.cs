@@ -319,6 +319,8 @@ public static class CodeCompassTools
         var semKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.OrdinalIgnoreCase);
+        foreach (var h in handles)
+            semKeys.UnionWith(ReferenceMerge.CSharpDeclarationKeys(h.Symbols.FindByName(name), rel => DisplayPath(h, rel)));
 
         var lexLimits = new CodeCompass.Core.Indexing.Segments.SegmentedIndex.SearchLimits();
         if (hits.Count <= maxResults && indexable)

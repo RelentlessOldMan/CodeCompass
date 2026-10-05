@@ -196,6 +196,50 @@ public class CSharpConditionalRefsTests
         Assert.DoesNotContain("resolved by NAME", all);
     }
 
+    // Field report v4: once #if makes the C# pass "incomplete", the lexical backfill re-admitted the symbol's own
+    // DECLARATION lines (`public class X`, its ctor) as references - the semantic pass never counts declarations, so
+    // the backfill must not either. The #if-guarded real use must still be recovered.
+    private const string DeclRepoKernel = "namespace N {\n public class KernelZq {\n  public KernelZq() { }\n }\n}\n";
+    private const string DeclRepoCaller =
+        "namespace N {\n public class UserZq {\n  public object Plain() => new KernelZq();\n#if DEBUG\n" +
+        "  public object Guarded() => new KernelZq();\n#endif\n }\n}\n";
+
+    [Fact]
+    public void Cli_Refs_Backfill_DoesNotCountDeclarations()
+    {
+        var cli = TestCli.Find();
+        using var repo = new TempRepo();
+        repo.Write("kernel.cs", DeclRepoKernel);
+        repo.Write("caller.cs", DeclRepoCaller);
+
+        Assert.Equal(0, RunCli(cli, "index", repo.Root, out _, out _));
+        Assert.Equal(0, RunCli(cli, "refs", repo.Root, out var stdout, out var stderr, "KernelZq"));
+        var all = stdout + "\n" + stderr;
+
+        Assert.Contains("C# coverage INCOMPLETE", all);                // #if present -> backfill active
+        Assert.Contains("Guarded() => new KernelZq()", all);           // the guarded use is still recovered
+        Assert.DoesNotContain("public class KernelZq", all);           // ...but the declarations are not references
+        Assert.DoesNotContain("public KernelZq()", all);
+    }
+
+    [Fact]
+    public void Mcp_FindReferences_Backfill_DoesNotCountDeclarations()
+    {
+        using var repo = new TempRepo();
+        repo.Write("kernel.cs", DeclRepoKernel);
+        repo.Write("caller.cs", DeclRepoCaller);
+        CodeCompass.Mcp.ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompass.Mcp.CodeCompassTools.Reindex();
+            var r = CodeCompass.Mcp.CodeCompassTools.FindReferences("KernelZq");
+            Assert.Contains("Guarded() => new KernelZq()", r);
+            Assert.DoesNotContain("public class KernelZq", r);
+            Assert.DoesNotContain("public KernelZq()", r);
+        }
+        finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
+    }
+
     private static int RunCli(string exe, string cmd, string repo, out string stdout, out string stderr, string? arg = null)
     {
         var psi = new ProcessStartInfo

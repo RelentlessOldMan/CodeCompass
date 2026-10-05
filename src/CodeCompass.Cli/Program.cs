@@ -1075,7 +1075,7 @@ static int CmdRefs(string[] args)
 
     // Load the index once: it drives the TARGETED C/C++ parse (only files that could contain the name) and
     // the lexical fallback below. If unindexed, the clang analyzer self-scans (slower, but still correct).
-    bool haveIndex = RepositoryIndexer.TryLoad(root, out var index, out _);
+    bool haveIndex = RepositoryIndexer.TryLoad(root, out var index, out var refSymbols);
     List<string>? cppCandidates = null;
     List<string>? csCandidates = null;
     if (haveIndex)
@@ -1135,6 +1135,7 @@ static int CmdRefs(string[] args)
     var semKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var s in cs) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
     foreach (var s in cpp) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
+    if (haveIndex) semKeys.UnionWith(ReferenceMerge.CSharpDeclarationKeys(refSymbols!.FindByName(name), rel => rel));
     int lexical = 0;
     if (haveIndex)
     {

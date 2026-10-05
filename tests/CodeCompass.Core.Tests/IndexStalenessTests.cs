@@ -70,6 +70,29 @@ public class IndexStalenessTests
         Assert.DoesNotContain("older indexer", all);                // a current index must stay silent
     }
 
+    // The MCP twin (field report v4 left this "untested": its probe touched a file's mtime, which is not what this
+    // feature detects). An index built by an older INDEXER must be disclosed on the tool result itself.
+    [Fact]
+    public void Mcp_Query_StaleIndexerVersion_DisclosesRebuildNeeded()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class StaleProbeZq { void M() { } } }\n");
+        CodeCompass.Mcp.ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompass.Mcp.CodeCompassTools.Reindex();
+            var metaPath = Path.Combine(IndexStore.GetCacheDir(repo.Root), "meta.json");
+            var meta = JsonSerializer.Deserialize<IndexMeta>(File.ReadAllText(metaPath))!;
+            File.WriteAllText(metaPath, JsonSerializer.Serialize(meta with { ContentVersion = BuildInfo.IndexerContentVersion - 1 }));
+
+            var r = CodeCompass.Mcp.CodeCompassTools.FindDefinition("StaleProbeZq");
+            Assert.Contains("StaleProbeZq", r);                          // still answers...
+            Assert.Contains("older indexer", r);                         // ...and says the index needs a rebuild
+            Assert.Contains("codecompass index", r);
+        }
+        finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
+    }
+
     private static int RunCli(string exe, string cmd, string repo, out string stdout, out string stderr, string? arg = null)
     {
         var psi = new ProcessStartInfo
