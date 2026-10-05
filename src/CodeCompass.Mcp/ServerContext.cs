@@ -113,6 +113,7 @@ public static class ServerContext
     private static DateTime _eventsLostUtc;
 
     private static string CacheDir => IndexStore.CacheDirPath(Root);
+    private static bool _warnedNetworkCache;
 
     internal static bool IsLiveWatchOwnerForTest => _own is not null;
     internal static bool HasWatcherForTest { get { Rw.EnterReadLock(); try { return _watcher is not null; } finally { Rw.ExitReadLock(); } } }
@@ -210,6 +211,16 @@ public static class ServerContext
                                "(reloads when that session writes; takes over when it exits)");
         var cacheDir = CacheDir;
         Task.Run(() => AtomicFile.CleanupStaleTemps(cacheDir)); // temps a crashed writer left behind (off the startup path)
+        if (!_warnedNetworkCache && NetworkPath.IsNetwork(IndexStore.BaseDir()))
+        {
+            // The write lock and live-watch role are exclusive file handles; on a share an SMB reconnect can drop a handle
+            // server-side while this process still believes it holds it - letting a second machine write the same cache.
+            _warnedNetworkCache = true;
+            const string warn = "CODECOMPASS_CACHE_DIR points at a network share. Index caches should be on a LOCAL disk: " +
+                                "the cross-process write lock relies on local file-handle semantics.";
+            Log.Global.Warn(warn);
+            Console.Error.WriteLine("[codecompass] " + warn);
+        }
     }
 
     /// <summary>Release everything this session holds: cancel in-flight work, stop watchers, drop linked roots and
