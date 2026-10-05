@@ -72,6 +72,7 @@ function Invoke-Cli([string[]]$CliArgs, [int]$TimeoutSec = 600) {
     $o = (New-TemporaryFile).FullName; $e = (New-TemporaryFile).FullName
     $p = Start-Process -FilePath $cli -ArgumentList $CliArgs -NoNewWindow -PassThru `
                        -RedirectStandardOutput $o -RedirectStandardError $e
+    $null = $p.Handle  # cache the handle now: without it PS 5.1 reports ExitCode as $null after exit
     $exited = $p.WaitForExit($TimeoutSec * 1000)
     if (-not $exited) { try { $p.Kill() } catch {}; return @{ Out=""; Err="TIMEOUT"; Code=-1; TimedOut=$true } }
     $p.WaitForExit() # ensure redirected output is fully flushed to the files before we read them
