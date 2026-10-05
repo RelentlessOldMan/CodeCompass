@@ -19,7 +19,7 @@ public static class AtomicFile
     /// an orphan <c>.tmp</c>).</summary>
     public static void Write(string path, Action<Stream> writeBody)
     {
-        var tmp = path + ".tmp";
+        var tmp = TempName(path);
         try
         {
             using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -35,7 +35,7 @@ public static class AtomicFile
     /// <summary>Atomic write for text content (manifests). Same crash/leak guarantees as <see cref="Write"/>.</summary>
     public static void WriteText(string path, Action<TextWriter> writeBody)
     {
-        var tmp = path + ".tmp";
+        var tmp = TempName(path);
         try
         {
             using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -72,6 +72,24 @@ public static class AtomicFile
                 Thread.Sleep(ReplaceBackoffMs * (i + 1)); // transient sharing violation / share hiccup: back off + retry
             }
         }
+    }
+
+    // Per-process temp name: two processes replacing the same target (the status file is written by the CLI and the
+    // MCP server alike) must not share one temp, or one could rename the other's half-finished bytes into place.
+    private static string TempName(string path) => $"{path}.{Environment.ProcessId}.tmp";
+
+    /// <summary>Best-effort removal of temp files a crashed writer left in <paramref name="dir"/> (older than an
+    /// hour, so a live writer's temp is never touched).</summary>
+    public static void CleanupStaleTemps(string dir)
+    {
+        try
+        {
+            if (!Directory.Exists(dir)) return;
+            var cutoff = DateTime.UtcNow.AddHours(-1);
+            foreach (var f in Directory.EnumerateFiles(dir, "*.tmp"))
+                try { if (File.GetLastWriteTimeUtc(f) < cutoff) File.Delete(f); } catch { }
+        }
+        catch { }
     }
 
     /// <summary>Delete if present, tolerating a file that's still memory-mapped or already gone.</summary>

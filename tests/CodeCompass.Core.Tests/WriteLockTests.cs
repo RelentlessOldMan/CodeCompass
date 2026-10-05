@@ -186,6 +186,45 @@ public class WriteLockTests
         }
     }
 
+    // Review P2-30: the live-watch role across REAL processes - a running `codecompass watch` holds it (so a session
+    // here can't start a second watcher), and killing that process releases it with no stale lock left behind.
+    [Fact]
+    public void LiveWatchRole_HeldByAnotherProcess_ThenFreedWhenItIsKilled()
+    {
+        var cli = TestCli.Find();
+        if (cli is null) return;
+
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class WatchRole { } }");
+        var cacheDir = IndexStore.GetCacheDir(repo.Root);
+        using var p = TestCli.Start(cli, "watch", repo.Root);
+        try
+        {
+            var watching = Task.Run(() =>
+            {
+                string? line;
+                while ((line = p.StandardError.ReadLine()) is not null)
+                    if (line.Contains("watching")) return true;
+                return false;
+            });
+            Assert.True(watching.Wait(120_000) && watching.Result, "the CLI watch never started");
+            _ = p.StandardError.ReadToEndAsync();
+            _ = p.StandardOutput.ReadToEndAsync();
+
+            Assert.Null(WriteOwnership.TryAcquire(cacheDir)); // held by the live `watch` process
+        }
+        finally
+        {
+            p.Kill(entireProcessTree: true); // a crash/kill, not a clean exit
+            p.WaitForExit(30_000);
+        }
+
+        WriteOwnership? mine = null;
+        for (int i = 0; i < 100 && mine is null; i++) { mine = WriteOwnership.TryAcquire(cacheDir); if (mine is null) Thread.Sleep(100); }
+        Assert.NotNull(mine); // the OS dropped the dead process's handle - nothing to clean up by hand
+        mine!.Dispose();
+    }
+
     // Real cross-process exclusion: a terminal `codecompass index` waits for an in-flight write held by another
     // process (this test host), says so, and completes once it's released - it is never refused.
     [Fact]

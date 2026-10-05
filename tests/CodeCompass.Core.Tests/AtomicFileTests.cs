@@ -27,7 +27,7 @@ public sealed class AtomicFileTests : IDisposable
 
         AtomicFile.Write(path, s => { var b = Encoding.UTF8.GetBytes("SECOND-longer"); s.Write(b, 0, b.Length); });
         Assert.Equal("SECOND-longer", File.ReadAllText(path)); // fully replaced, not appended/truncated
-        Assert.False(File.Exists(path + ".tmp"));
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
     }
 
     [Fact]
@@ -47,7 +47,7 @@ public sealed class AtomicFileTests : IDisposable
         Assert.IsType<InvalidOperationException>(ex);
 
         Assert.Equal("GOOD", File.ReadAllText(path));                    // previous content intact
-        Assert.False(File.Exists(path + ".tmp"), "a failed write must not leave a .tmp orphan");
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp")); // a failed write must not leave a temp orphan
     }
 
     [Fact]
@@ -64,7 +64,7 @@ public sealed class AtomicFileTests : IDisposable
         Assert.IsType<InvalidOperationException>(ex);
 
         Assert.Equal("v1-good", File.ReadAllText(path));
-        Assert.False(File.Exists(path + ".tmp"), "a failed text write must not leave a .tmp orphan");
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp")); // a failed text write must not leave a temp orphan
     }
 
     [Fact]

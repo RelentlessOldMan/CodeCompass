@@ -207,6 +207,8 @@ public static class ServerContext
         if (own is null)
             Log.For(Root).Info("another CodeCompass session is live-indexing this repo; serving it read-only " +
                                "(reloads when that session writes; takes over when it exits)");
+        var cacheDir = CacheDir;
+        Task.Run(() => AtomicFile.CleanupStaleTemps(cacheDir)); // temps a crashed writer left behind (off the startup path)
     }
 
     /// <summary>Release everything this session holds: cancel in-flight work, stop watchers, drop linked roots and
