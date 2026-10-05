@@ -61,10 +61,28 @@ function Test-CodexInstall {
 
     if ($hasPlugin) {
         if ($PSCmdlet.ShouldProcess("Codex", "install plugin '$Name' from local marketplace '$root'")) {
-            # Idempotent: re-adding a marketplace / plugin already present is tolerated (Codex reports it).
-            & codex plugin marketplace add "$root" *> $null
-            & codex plugin add "$Name@codecompass" *> $null
-            if ($LASTEXITCODE -ne 0) { try { & codex plugin add $Name --marketplace codecompass *> $null } catch { } }
+            # Idempotent: re-adding a marketplace / plugin already present is tolerated (Codex reports it). Every step's
+            # exit code is checked - printing "Installed" after a silent failure sent people chasing a "broken
+            # CodeCompass" that was never registered.
+            # Native stderr captured under ErrorActionPreference=Stop would abort on harmless chatter (Windows
+            # PowerShell 5.1): decide on exit codes only.
+            $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            try {
+                $mkOut = & codex plugin marketplace add "$root" 2>&1
+                $mkCode = $LASTEXITCODE
+                $addOut = & codex plugin add "$Name@codecompass" 2>&1
+                $addCode = $LASTEXITCODE
+                if ($addCode -ne 0) {
+                    # Older plugin CLIs spell it differently; keep its output this time - it's the last attempt.
+                    $addOut = & codex plugin add $Name --marketplace codecompass 2>&1
+                    $addCode = $LASTEXITCODE
+                }
+            }
+            finally { $ErrorActionPreference = $prevEap }
+            if ($addCode -ne 0) {
+                $detail = (@($mkOut) + @($addOut) | Out-String).Trim()
+                throw "codex plugin install failed (marketplace add exit $mkCode, plugin add exit $addCode). Run it by hand to see why:`n  codex plugin marketplace add `"$root`"`n  codex plugin add $Name@codecompass`n$detail"
+            }
             Write-Host "Installed Codex plugin '$Name' from $root (MCP server + skill)." -ForegroundColor Green
             Write-Host "Verify:  codex plugin list    |    codex mcp list"
             Write-Host "Note: the server serves Codex's working directory; open Codex in your project root."

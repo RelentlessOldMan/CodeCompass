@@ -216,7 +216,7 @@ public class RecallTests
 
     // P2-10: a request for (nearly) the whole budget waited for a full drain while small requests kept winning.
     [Fact]
-    public void ByteBudget_ServesRequestsInArrivalOrder()
+    public async Task ByteBudget_ServesRequestsInArrivalOrder()
     {
         var b = new ByteBudget(100);
         b.Acquire(60);
@@ -231,6 +231,6 @@ public class RecallTests
         Assert.False(smallIn.IsSet);
         b.Release(100);
         Assert.True(smallIn.Wait(5000));
-        Task.WaitAll(big, small);
+        await Task.WhenAll(big, small);
     }
 }

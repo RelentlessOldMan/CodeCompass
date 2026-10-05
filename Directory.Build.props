@@ -25,6 +25,10 @@
          MCP server between releases. With lockfiles, every restore uses the locked versions and any real graph
          change is a reviewable diff. The release gate restores in locked mode so drift is a hard failure. -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
+    <!-- The build is warning-free; keep it that way. Nullable is on everywhere, so a new possible-null dereference
+         is a build break here rather than a field NullReferenceException later. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <Target Name="CCStampVersion"

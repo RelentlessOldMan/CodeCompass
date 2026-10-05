@@ -39,8 +39,7 @@ public class IndexStalenessTests
     [Fact]
     public void Cli_Query_StaleIndex_DisclosesRebuildNeeded()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         repo.Write("a.cs", "namespace N { class C { void M() { } } }\n");
@@ -61,8 +60,7 @@ public class IndexStalenessTests
     [Fact]
     public void Cli_Query_FreshIndex_NoStalenessNote()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         repo.Write("a.cs", "namespace N { class C { void M() { } } }\n");
@@ -91,16 +89,4 @@ public class IndexStalenessTests
         return p.ExitCode;
     }
 
-    private static string? FindCliExe()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
-        {
-            var cliBin = Path.Combine(dir.FullName, "src", "CodeCompass.Cli", "bin");
-            if (Directory.Exists(cliBin))
-                return Directory.EnumerateFiles(cliBin, "CodeCompass.Cli.exe", SearchOption.AllDirectories)
-                    .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
-        }
-        return null;
-    }
 }

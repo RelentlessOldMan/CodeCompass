@@ -96,8 +96,7 @@ public class ClangSubprocessTests
     [Fact]
     public void RealSubprocess_RoundTrip_MatchesInProcess()
     {
-        var cli = FindCliExe();
-        if (cli is null) return; // CLI not built in this context; the gate builds it and exercises this for real
+        var cli = TestCli.Find(); // CLI not built in this context; the gate builds it and exercises this for real
 
         using var repo = new TempRepo();
         WriteRepo(repo);
@@ -117,8 +116,7 @@ public class ClangSubprocessTests
     [Fact]
     public void RealSubprocess_NonAscii_RoundTripsIntact()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         repo.Write("hot.c", "int hot(int x){ return x + 1; }\n");
@@ -198,8 +196,7 @@ public class ClangSubprocessTests
     [Fact]
     public void TryFindReferences_WorkerNonZeroExit_ContainedAsIncomplete()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
         var cands = new[] { "x.c", "y.c", "z.c" };
         ClangCppAnalyzer.CppRefResult r;
         bool ok;
@@ -221,20 +218,4 @@ public class ClangSubprocessTests
         Assert.False(ClangSubprocess.TryFindReferences(cli, new[] { Path.GetTempPath() }, "", cands, 200, 60, out _));
     }
 
-    private static string? FindCliExe()
-    {
-        // Walk up from the test's output dir to the repo root, then find the built CLI exe.
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
-        {
-            var cliBin = Path.Combine(dir.FullName, "src", "CodeCompass.Cli", "bin");
-            if (Directory.Exists(cliBin))
-            {
-                var hit = Directory.EnumerateFiles(cliBin, "CodeCompass.Cli.exe", SearchOption.AllDirectories)
-                    .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
-                return hit;
-            }
-        }
-        return null;
-    }
 }

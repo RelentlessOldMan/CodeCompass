@@ -25,6 +25,33 @@ param([switch]$Publish, [switch]$SkipTests)
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 
+# build-plugin stamps the release version into these TRACKED manifests; the stamp is build output and is never
+# committed (the committed value is the 0.0.0-dev sentinel). Restore them - but only when the version is the ONLY
+# difference from HEAD, so a genuine uncommitted manifest edit is never thrown away.
+$stampedManifests = @("plugin/.claude-plugin/plugin.json", "plugin/plugin.json")
+function Restore-StampedManifests {
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($m in $stampedManifests) {
+            $path = Join-Path $root $m
+            if (-not (Test-Path $path)) { continue }
+            git -C $root diff --quiet -- $m
+            if ($LASTEXITCODE -eq 0) { continue }                       # unchanged
+            $head = git -C $root show "HEAD:$m" 2>$null
+            if ($LASTEXITCODE -ne 0) { continue }
+            $a = ($head -join "`n") | ConvertFrom-Json
+            $b = Get-Content $path -Raw | ConvertFrom-Json
+            $a.version = "x"; $b.version = "x"
+            if (($a | ConvertTo-Json -Depth 20 -Compress) -eq ($b | ConvertTo-Json -Depth 20 -Compress)) {
+                git -C $root checkout -- $m
+            } else {
+                Write-Warning "$m has uncommitted edits beyond the version stamp - leaving it for you to commit or revert."
+            }
+        }
+    }
+    finally { $ErrorActionPreference = $prev }
+}
+
 # 0) Pre-publish gate + source sync. Done BEFORE the build on purpose: build-plugin stamps the version
 #    into plugin.json (a tracked file), which would dirty the tree - so validate cleanliness and push the
 #    COMMIT here, while the tree is still pristine. Pushing the commit (not the working tree) means the
@@ -49,6 +76,7 @@ if ($Publish) {
     $sha = (git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0) { throw "could not resolve HEAD" }
 
+    Restore-StampedManifests   # a previous build's version stamp is not "uncommitted work"
     $dirty = git status --porcelain
     if ($dirty) { throw "working tree has uncommitted/untracked changes - commit them before releasing:`n$dirty" }
 
@@ -94,7 +122,13 @@ if ($LASTEXITCODE -ne 0) { throw "build-plugin.ps1 failed" }
 # committed lockfiles are deliberately RID-less (they pin our DEPENDENCY versions, which is the drift we
 # guard; the publish still uses those locked versions). Discard that RID churn so the release tree stays
 # clean and the committed lockfiles remain the single RID-less source of truth the gate checks.
+# Under ErrorActionPreference=Stop (PowerShell 5.1) a stderr line from git would turn into a terminating error AFTER
+# a successful build; and a failed restore must not leave lockfile churn to break the NEXT release's clean-tree check
+# with a confusing message. Decide on the exit code and warn, never throw.
+$prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 git checkout -- ':(glob)**/packages.lock.json' 2>$null
+if ($LASTEXITCODE -ne 0) { Write-Warning "could not restore packages.lock.json after publish - run: git checkout -- '**/packages.lock.json'" }
+$ErrorActionPreference = $prevEap
 
 # 1a) Smoke the PUBLISHED MCP server exe: do a real MCP stdio handshake and require it to list its tools.
 # This is the gap that let a broken self-contained server ship (1.0.140-1.0.145 crashed on startup because a
@@ -108,24 +142,19 @@ $psi.WorkingDirectory = $root
 $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
 $mcpProc = [System.Diagnostics.Process]::Start($psi)
 try {
+    # Drain BOTH pipes from the start: the server logs to stderr at startup, and an undrained stderr pipe that fills
+    # would block it before it ever answers - a spurious "server does not start" abort.
+    $readTask = $mcpProc.StandardOutput.ReadToEndAsync()
+    $errTask = $mcpProc.StandardError.ReadToEndAsync()
     $mcpProc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}')
     $mcpProc.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $mcpProc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
     $mcpProc.StandardInput.Flush()
-    $readTask = $mcpProc.StandardOutput.ReadToEndAsync()
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $toolsLine = $null
-    while ($sw.Elapsed.TotalSeconds -lt 30 -and -not $mcpProc.HasExited) {
-        Start-Sleep -Milliseconds 200
-        # Peek at whatever has been produced so far by closing stdin to force EOF once we've likely got a reply.
-        if ($sw.Elapsed.TotalSeconds -gt 3) { break }
-    }
-    $mcpProc.StandardInput.Close()             # EOF -> the stdio server flushes remaining replies and exits
-    if (-not $mcpProc.WaitForExit(15000)) { $mcpProc.Kill() }
+    $mcpProc.StandardInput.Close()             # EOF -> the stdio server answers what it has, then exits
+    if (-not $mcpProc.WaitForExit(30000)) { $mcpProc.Kill() }
     $out = $readTask.Result
     if ($out -notmatch '"tools"' -or $out -notmatch 'find_definition') {
-        $errOut = $mcpProc.StandardError.ReadToEnd()
-        throw "MCP server smoke FAILED - no tools/list response. The published server does not start/answer. stderr:`n$errOut"
+        throw "MCP server smoke FAILED - no tools/list response. The published server does not start/answer. stderr:`n$($errTask.Result)"
     }
     Write-Host "  PASS  MCP server responds to initialize + tools/list (tools present)."
 }
@@ -228,6 +257,11 @@ for ($attempt = 1; ; $attempt++) {
 }
 $zipMb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host ("Release zip ready: {0} ({1} MB)" -f $zip, $zipMb)
+Restore-StampedManifests   # the stamp lives in the zip now; keep the working tree clean
+if (-not $Publish) {
+    $dirtyNow = git -C $root status --porcelain
+    if ($dirtyNow) { Write-Warning "UNVERIFIED local build from a DIRTY tree (uncommitted changes) - two different trees can produce identically-named zips. Commit first for a reproducible build." }
+}
 
 # Validate the artifact BEFORE anyone can install it: it must contain the plugin manifest and both exes,
 # or `/plugin install` fails on the user's machine. Cheap insurance against a silently malformed zip.

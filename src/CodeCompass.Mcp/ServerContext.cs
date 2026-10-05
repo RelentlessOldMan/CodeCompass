@@ -1243,6 +1243,9 @@ public static class ServerContext
     /// the build), pointing the caller at the CLI instead - mirroring the initial-index deferral policy.</summary>
     internal static bool ReindexWouldExceedAutoLimit(out long totalBytes) => ExceedsAutoLimit(out totalBytes);
 
+    /// <summary>Is a ready index installed (lock-free snapshot; for wording a status, not for reading the index)?</summary>
+    internal static bool IsServing => _state == IndexState.Ready && _text is not null;
+
     /// <summary>The CLI-build guidance message (for the reindex tool's over-limit refusal).</summary>
     internal static string CliBuildGuidance() => CliBuildMessage();
 

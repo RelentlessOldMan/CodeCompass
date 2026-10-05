@@ -47,8 +47,7 @@ public class CSharpConditionalRefsTests
     [Fact]
     public void Cli_Refs_IfGuardedUse_FoundViaLexical_AndDisclosed()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         repo.Write("helper.cs", "namespace N { public static class H { public static int Ping() => 1; } }\n");
@@ -74,8 +73,7 @@ public class CSharpConditionalRefsTests
     [Fact]
     public void Cli_Refs_CleanCSharp_SemanticOnly_NoOverfire()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         repo.Write("m.cs",
@@ -101,8 +99,7 @@ public class CSharpConditionalRefsTests
     [Fact]
     public void Cli_Refs_DocCommentHit_NotReturned_EvenWhenIncomplete()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         repo.Write("kernel.cs", "namespace N { public class KernelMgrXyz { } }\n");
@@ -132,8 +129,7 @@ public class CSharpConditionalRefsTests
     [Fact]
     public void Cli_Refs_IfDisclosure_NamesTheConditionalFile()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         // The symbol's definition + a clean use (no #if here).
@@ -161,8 +157,7 @@ public class CSharpConditionalRefsTests
     [Fact]
     public void Cli_Callees_IfGuardedCall_RecoveredByName_AndDisclosed()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         repo.Write("lib.cs", "namespace N { public static class Lib { public static int Helper() => 1; } }\n");
@@ -186,8 +181,7 @@ public class CSharpConditionalRefsTests
     [Fact]
     public void Cli_Callees_CleanMethod_NoRecoverySection_NoDisclosure()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         repo.Write("m.cs",
@@ -221,16 +215,4 @@ public class CSharpConditionalRefsTests
         return p.ExitCode;
     }
 
-    private static string? FindCliExe()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
-        {
-            var cliBin = Path.Combine(dir.FullName, "src", "CodeCompass.Cli", "bin");
-            if (Directory.Exists(cliBin))
-                return Directory.EnumerateFiles(cliBin, "CodeCompass.Cli.exe", SearchOption.AllDirectories)
-                    .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
-        }
-        return null;
-    }
 }

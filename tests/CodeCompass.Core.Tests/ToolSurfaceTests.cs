@@ -43,6 +43,6 @@ public class ToolSurfaceTests
         int total = tools.Sum(t => t.Json.Length);
         foreach (var (name, json) in tools) _out.WriteLine($"{name}: {json.Length} chars");
         _out.WriteLine($"total: {total} chars (~{total / 4} tokens)");
-        Assert.True(total <= 6500, $"MCP tool surface is {total} chars - over budget; trim descriptions before adding more.");
+        Assert.True(total <= 5100, $"MCP tool surface is {total} chars - over budget; trim descriptions before adding more.");
     }
 }

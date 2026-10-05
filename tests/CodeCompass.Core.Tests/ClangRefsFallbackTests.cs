@@ -61,8 +61,7 @@ public class ClangRefsFallbackTests
     [Fact]
     public void Cli_Refs_MissingInclude_FallsBackToLexical()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         WriteMissingIncludeRepo(repo);
@@ -85,8 +84,7 @@ public class ClangRefsFallbackTests
     [Fact]
     public void Cli_Refs_ResolvableSymbol_SemanticOnly_NoLexicalDoubleCount()
     {
-        var cli = FindCliExe();
-        if (cli is null) return;
+        var cli = TestCli.Find();
 
         using var repo = new TempRepo();
         repo.Write("shared.h", "int foo(int);\n");
@@ -157,16 +155,4 @@ public class ClangRefsFallbackTests
         return p.ExitCode;
     }
 
-    private static string? FindCliExe()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
-        {
-            var cliBin = Path.Combine(dir.FullName, "src", "CodeCompass.Cli", "bin");
-            if (Directory.Exists(cliBin))
-                return Directory.EnumerateFiles(cliBin, "CodeCompass.Cli.exe", SearchOption.AllDirectories)
-                    .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
-        }
-        return null;
-    }
 }

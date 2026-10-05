@@ -3,4 +3,6 @@
 // leaks across concurrently-running test classes. A network-forced env leaking into, say, the doctor
 // unresolved-include test flips that code down its network path and fails it intermittently. Disable
 // xUnit's cross-class parallelism so these tests can't race; the suite is fast enough that serial is fine.
+// This line is THE guard (many more classes mutate env vars and the static ServerContext than are in any
+// [Collection]; those attributes are documentation only) - TestIsolationTests fails if it is ever removed.
 [assembly: Xunit.CollectionBehavior(DisableTestParallelization = true)]

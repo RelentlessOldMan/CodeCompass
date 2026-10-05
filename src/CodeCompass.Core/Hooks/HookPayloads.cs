@@ -8,19 +8,19 @@ namespace CodeCompass.Core.Hooks;
 /// </summary>
 public static class HookPayloads
 {
+    // Only Grep (content search) is redirected: CodeCompass has no file-NAME search, so blocking Glob left the agent
+    // a dead end it had to escape through a shell command.
     private const string DenyReason =
-        "CodeCompass is the required, indexed code-search tool for this workspace. " +
-        "Use the CodeCompass MCP tools instead of Grep/Glob: search_code (literal text), " +
-        "find_definition (go-to-definition), find_references (semantic for C#/C++), and " +
-        "search_symbols. They return precise file:line:col results and cost far fewer tokens " +
-        "than grepping or reading whole files. Use Read to open a specific known file. " +
-        "(Grep/Glob can be re-enabled by setting CODECOMPASS_ENFORCE=0.)";
+        "CodeCompass is the indexed code-search tool for this workspace. Instead of Grep use: search_code " +
+        "(literal text), find_definition, find_references (semantic for C#/C++), find_callees, search_symbols - " +
+        "precise file:line:col results for far fewer tokens. Use Read for a known file and Glob for file-NAME " +
+        "patterns. (Disable with CODECOMPASS_ENFORCE=0.)";
 
     private const string SessionText =
-        "CodeCompass is available for this workspace via MCP. For any code search or navigation, " +
-        "prefer the CodeCompass tools - search_code, find_definition, find_references, search_symbols - " +
-        "over Grep/Glob or reading whole files. They return precise file:line:col ranges and use far " +
-        "fewer tokens; find_references is semantic for C# and C/C++. The index auto-updates as files change.";
+        "CodeCompass is available for this workspace via MCP. For code search and navigation prefer its tools - " +
+        "search_code, find_definition, find_references, find_callees, search_symbols - over Grep or reading whole " +
+        "files: precise file:line:col ranges for far fewer tokens; find_references is semantic for C# and C/C++. " +
+        "The index auto-updates as files change.";
 
     /// <summary>PreToolUse payload that denies the tool call and redirects to CodeCompass.</summary>
     public static string DenySearch() => JsonSerializer.Serialize(new

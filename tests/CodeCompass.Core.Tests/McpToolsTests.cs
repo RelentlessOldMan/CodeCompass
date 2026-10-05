@@ -766,6 +766,7 @@ public class McpToolsTests
     {
         // Fake-out: force network treatment on a local temp repo (no real share). A network root must
         // NOT auto-reconcile on startup (slow SMB stat-walk / unreliable watcher -> left to manual update).
+        var oldForce = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
         Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
         using var repo = new TempRepo();
         repo.Write("a.cs", "class A { }\n");
@@ -792,7 +793,8 @@ public class McpToolsTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", null);
+            // Restore, don't null: a suite run deliberately under FORCE_NETWORK=1 must keep it for later tests.
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", oldForce);
             ServerContext.Init(repo.Root); // reset shared static state
         }
     }

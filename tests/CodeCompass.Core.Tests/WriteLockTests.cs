@@ -16,6 +16,21 @@ namespace CodeCompass.Core.Tests;
 // mutation holds IndexWriteLock, and a process holding the index in memory reloads when another commits.
 public class WriteLockTests
 {
+    // "Another process" committing an update: a separate thread is a distinct IndexWriteLock holder, exactly as another
+    // process would be. A plain thread + join (these are synchronous APIs), rethrowing anything it hit.
+    private static void OtherWriter(string root)
+    {
+        Exception? error = null;
+        var th = new Thread(() =>
+        {
+            try { var u = RepositoryIndexer.Update(root); u.Text.Dispose(); u.Symbols.Dispose(); }
+            catch (Exception e) { error = e; }
+        });
+        th.Start();
+        th.Join();
+        if (error is not null) throw new Exception("the other writer failed", error);
+    }
+
     private static string TempCacheDir() =>
         Path.Combine(Path.GetTempPath(), "cc-lock-" + Guid.NewGuid().ToString("N"));
 
@@ -53,7 +68,7 @@ public class WriteLockTests
     }
 
     [Fact]
-    public void WriteLock_Acquire_WaitsForTheHolder_AndIsCancellable()
+    public async Task WriteLock_Acquire_WaitsForTheHolder_AndIsCancellable()
     {
         var dir = TempCacheDir();
         var holder = IndexWriteLock.TryAcquire(dir)!;
@@ -62,15 +77,14 @@ public class WriteLockTests
 
         Assert.False(acquired.Wait(300)); // must NOT get in while the holder writes
         holder.Dispose();
-        Assert.True(waiter.Wait(10_000)); // ...and proceeds once it releases
+        await waiter.WaitAsync(TimeSpan.FromSeconds(10)); // ...and proceeds once it releases
         Assert.True(acquired.IsSet);
 
         using var stillHeld = IndexWriteLock.TryAcquire(dir)!;
         using var cts = new CancellationTokenSource();
         var cancelled = Task.Run(() => IndexWriteLock.Acquire(dir, cts.Token));
         cts.Cancel(); // a re-point/shutdown abandons the wait instead of blocking on a long external build
-        var ex = Assert.ThrowsAny<AggregateException>(() => cancelled.Wait(10_000));
-        Assert.IsAssignableFrom<OperationCanceledException>(ex.InnerException);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cancelled.WaitAsync(TimeSpan.FromSeconds(10)));
     }
 
     // Freshness: a session holding the index must serve what ANOTHER writer committed, not a silently stale copy.
@@ -87,7 +101,7 @@ public class WriteLockTests
 
             repo.Write("b.cs", "namespace N { class BravoExternal { } }");
             // Another writer (a terminal `codecompass update`) - on its own thread, so it's a distinct lock holder.
-            Task.Run(() => { var u = RepositoryIndexer.Update(repo.Root); u.Text.Dispose(); u.Symbols.Dispose(); }).Wait();
+            OtherWriter(repo.Root);
 
             Assert.Contains("b.cs", CodeCompassTools.SearchCode("BravoExternal"));
         }
@@ -107,7 +121,7 @@ public class WriteLockTests
             CodeCompassTools.Reindex();
 
             repo.Write("b.cs", "namespace N { class BravoExternal { } }");
-            Task.Run(() => { var u = RepositoryIndexer.Update(repo.Root); u.Text.Dispose(); u.Symbols.Dispose(); }).Wait();
+            OtherWriter(repo.Root);
 
             repo.Write("c.cs", "namespace N { class CharlieLocal { } }");
             ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("c.cs") }, FullReconcile: false));
@@ -176,7 +190,7 @@ public class WriteLockTests
             Assert.Contains("codecompass update", r);
 
             Thread.Sleep(20); // meta timestamps are compared against the loss time
-            Task.Run(() => { var u = RepositoryIndexer.Update(repo.Root); u.Text.Dispose(); u.Symbols.Dispose(); }).Wait();
+            OtherWriter(repo.Root);
             Assert.DoesNotContain("lost change events", CodeCompassTools.SearchCode("LostEventsProbe"));
         }
         finally
@@ -189,10 +203,9 @@ public class WriteLockTests
     // Review P2-30: the live-watch role across REAL processes - a running `codecompass watch` holds it (so a session
     // here can't start a second watcher), and killing that process releases it with no stale lock left behind.
     [Fact]
-    public void LiveWatchRole_HeldByAnotherProcess_ThenFreedWhenItIsKilled()
+    public async Task LiveWatchRole_HeldByAnotherProcess_ThenFreedWhenItIsKilled()
     {
         var cli = TestCli.Find();
-        if (cli is null) return;
 
         using var repo = new TempRepo();
         repo.Write("a.cs", "namespace N { class WatchRole { } }");
@@ -207,7 +220,7 @@ public class WriteLockTests
                     if (line.Contains("watching")) return true;
                 return false;
             });
-            Assert.True(watching.Wait(120_000) && watching.Result, "the CLI watch never started");
+            Assert.True(await watching.WaitAsync(TimeSpan.FromSeconds(120)), "the CLI watch never started");
             _ = p.StandardError.ReadToEndAsync();
             _ = p.StandardOutput.ReadToEndAsync();
 
@@ -228,10 +241,9 @@ public class WriteLockTests
     // Real cross-process exclusion: a terminal `codecompass index` waits for an in-flight write held by another
     // process (this test host), says so, and completes once it's released - it is never refused.
     [Fact]
-    public void Cli_Index_WaitsForAnotherProcessesWrite_ThenCompletes()
+    public async Task Cli_Index_WaitsForAnotherProcessesWrite_ThenCompletes()
     {
         var cli = TestCli.Find();
-        if (cli is null) return;
 
         using var repo = new TempRepo();
         repo.Write("a.cs", "namespace N { class CrossProcess { } }");
@@ -247,7 +259,7 @@ public class WriteLockTests
         });
         try
         {
-            Assert.True(sawNotice.Wait(60_000) && sawNotice.Result, "the CLI never reported waiting for the lock");
+            Assert.True(await sawNotice.WaitAsync(TimeSpan.FromSeconds(60)), "the CLI never reported waiting for the lock");
             Assert.False(p.HasExited); // blocked, not failed
         }
         finally { holder.Dispose(); }

@@ -48,6 +48,7 @@ param(
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $failures = New-Object System.Collections.Generic.List[string]
+Set-Location $root   # dotnet restore/build/test below resolve the solution from the current directory
 
 # Point git at the tracked hooks dir so .githooks/pre-push runs ./check.ps1 -Big before every push.
 if ($InstallHook) {
@@ -97,26 +98,28 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  Dependencies drifted from the lockfile. If intentional, run: dotnet restore --force-evaluate, then review + commit the packages.lock.json diff." -ForegroundColor Yellow
 }
 
-# ---- Tier 1: fast unit tests --------------------------------------------------------------------
-Section "unit tests (dotnet test)"
-dotnet test -c Release --nologo
-Check "xUnit suite" ($LASTEXITCODE -eq 0)
+# ---- Tier 1: build + unit tests -----------------------------------------------------------------
+# Build the WHOLE solution first: the test project doesn't reference the CLI, but its end-to-end tests run the
+# built CodeCompass.Cli.exe as a subprocess - built here, so they always exercise THIS commit's binary (TestCli
+# fails them loudly on a missing or stale exe rather than letting them pass vacuously).
+Section "build (Release)"
+dotnet build -c Release --nologo | Out-Null
+Check "build" ($LASTEXITCODE -eq 0 -and (Test-Path $cli))
 
-# ---- Tier 2: large-file / generated-corpus scenarios --------------------------------------------
-if ($Big -or $Fetch -or $Network) {
-    Section "build (Release)"
-    dotnet build -c Release --nologo | Out-Null
-    Check "build" ($LASTEXITCODE -eq 0 -and (Test-Path $cli))
-}
+Section "unit tests (dotnet test)"
+dotnet test -c Release --nologo --no-build
+Check "xUnit suite" ($LASTEXITCODE -eq 0)
 
 if ($Big -and (Test-Path $cli)) {
     Section "big file: streaming index + positional search + truncation"
     & (Join-Path $root "make-bigfile-corpus.ps1") -SizeGB $SizeGB | Out-Null
     $bigDir = Join-Path $root ".corpus/_bigfile"
+    Check "big-file corpus generated" (Test-Path (Join-Path $bigDir "chipreg_bank.h"))
     Start-Sleep -Seconds 2  # let a freshly-written large file settle (AV) before the first walk
 
+    # "No hang" alone would pass a CLI that fails instantly - require a clean exit too.
     $idx = Invoke-Cli @("index", $bigDir)
-    Check "big file indexes (no hang)" (-not $idx.TimedOut)
+    Check "big file indexes (no hang, exit 0)" (-not $idx.TimedOut -and $idx.Code -eq 0)
 
     # The real correctness proof: the fresh index can find a marker near EOF (and at the right line).
     $end = Invoke-Cli @("search", $bigDir, "ZZ_UNIQUE_MARKER_END_e5d0")
@@ -132,7 +135,7 @@ if ($Big -and (Test-Path $cli)) {
     $env:CODECOMPASS_FORCE_NETWORK = "1"
     try {
         $nidx = Invoke-Cli @("index", $bigDir)
-        Check "network-mode big file indexes (no hang)" (-not $nidx.TimedOut)
+        Check "network-mode big file indexes (no hang, exit 0)" (-not $nidx.TimedOut -and $nidx.Code -eq 0)
         Check "network-mode index skips the pre-scan" ($nidx.Err -match "skipping the pre-scan")
         $nend = Invoke-Cli @("search", $bigDir, "ZZ_UNIQUE_MARKER_END_e5d0")
         Check "network-mode positional search finds EOF marker" ($nend.Out -match "chipreg_bank\.h:\d+:\d+:.*ZZ_UNIQUE_MARKER_END_e5d0")
@@ -142,8 +145,11 @@ if ($Big -and (Test-Path $cli)) {
     Section "pathological: nested-template files index without hanging (default symbol cap)"
     & (Join-Path $root "make-pathological-corpus.ps1") -Count 8 -SizeMB 3 | Out-Null
     $nt = Join-Path $root ".corpus/_pathological/slow_nested_templates"
+    Check "pathological corpus generated" ((Test-Path $nt) -and @(Get-ChildItem $nt -File).Count -gt 0)
     $pat = Invoke-Cli @("index", $nt) 120   # default cap skips >1MB symbol extraction -> must be fast
-    Check "pathological indexes without hanging" (-not $pat.TimedOut)
+    Check "pathological indexes without hanging (exit 0)" (-not $pat.TimedOut -and $pat.Code -eq 0)
+    $patQ = Invoke-Cli @("symbols", $nt, "a")
+    Check "pathological index is queryable" ($patQ.Code -eq 0)
 
     Section "diagnostics: doctor + report (CLI wiring)"
     $doc = Invoke-Cli @("doctor", $bigDir)
@@ -251,7 +257,7 @@ if ($Network -and (Test-Path $cli)) {
             Start-Sleep -Seconds 2  # let the freshly-written file settle before the first walk
 
             $nidx = Invoke-Cli @("index", $netDir)
-            Check "share big file indexes over the wire (no hang)" (-not $nidx.TimedOut)
+            Check "share big file indexes over the wire (no hang, exit 0)" (-not $nidx.TimedOut -and $nidx.Code -eq 0)
             Check "share index skips the pre-scan" ($nidx.Err -match "skipping the pre-scan")
 
             $nend = Invoke-Cli @("search", $netDir, "ZZ_UNIQUE_MARKER_END_e5d0")

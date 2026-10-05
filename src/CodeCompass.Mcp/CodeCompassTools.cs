@@ -14,7 +14,7 @@ namespace CodeCompass.Mcp;
 /// The tools exposed to the agent. Each returns compact, ranked file:line:col results so
 /// the agent gets exactly the lines it needs instead of reading whole files. If the index
 /// isn't ready yet, a tool returns a short status (still indexing, or how to build it) so
-/// the agent can relay progress rather than hang. Deliberately a small surface (6 tools) to
+/// the agent can relay progress rather than hang. Deliberately a small surface (7 tools) to
 /// keep the per-session token cost low.
 /// </summary>
 [McpServerToolType]
@@ -22,9 +22,8 @@ public static class CodeCompassTools
 {
     [McpServerTool(Name = "search_code")]
     [Description("Search the indexed codebase for a literal text/substring. Case-sensitive by default; " +
-                 "set caseSensitive=false to match any case. Returns ranked 'file:line:col: matched " +
-                 "line' results. Prefer this over grep or reading whole files - it is faster and " +
-                 "returns only the relevant lines.")]
+                 "set caseSensitive=false to match any case. Returns 'file:line:col: matched line' " +
+                 "results. Prefer this over grep.")]
     public static string SearchCode(
         [Description("Literal substring to find.")] string query,
         [Description("Maximum number of results.")] int maxResults = 50,
@@ -36,7 +35,7 @@ public static class CodeCompassTools
         // high I/O cost - reject them like the other tools do (IsNullOrWhiteSpace, not IsNullOrEmpty).
         if (string.IsNullOrWhiteSpace(query)) return "Provide a non-empty search string.";
         if (query.Length < MinIndexedQuery) return ShortQueryMessage(query);
-        maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
+        maxResults = Math.Clamp(maxResults, 1, MaxResultsCeiling); // agent-supplied; guard against 0/negative/absurd
         // Federate across the primary index + every linked root. Fetch one extra per index to detect
         // truncation across the union; primary hits stay repo-relative, linked hits show absolute paths.
         var hits = new List<(ServerContext.IndexHandle H, SearchMatch M)>();
@@ -151,10 +150,15 @@ public static class CodeCompassTools
 
     // Result footer that distinguishes an exact count from a truncated one, so the agent knows
     // whether it has seen everything or must refine the query. `shown` is how many we actually list.
-    private static string Footer(int shown, bool truncated, string singular, string plural) =>
+    // `limitParam`: the tool takes maxResults, so raising it is an option - up to its hard ceiling (asking for more than
+    // 1000 silently got 1000, and "raise the limit" then became a dead end).
+    private static string Footer(int shown, bool truncated, string singular, string plural, bool limitParam = true) =>
         truncated
-            ? $"(showing the first {shown} {plural}; MORE EXIST - narrow the query, e.g. add surrounding text or a longer/more specific identifier)"
+            ? $"(showing the first {shown} {plural}; MORE EXIST - narrow the query (more surrounding text, a longer identifier)" +
+              (limitParam && shown < MaxResultsCeiling ? $" or raise maxResults (max {MaxResultsCeiling})" : "") + ")"
             : $"({shown} {(shown == 1 ? singular : plural)})";
+
+    private const int MaxResultsCeiling = 1000;
 
     [McpServerTool(Name = "find_definition")]
     [Description("Find where a symbol (class, method, function, type, etc.) is defined, by exact name. " +
@@ -193,7 +197,7 @@ public static class CodeCompassTools
             var snippet = TryReadSnippet(h.Root, s.RelativePath, s.Line, s.EndLine > s.Line ? s.EndLine : s.Line);
             if (snippet is not null) { sb.AppendLine(); sb.Append(snippet); }
         }
-        else sb.Append(Footer(Math.Min(matches.Count, MaxDefinitionsShown), matches.Count > MaxDefinitionsShown, "definition", "definitions"));
+        else sb.Append(Footer(Math.Min(matches.Count, MaxDefinitionsShown), matches.Count > MaxDefinitionsShown, "definition", "definitions", limitParam: false));
         return sb.ToString();
     }, cancellationToken);
 
@@ -245,7 +249,7 @@ public static class CodeCompassTools
         => ServerContext.QueryAll((handles, ct) =>
     {
         if (string.IsNullOrWhiteSpace(name)) return "Provide a symbol/identifier to find references to.";
-        maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
+        maxResults = Math.Clamp(maxResults, 1, MaxResultsCeiling); // agent-supplied; guard against 0/negative/absurd
         // Collect one past the cap across all sources (C# semantic, C/C++ semantic, then lexical in
         // other files) so truncation is detected by the same overflow probe the other tools use -
         // exact, not a fuzzy threshold. Kind tags let the footer report the shown breakdown. The
@@ -404,7 +408,9 @@ public static class CodeCompassTools
         foreach (var (line, _) in shown) sb.AppendLine(line);
         int cs = shown.Count(h => h.Kind == 'c'), cpp = shown.Count(h => h.Kind == 'p'), lex = shown.Count(h => h.Kind == 'l');
         sb.Append($"({cs} C# + {cpp} C/C++ semantic reference(s); {lex} lexical in other files)");
-        if (truncated) sb.Append(" - MORE EXIST, narrow the query or raise the limit");
+        if (truncated) sb.Append(shown.Count < MaxResultsCeiling
+            ? $" - MORE EXIST: narrow the query or raise maxResults (max {MaxResultsCeiling})"
+            : " - MORE EXIST: narrow the query");
         sb.Append(cppNote);
         sb.Append(csNote);
         return sb.ToString();
@@ -424,7 +430,7 @@ public static class CodeCompassTools
         => ServerContext.QueryAll((handles, ct) =>
     {
         if (string.IsNullOrWhiteSpace(name)) return "Provide a C# method name.";
-        maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
+        maxResults = Math.Clamp(maxResults, 1, MaxResultsCeiling); // agent-supplied; guard against 0/negative/absurd
         // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
         // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
         // The analyzer spans every root; under an active focus keep only callees whose DEFINITION is in scope.
@@ -500,7 +506,7 @@ public static class CodeCompassTools
         => ServerContext.QueryAll((handles, ct) =>
     {
         if (string.IsNullOrWhiteSpace(query)) return "Provide a symbol-name substring to search for.";
-        maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
+        maxResults = Math.Clamp(maxResults, 1, MaxResultsCeiling); // agent-supplied; guard against 0/negative/absurd
         var matches = new List<(ServerContext.IndexHandle H, Symbol S)>();
         foreach (var h in handles)
         {
@@ -526,7 +532,11 @@ public static class CodeCompassTools
         // A synchronous rebuild of a large/network workspace would block this tool call for minutes - the MCP
         // host times out the call while the build keeps running (orphaned), the very stall the deferred-to-CLI
         // policy exists to prevent. Refuse it and point at the CLI, consistent with the initial-index deferral.
-        if (ServerContext.ReindexWouldExceedAutoLimit(out _)) return ServerContext.CliBuildGuidance();
+        if (ServerContext.ReindexWouldExceedAutoLimit(out _))
+            return ServerContext.IsServing
+                ? "This workspace is too large to rebuild inside a tool call (it would time out). The current index keeps " +
+                  $"serving; rebuild from a terminal: codecompass index \"{ServerContext.Root}\" - this session picks it up automatically."
+                : ServerContext.CliBuildGuidance();
         var s = ServerContext.Rebuild();
         if (s is null)
             return "Another CodeCompass process is writing this index right now (e.g. `codecompass index` or `update` " +
@@ -536,19 +546,13 @@ public static class CodeCompassTools
     }
 
     [McpServerTool(Name = "manage_links")]
-    [Description("Configure LINKED ROOTS - external directories outside this workspace (a shared library, a " +
-                 "sibling repo, a third-party drop on another drive) whose code is federated into this " +
-                 "workspace's searches. action: \"list\" (default) shows the linked roots, index status, and " +
-                 "the current focus; \"add\" attaches a directory (and indexes it, or defers if very large); " +
-                 "\"remove\" detaches one; \"focus\" SCOPES searches to a subset of roots (see below). 'path' " +
-                 "is the external directory (required for add/remove). Changes take effect on the NEXT query " +
-                 "this session. Searching across links is otherwise automatic.\n" +
-                 "FOCUS - when you link several big repos into one workspace but want to search only one at a " +
-                 "time: action=\"focus\" path=\"<repo>\" scopes every subsequent search to that root (the " +
-                 "wrapper project + any other linked roots are excluded); 'path' matches a repo folder name, a " +
-                 "path fragment, or a full path, and accepts a comma-separated list to focus several at once. " +
-                 "action=\"focus\" with NO path clears it (searches federate across all roots again). Scoped " +
-                 "results disclose what was excluded, so a narrowed search is never mistaken for 'not found'.")]
+    [Description("Manage LINKED ROOTS - external directories federated into this workspace's searches - and the " +
+                 "session FOCUS. action: \"list\" (default) shows linked roots, index status, and focus. " +
+                 "\"add\"/\"remove\" attach/detach an external directory ('path' = absolute; add indexes it, or " +
+                 "defers if very large; applies on the next query). \"focus\" scopes every search to matching " +
+                 "root(s): 'path' = folder name, path fragment, or absolute path, comma-separated for several; " +
+                 "omit to clear. Scoped results disclose what was excluded, so a narrowed search is never " +
+                 "mistaken for 'not found'.")]
     public static string ManageLinks(
         [Description("What to do: list | add | remove | focus (default list).")] string action = "list",
         [Description("For add/remove: the external directory (absolute path). For focus: repo name(s)/path(s) to scope to (comma-separated); omit to clear focus.")] string? path = null,
