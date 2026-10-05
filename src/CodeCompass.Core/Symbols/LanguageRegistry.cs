@@ -68,6 +68,8 @@ public static class LanguageRegistry
         (interface_declaration name: (identifier) @interface)
         (struct_declaration name: (identifier) @struct)
         (enum_declaration name: (identifier) @enum)
+        (record_declaration name: (identifier) @record)
+        (record_declaration (parameter_list (parameter name: (identifier) @property)))
         (method_declaration name: (identifier) @method)
         (constructor_declaration name: (identifier) @method)
         (property_declaration name: (identifier) @property)

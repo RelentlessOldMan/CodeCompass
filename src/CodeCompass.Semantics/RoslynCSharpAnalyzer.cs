@@ -90,7 +90,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         var (solution, project) = EnsureBuilt(ct);
         var all = new List<SemanticLocation>();
 
-        foreach (var symbol in FindDeclarations(project, name, ct))
+        foreach (var symbol in FindDeclarations(project, name, ct).Concat(PositionalRecordProperties(project, name, ct)))
         {
             var referenced = SymbolFinder.FindReferencesAsync(symbol, solution, ct).GetAwaiter().GetResult();
             foreach (var r in referenced)
@@ -271,6 +271,31 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     private static IEnumerable<ISymbol> FindDeclarations(Project project, string name, System.Threading.CancellationToken ct = default) =>
         SymbolFinder.FindDeclarationsAsync(project, name, ignoreCase: false, ct).GetAwaiter().GetResult();
 
+    // A positional record member (`record struct FileState(..., string ContentHash)`) is a property SYNTHESIZED from the
+    // primary-ctor parameter, and Roslyn's declaration index (FindDeclarations) holds neither - so without this the
+    // name resolves to nothing and every `f.ContentHash` use is lost. Text-prefilter the documents (only those
+    // mentioning both `record` and the name are parsed), then map each matching positional parameter to its property.
+    private static IEnumerable<ISymbol> PositionalRecordProperties(Project project, string name, System.Threading.CancellationToken ct)
+    {
+        foreach (var doc in project.Documents)
+        {
+            ct.ThrowIfCancellationRequested();
+            var text = doc.GetTextAsync(ct).GetAwaiter().GetResult().ToString();
+            if (!text.Contains(name, StringComparison.Ordinal) || !text.Contains("record", StringComparison.Ordinal)) continue;
+            var root = doc.GetSyntaxRootAsync(ct).GetAwaiter().GetResult();
+            if (root is null) continue;
+            SemanticModel? model = null;
+            foreach (var rec in root.DescendantNodes().OfType<RecordDeclarationSyntax>())
+            {
+                if (rec.ParameterList is null || !rec.ParameterList.Parameters.Any(p => p.Identifier.ValueText == name)) continue;
+                model ??= doc.GetSemanticModelAsync(ct).GetAwaiter().GetResult();
+                if (model?.GetDeclaredSymbol(rec, ct) is not INamedTypeSymbol type) continue;
+                foreach (var p in type.GetMembers(name).OfType<IPropertySymbol>())
+                    yield return p;
+            }
+        }
+    }
+
     // Cancellable: the build walks and reads every .cs under every root (minutes over a share) while the caller holds
     // the server's read lock - a re-point must be able to stop it. A cancelled build installs nothing (the solution is
     // only assigned at the end), so the next call starts over cleanly.
@@ -293,9 +318,15 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             var unreadable = new List<string>();
 
             var walker = new FileWalker(new IgnoreRules());
+            var globalUsings = new SortedSet<string>(StringComparer.Ordinal);
             foreach (var root in _roots)
             foreach (var file in walker.Walk(root))
             {
+                if (IsMsBuildProjectFile(file.RelativePath))
+                {
+                    try { CollectGlobalUsings(File.ReadAllText(file.FullPath), globalUsings); } catch { /* best effort */ }
+                    continue;
+                }
                 if (!file.RelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
                 if (ct.IsCancellationRequested) { workspace.Dispose(); ct.ThrowIfCancellationRequested(); }
                 string text;
@@ -313,6 +344,15 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                         SourceText.From(text), VersionStamp.Create(), file.FullPath))));
             }
 
+            // The build injects these as an invisible generated file (obj/*.GlobalUsings.g.cs); without them every type
+            // they bring in (List<T>, IReadOnlyDictionary<,>, ...) is an error type here and references through it vanish.
+            // One project spans all roots, so the union applies everywhere - extra usings only matter on a name clash.
+            if (globalUsings.Count > 0)
+                solution = solution.AddDocument(DocumentInfo.Create(
+                    DocumentId.CreateNewId(projectId), name: "CodeCompass.GlobalUsings.g.cs",
+                    loader: TextLoader.From(TextAndVersion.Create(SourceText.From(
+                        string.Concat(globalUsings.Select(u => $"global using global::{u};\n"))), VersionStamp.Create()))));
+
             _workspace = workspace;
             _solution = solution;
             _projectId = projectId;
@@ -320,6 +360,29 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _unreadable.AddRange(unreadable);
             return (solution, solution.GetProject(projectId)!);
         }
+    }
+
+    private static bool IsMsBuildProjectFile(string relativePath) =>
+        relativePath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
+        relativePath.EndsWith(".props", StringComparison.OrdinalIgnoreCase);
+
+    // Microsoft.NET.Sdk's <ImplicitUsings> set (the Web/Worker SDKs add ASP.NET/Extensions namespaces whose assemblies
+    // aren't referenced here anyway, so they'd bind nothing).
+    private static readonly string[] SdkImplicitUsings =
+        { "System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Net.Http", "System.Threading", "System.Threading.Tasks" };
+
+    private static readonly System.Text.RegularExpressions.Regex ImplicitUsingsOn =
+        new(@"<ImplicitUsings>\s*(enable|true)\s*</ImplicitUsings>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    // Plain namespace imports only: <Using Include="X" /> without Static/Alias (those need a different directive form).
+    private static readonly System.Text.RegularExpressions.Regex UsingItem =
+        new(@"<Using\s+Include\s*=\s*""([A-Za-z_][\w.]*)""(?![^>]*\b(?:Static|Alias)\s*=)[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    internal static void CollectGlobalUsings(string projectXml, ISet<string> into)
+    {
+        if (ImplicitUsingsOn.IsMatch(projectXml))
+            foreach (var u in SdkImplicitUsings) into.Add(u);
+        foreach (System.Text.RegularExpressions.Match m in UsingItem.Matches(projectXml))
+            into.Add(m.Groups[1].Value);
     }
 
     // The framework reference set (the running runtime's ~150 TPA assemblies) never changes for the life of

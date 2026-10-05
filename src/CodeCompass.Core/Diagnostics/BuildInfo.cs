@@ -30,6 +30,9 @@ public static class BuildInfo
     /// History:
     ///   1 - mid-size files (>= LargeFileIndexer.SidecarThresholdBytes, under the streaming threshold) now get
     ///       a positional block sidecar, so a rebuild adds those sidecars and makes their search block-selective.
+    ///   2 - C# records (and positional record properties) are now extracted as symbols; v1.0.232 also changed
+    ///       output (seam window in forced-cut block Blooms, symlinked files no longer indexed). A rebuild picks up
+    ///       records find_definition/search_symbols otherwise miss until each file is next touched.
     /// </summary>
-    public const int IndexerContentVersion = 1;
+    public const int IndexerContentVersion = 2;
 }
