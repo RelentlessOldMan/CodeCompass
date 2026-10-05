@@ -149,17 +149,23 @@ symlinks and junctions). Hash those yourself.
 
 An entry stands for the live file's content only if **all** of these hold:
 
-1. The live file's size equals the entry's size.
-2. The live file's UTC last-write ticks equal the entry's `mtime`.
-3. The file isn't **racily clean**: its `mtime` is earlier than `ledgerWriteTime - margin`, where the margin is
-   **2 s** for a local root and **10 s** for a network (UNC or mapped-network) root.
+1. The entry's `mtime` is not `0`.
+2. The live file's size equals the entry's size.
+3. The live file's UTC last-write ticks equal the entry's `mtime`.
 
-Rule 3 is git's rule. On filesystems with coarse timestamps, an edit made in the same tick right after the file was
-hashed leaves size and mtime unchanged.
+CodeCompass decides what to record when it hashes a file, so readers need no clock rules of their own. It records an
+`mtime` of `0` (so the entry matches no file) when the timestamp couldn't prove the bytes:
 
-**ledgerWriteTime** is the newest UTC last-write time of the `snapshot*` files in the ledger folder: base, journal
-and manifest. If it's earlier than the `mtime` of any entry you're checking (for example, the folder was copied or
-restored), treat it as unknown and re-hash.
+- **Possibly racy:** the timestamp is a whole second (a coarse filesystem such as FAT/exFAT or some NAS boxes, where a
+  same-size edit in the same second leaves size and mtime unchanged) and within the last hour of CodeCompass's clock.
+  The hour also absorbs any realistic clock difference between a file server and the indexing machine.
+- **Changed while being read:** for a file modified within the last hour, CodeCompass checks its size and timestamp
+  again after reading it; if either moved since the file was listed, the hash may not match.
+
+A sub-second timestamp (NTFS, or ext4/xfs behind Samba) can't be racy: any later edit gets a new timestamp.
+
+Known limit: a tool that rewrites a file at the same size and then deliberately restores its exact previous
+timestamp is not detected (that needs the file's change time, which this format doesn't record).
 
 Anything that fails a rule: hash the file yourself.
 

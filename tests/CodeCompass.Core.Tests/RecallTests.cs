@@ -106,16 +106,20 @@ public class RecallTests
     }
 
     // P2-12: same-size edit within the same timestamp tick right after the ledger was written: size+mtime matched and the
-    // prefilter skipped the file forever ("racily clean").
+    // prefilter skipped the file forever ("racily clean"). A coarse filesystem (FAT, some NAS) stamps whole seconds, so the
+    // file carries one here. (Restoring an exact sub-second NTFS timestamp after an edit is a different hole - it needs the
+    // file's change time to catch - see LedgerTrust.)
     [Fact]
     public void RacilyCleanEdit_IsPickedUpByUpdate()
     {
         using var repo = new TempRepo();
         repo.Write("a.cs", "class AlphaOne { }");
+        var now = DateTime.UtcNow;
+        var mtime = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc); // a coarse stamp
+        File.SetLastWriteTimeUtc(repo.FullPath("a.cs"), mtime);
         BuildIndex(repo);
-        var mtime = File.GetLastWriteTimeUtc(repo.FullPath("a.cs"));
         repo.Write("a.cs", "class AlphaTwo { }");                  // same length
-        File.SetLastWriteTimeUtc(repo.FullPath("a.cs"), mtime);     // a coarse clock: the same timestamp
+        File.SetLastWriteTimeUtc(repo.FullPath("a.cs"), mtime);     // the same coarse tick
         var u = RepositoryIndexer.Update(repo.Root);
         using (u.Text) using (u.Symbols)
         {

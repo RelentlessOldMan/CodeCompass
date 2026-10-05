@@ -53,25 +53,7 @@ public sealed class DiskSnapshot : IDisposable
         ds.LoadManifestAndBase();
         ds.LoadJournal();
         ds._nextBaseNumber = Math.Max(ds._nextBaseNumber, NextBaseNumber(dir));
-        ds.LedgerWrittenUtcTicks = LatestWriteTicks(dir);
         return ds;
-    }
-
-    /// <summary>When this ledger was last written (UTC ticks; 0 if unknown). A file whose mtime is not safely OLDER
-    /// than this may have been changed again within the same timestamp tick after it was hashed ("racily clean") -
-    /// its size+mtime can't be trusted to prove it unchanged.</summary>
-    public long LedgerWrittenUtcTicks { get; private set; }
-
-    private static long LatestWriteTicks(string dir)
-    {
-        long max = 0;
-        try
-        {
-            foreach (var f in System.IO.Directory.EnumerateFiles(dir, "snapshot*"))
-                max = Math.Max(max, File.GetLastWriteTimeUtc(f).Ticks);
-        }
-        catch { /* unknown -> 0 -> nothing is considered racy (the old behavior) */ }
-        return max;
     }
 
     /// <summary>Open only if a snapshot already exists (new-format base or a legacy blob).</summary>
