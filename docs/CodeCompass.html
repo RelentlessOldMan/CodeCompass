@@ -87,7 +87,7 @@ CodeCompass exposes a deliberately small <b>7 tools</b> with terse descriptions 
 
 <h2>Using it from Claude Code</h2>
 <p>Once installed you don't do anything special &mdash; just ask Claude to work in your repo. It gets the CodeCompass tools, and a
-hook <b>redirects <code>Grep</code>/<code>Glob</code> to CodeCompass</b> so the agent uses the index instead of scanning files. (Set
+hook <b>redirects <code>Grep</code> to CodeCompass</b> so the agent uses the index instead of scanning files (<code>Glob</code> stays available &mdash; CodeCompass searches contents and symbols, not file names). (Set
 <code>CODECOMPASS_ENFORCE=0</code> to allow grep again.) The index builds automatically on first use for normal-sized workspaces
 and stays fresh as files change.</p>
 <p><b>Large repos:</b> a very large workspace isn't auto-indexed inside a tool call (that could stall). CodeCompass tells you to
@@ -121,8 +121,12 @@ is live-watched for edits like the main repo, and <code>find_references</code>/<
 <b>across</b> the boundary (C# via Roslyn, C/C++ via clang). Links are stored machine-local (absolute paths), not in
 the committed <code>.codecompass.json</code>.</p>
 <p>Manage them from <b>either</b> side &mdash; they share one implementation:</p>
-<pre>From the agent (MCP tool):   manage_links  action: list | add | remove   (path: for add/remove)
+<pre>From the agent (MCP tool):   manage_links  action: list | add | remove | focus   (path: for add/remove/focus)
 From a terminal (CLI):       codecompass link add|remove|list &lt;path&gt; [project-dir]</pre>
+<p><b>Focus:</b> linked several big repos but working in one? <code>manage_links action=focus path="&lt;repo&gt;"</code>
+scopes the session's searches to it (a folder name, path fragment or absolute path; comma-separated for several; no
+path clears it). Every scoped answer says what was excluded, and a focused root with no index yet is called out, so a
+narrowed search is never mistaken for "not found". Focus filters what's shown, not what's resolved.</p>
 <p><b>Only the MCP server searches across linked roots</b> (it's the long-lived process that holds each root's index
 open and watches it); the CLI always searches the single root you point it at. So: set federation up with
 <code>manage_links</code> or <code>link add</code>, then let the MCP tools do the multi-repo searching.
@@ -150,10 +154,11 @@ largest real symbol-bearing file and below the size where parsing gets slow.</p>
 <tr><td><code>CODECOMPASS_MAX_SYMBOL_MB</code></td><td style="text-align:left">Skip tree-sitter symbol extraction above this size (default 1). Raise it for large <i>valid</i> code whose symbols you want &mdash; safe from the data-blob crawl, since above 1&nbsp;MB overwhelmingly numeric/hex files are auto-skipped for symbols by content.</td></tr>
 <tr><td><code>CODECOMPASS_MAX_FILE_MB</code></td><td style="text-align:left">Per-file size cap for indexing entirely (default 2000 / 2&nbsp;GB). Files &ge;128&nbsp;MB are streamed (bounded memory), so a high cap won't blow up RAM; lower it per-repo to skip big generated files. Its cost is read time on a full build.</td></tr>
 <tr><td><code>CODECOMPASS_IGNORE</code></td><td style="text-align:left">Comma/semicolon-separated directory names to exclude (e.g. <code>generated,vendor</code>).</td></tr>
+<tr><td><code>CODECOMPASS_KEEP</code></td><td style="text-align:left">Directory names to index even though they're skipped by default as build output (e.g. <code>packages</code> in a pnpm/yarn monorepo). Config: <code>keepDirs</code>. A zero result says when such directories were skipped.</td></tr>
 <tr><td><code>CODECOMPASS_MAX_AUTO_MB</code></td><td style="text-align:left">Workspaces larger than this (default 100) are left for a one-time CLI build instead of auto-indexing in a tool call.</td></tr>
 <tr><td><code>CODECOMPASS_THREADS</code> / <code>CODECOMPASS_SEGMENT_MB</code></td><td style="text-align:left">Indexing parallelism / per-worker build-memory budget.</td></tr>
 <tr><td><code>CODECOMPASS_READ_BUDGET_MB</code></td><td style="text-align:left">Cap on total file bytes held in memory at once during a parallel build (default scales to RAM: ~1/16th of available, clamped 256&nbsp;MB&ndash;4&nbsp;GB). Stops N cores from each loading a multi-GB file at once when <code>MAX_FILE_MB</code> is large; an over-budget file reads solo.</td></tr>
-<tr><td><code>CODECOMPASS_ENFORCE=0</code></td><td style="text-align:left">Allow the agent to use Grep/Glob again (the hook redirects them to CodeCompass by default).</td></tr>
+<tr><td><code>CODECOMPASS_ENFORCE=0</code></td><td style="text-align:left">Allow the agent to use Grep again (the hook redirects it to CodeCompass by default).</td></tr>
 </tbody>
 </table>
 <p>Every knob also lives in an optional <b><code>.codecompass.json</code></b> at the repo root, so settings travel with the

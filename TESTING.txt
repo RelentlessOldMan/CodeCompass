@@ -1,6 +1,21 @@
 CodeCompass - Testing and Benchmarking Plan
 ===========================================
 
+WHAT EXISTS TODAY (read this first). This file is the original PLAN; parts of it
+(MATLAB golden fixtures, oracle fuzzing, CI lanes) describe intent, not the suite.
+The suite that actually gates a push or a release is:
+  - check.ps1            build the solution (Release), then the xUnit suite
+                         (tests/CodeCompass.Core.Tests, run serially; subprocess
+                         tests use the CLI built from THIS commit and fail if it's
+                         missing or stale); -Big adds generated large-file,
+                         network-simulated, pathological and C/C++ refs scenarios;
+                         -Network <share> runs the same over real SMB.
+  - make-release.ps1     runs check.ps1 -Big, then smoke-tests the published MCP
+                         server (initialize + tools/list) before tagging.
+  - scripts/coverage.ps1 coverlet + ReportGenerator (machine-saturating).
+  - Warnings are errors; bug fixes come with a regression test that fails without
+    the fix. See README "Testing" for details.
+
 Companion to DESIGN.txt. Covers how we test correctness, catch regressions, and
 measure performance automatically, plus how we get realistic large codebases to
 test against without committing a 50 GB mess to source control.

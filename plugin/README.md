@@ -14,7 +14,7 @@ MCP tools (returned as precise `file:line:col` results, not whole files):
 - `find_callees` — the in-repo methods a C# method calls, resolved **semantically** (walk a call chain downward)
 - `search_symbols` — symbol-name navigation
 - `reindex` — rebuild the index after large external changes
-- `manage_links` — add / remove / list **linked roots** (external directories federated into this workspace's search) without leaving the agent
+- `manage_links` — add / remove / list **linked roots** (external directories federated into this workspace's search) without leaving the agent, and **focus** searches on one (or a few) of them
 
 The index builds on first use, then **auto-updates** as files change (debounced,
 content-hash verified, ignores build output). Changes made *outside* a session (a
@@ -33,6 +33,11 @@ project's linked roots; the `codecompass` CLI always searches the single root yo
 it (it's a stateless one-shot, and you use it to *set up* links with `link add`). See
 the main README's *Linked roots → MCP vs CLI* section.
 
+**Focus.** Linked several big repos but working in one? `manage_links action=focus
+path="<repo>"` scopes the session's searches to it (folder name, path fragment, or
+absolute path; comma-separated for several; no path clears it). Every scoped answer says
+what was excluded, so a narrowed search is never mistaken for "not found".
+
 ## Status line (optional)
 
 Show the index state in Claude Code's status area via `settings.json`:
@@ -48,8 +53,9 @@ append only the CodeCompass segment. See the main README for details.
 
 ## Enforcement
 
-A `PreToolUse` hook blocks `Grep`/`Glob` and redirects the agent to the CodeCompass
-tools. A `SessionStart` hook reminds the agent to prefer them.
+A `PreToolUse` hook blocks `Grep` and redirects the agent to the CodeCompass tools
+(`Glob` stays available - CodeCompass searches contents and symbols, not file names). A
+`SessionStart` hook reminds the agent to prefer them.
 
 To allow `grep` again, set the environment variable `CODECOMPASS_ENFORCE=0`.
 
@@ -83,7 +89,7 @@ To allow `grep` again, set the environment variable `CODECOMPASS_ENFORCE=0`.
 
 4. Run `/mcp` to confirm the `codecompass` server is connected.
 
-### From source (needs the .NET 8 SDK)
+### From source (needs the .NET 10 SDK)
 
 1. Build the self-contained binaries (the *result* needs no .NET on the target machine):
 

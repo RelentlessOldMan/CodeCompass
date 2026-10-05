@@ -113,14 +113,17 @@ Think of it as an agent-facing front door, a background brain that owns the
 index, and the intelligence layers underneath.
 
 The agent side. Claude Code talks to CodeCompass over MCP - the standard way to
-give an agent custom tools. CodeCompass exposes exactly five tools, deliberately
-kept minimal so the tool surface itself costs the agent almost no tokens to carry:
-search_code (ranked text matches with line ranges), find_definition (where a
-symbol is defined), find_references (everywhere a symbol is used), search_symbols
-(find symbols by name), and reindex (refresh the index on demand). Alongside the
-MCP server, a hook watches for the agent trying to grep or glob and steers it to
-CodeCompass instead. Everything else the tool can do - survey, symstats,
-parsebench, logs, version - is CLI-only, so it never enlarges the agent's tool set.
+give an agent custom tools. CodeCompass exposes exactly seven tools, deliberately
+kept minimal so the tool surface itself costs the agent almost no tokens to carry
+(a test pins the whole surface - names, descriptions, schemas - under a character
+budget): search_code (text matches with line ranges), find_definition (where a
+symbol is defined), find_references (everywhere a symbol is used), find_callees
+(what a C# method calls), search_symbols (find symbols by name), manage_links
+(linked roots and the session focus), and reindex (refresh the index on demand).
+Alongside the MCP server, a hook watches for the agent trying to grep and steers it
+to CodeCompass instead (glob is left alone: CodeCompass doesn't search file names).
+Everything else the tool can do - survey, symstats, parsebench, logs, version - is
+CLI-only, so it never enlarges the agent's tool set.
 
 The brain. A background indexing service owns the on-disk index and keeps it
 current. It walks the tree, filters out junk, watches for changes, detects what
@@ -466,19 +469,31 @@ them as one federated result set. The design choices, and their whys:
   live file-watching for local roots and the same startup reconcile (gated for
   network/huge) otherwise. A linked root is not a static snapshot.
 
-- One writer per shared index, via a crash-proof lock. Two sessions that share a
-  linked root (two windows, or two projects) must not both mutate its one cache
-  dir. Ownership is an OS-held EXCLUSIVE FILE HANDLE (FileShare.None) on a
-  .writer.lock in the cache dir - NOT the file's contents. The claim exists only
-  while the process holds the handle open, so a crash / kill / shutdown / power
-  loss releases it automatically (the kernel closes handles on process death; on
-  power loss the handle table is RAM and simply gone). There is no PID, heartbeat,
-  or TTL to go stale, and a leftover lock file is inert because ownership is tested
-  by trying to open it exclusively, not by its existence. The cache is always local
-  (%LOCALAPPDATA%), so this is a single-machine NTFS lock where share-modes are
-  reliable; different machines have separate caches and never contend. The session
-  that wins ownership live-watches and reconciles the root; a session that doesn't
-  serves it read-only from the owner's kept-fresh index.
+- Many processes, one cache: two locks and a generation token. Any cache - the
+  project's or a linked root's - can be shared by several processes at once: two
+  windows on one repo, a Claude Code and a Codex session, two projects linking one
+  root, or a session plus a terminal `codecompass index`/`update`. Both locks are
+  OS-held EXCLUSIVE FILE HANDLES (FileShare.None) on a file in the cache dir - never
+  the file's contents - so a crash / kill / power loss releases them automatically;
+  there is no PID, heartbeat or TTL to go stale, and a leftover lock file is inert.
+  The cache is always local (%LOCALAPPDATA%), where share-modes are reliable.
+  1. The WRITE lock (.write.lock, IndexWriteLock) is held for the duration of every
+     mutation - build, update, incremental apply, compaction, prune - by every
+     writer. Writers queue on it instead of colliding on segment numbers, manifests
+     and orphan cleanup. It is per-operation, so a terminal `index` is never refused
+     while a session is open; it waits for an in-flight write and says so.
+  2. The LIVE-WATCH role (.writer.lock, WriteOwnership) decides who runs the file
+     watcher and the startup reconcile, so two sessions don't both re-index every
+     edit. A session without it serves read-only and takes it over when the holder
+     exits.
+  3. The GENERATION token (.generation), rewritten whenever a write commits, keeps
+     everyone honest: a process that holds the index in memory compares it with the
+     token it loaded. Queries reload on a mismatch (another process wrote - serve
+     that, not a stale copy), and a writer reloads BEFORE mutating, because flushing
+     a stale in-memory manifest over a newer one would drop the other writer's
+     segments.
+  In-process lock order is always BuildGate -> write lock -> RW lock, and every wait
+  on the first two is cancellable, so a re-point or shutdown never blocks behind them.
 
 - Live link-set reconcile, off the index lock. links.json lives in the project's
   cache dir, which is always LOCAL, so a stat is sub-ms: each query compares its cheap
@@ -508,9 +523,24 @@ them as one federated result set. The design choices, and their whys:
   hit from a linked root is shown as its ABSOLUTE path, so it is unambiguous and
   directly readable. Reads resolve through the owning root, guarded by PathSafety.
 
+- Session focus scopes DISPLAY, not resolution. `manage_links action=focus` narrows
+  every search to chosen roots (the "I'm in repo A today" lever for a wrapper project
+  linking several giant repos). It is a session mode on the existing tool rather than
+  a per-query parameter on the five search tools, because a parameter would add schema
+  tokens to every hot tool and rely on the agent remembering it. The analyzers still
+  span ALL roots - so a reference in the focused root to a type defined elsewhere still
+  binds - and the focus filter is applied INSIDE them, before the result cap, so
+  out-of-scope hits can't crowd in-scope ones out. Every scoped answer says what was
+  excluded, and a focused root with no index is called out, so a narrowed search is
+  never mistaken for "not found". Transient by design: cleared on restart/re-point,
+  never persisted.
+
 - Guards. A directory inside the project (or inside/around an existing link) is
-  rejected - it's already covered. The pathological subst/drive-alias aliasing case
-  is deliberately out of scope.
+  rejected - it's already covered. So are drive/share roots, the profile and AppData
+  folders themselves, and credential directories (.ssh, .aws, ...): an agent - which
+  may be acting on prompt-injected text - must not be able to put secrets into a
+  searchable index (CODECOMPASS_ALLOW_ANY_LINK=1 overrides). The pathological
+  subst/drive-alias aliasing case is deliberately out of scope.
 
 - Federation is MCP-only, and that is a design boundary, not a gap. Searching across
   linked roots needs a LONG-LIVED process: it holds each root's index open, claims

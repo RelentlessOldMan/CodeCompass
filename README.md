@@ -92,8 +92,9 @@ claude --plugin-dir "<repo>\plugin"                                  # one sessi
 > to a GitHub Release tagged `v<version>` via the `gh` CLI). Without `-Publish` it just builds the zip.
 
 In a session, run `/mcp` to confirm the **codecompass** server is connected. A `PreToolUse` hook
-redirects `Grep`/`Glob` to CodeCompass so the agent uses the index instead of scanning files (set
-`CODECOMPASS_ENFORCE=0` to allow grep again). Large workspaces aren't auto-indexed inside a tool
+redirects `Grep` to CodeCompass so the agent uses the index instead of scanning files (set
+`CODECOMPASS_ENFORCE=0` to allow grep again). `Glob` is left alone — CodeCompass searches file *contents*
+and symbols, not file *names*. Large workspaces aren't auto-indexed inside a tool
 call — CodeCompass tells you to build the index once from a terminal, then serves it and keeps it fresh.
 
 ## Quick start (first run)
@@ -180,6 +181,10 @@ editing source:
 | `CODECOMPASS_MAX_SYMBOL_MB` | Skip tree-sitter symbol extraction above this size (default 1). Bounds per-file parse time; raise it if you have large *valid* code whose symbols you want (run `symstats` first). Raising it is safe: above 1 MB, files that are overwhelmingly numeric/hex data (generated arrays — slow to parse, zero symbols) are auto-skipped by content, so only large *real* code gets parsed. |
 | `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing entirely (default 2000, i.e. 2 GB). Files ≥128 MB are indexed by **streaming** (bounded memory), so a high cap won't blow up RAM; its real cost is read time on a full build (large files get re-read), so lower it per-repo if you don't want big generated files indexed. |
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
+| `CODECOMPASS_KEEP` | Comma/semicolon-separated directory names to index **even though they're skipped by default** as build output — e.g. `packages` for a pnpm/yarn monorepo whose sources live under `packages/`. (Config: `keepDirs`.) A zero result says when directories named `packages`/`build`/`out`/`target`/`dist` were skipped, so this is never a silent gap. |
+| `CODECOMPASS_CACHE_DIR` | Where indexes and logs live (default `%LOCALAPPDATA%\CodeCompass`). Keep it on a **local** disk: the cross-process write lock relies on local file-handle semantics. |
+| `CODECOMPASS_COMPACT_SEGMENTS` | Merge on-disk segments after this many accumulate from incremental edits (default 64). |
+| `CODECOMPASS_SEMANTIC_IDLE_MIN` | Minutes the server keeps the C#/C++ semantic model resident with no `find_references` before freeing it (default 10; 0 = keep). |
 | `CODECOMPASS_MAX_AUTO_MB` | Workspaces larger than this (default 100 MB) are left for a one-time CLI `codecompass index` instead of auto-indexing inside a tool call. |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if a build stalls or a single file is held longer than this (default 60, min 5). The warning names the exact file(s) each worker is stuck on, so a pathologically slow file is identified rather than guessed. |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
@@ -188,6 +193,10 @@ editing source:
 
 Files skipped for exceeding a cap are counted and logged (not silently dropped), so the coverage gap
 is always visible (`codecompass survey` / `codecompass logs`).
+
+A repo's own `.codecompass.json` is treated as untrusted input (it arrives with a clone): its `threads`,
+`walkThreads`, `maxAutoMb` and `maxFileMb` are clamped to sane ceilings. The environment variables above are
+your own choice and are not clamped.
 
 **Limitations (by design — know where the edges are):**
 
@@ -205,6 +214,14 @@ is always visible (`codecompass survey` / `codecompass logs`).
   register-map code); the names are still findable via `search_code`.
 - Precise C/C++ semantics need a compile database (`compile_commands.json`); without one it degrades
   to syntactic. No embeddings / semantic-meaning search. Single machine, single user.
+- Symbolic links and junctions are **not followed** (a link in a clone could otherwise pull a file from
+  outside the repo into search results). The files they point to are indexed where they really live,
+  if that's inside an indexed root.
+- Queries shorter than 3 characters can't use the trigram index: `search_code` refuses them (they would
+  read every file), and `find_references` on a 1–2 character name runs only the C# semantic pass and says so.
+- Matched lines longer than 300 characters are shown as a window around the match, and control/bidi
+  characters are replaced with `·` — so a minified or hostile file can't flood the agent's context or
+  forge extra result lines.
 
 ### Testing
 
@@ -243,7 +260,8 @@ slow-to-parse shapes), and **`make-megacorpus.ps1`** (a >10 GB aggregate for sca
 
 Every knob above also lives in an optional **`.codecompass.json`** at the repo root, so settings
 travel with the repo instead of being set on every run. Precedence is **env var → config file →
-default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names),
+default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names), `keepDirs`
+(array of default-skipped directory names to index anyway),
 `threads`, `walkThreads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`, `autoReconcile`,
 `statusLine`, `semanticIdleMinutes`, `compileCommands` (array — extra places to find a C/C++
 `compile_commands.json`; see below).
@@ -303,6 +321,15 @@ rarely set these blind.
 | `CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES` | Above this many candidate C/C++ files (default **400**) the semantic parse is skipped and the fast lexical layer answers instead (disclosed as lexical). A *latency* guard for pathologically-broad symbols in generated code — parsing hundreds-to-thousands of translation units would grind for minutes and fall back to lexical anyway. Set to **0** to always attempt a full semantic parse. |
 | `CODECOMPASS_CPP_SESSION_MEM_MB` | Working-set ceiling for the semantic pass across a session (default scales with RAM). Raise it to let broad queries parse more candidates before falling back to lexical. |
 | `CODECOMPASS_CPP_QUERY_MEM_MB` | How much a *single* query may grow the working set before it stops parsing further candidates and discloses partial coverage. |
+| `CODECOMPASS_CPP_MAX_TU_MB` | Largest C/C++ source handed to clang (default **2**). Larger candidates are searched **lexically instead** — and the answer says so, naming this knob. |
+| `CODECOMPASS_CPP_PARSE_THREADS` | Translation units parsed concurrently (default: sized by free memory, at most 3). |
+| `CODECOMPASS_CPP_SUBPROCESS` | `0` parses in-process instead of in a short-lived worker (the worker returns clang's native memory to the OS after each query; keep it on). |
+| `CODECOMPASS_CPP_WORKER_TIMEOUT_SEC` | Hang protection for the worker (default **300**). A query that hits it is reported as a worker failure and answered lexically, with a note. |
+
+`compile_commands.json` comes from the repo, so its arguments reach clang through an **allowlist**: defines,
+include paths, forced includes, language/standard, target and dialect flags pass; anything that would load
+code (`-Xclang -load`, `-fplugin`), remap files (`-ivfsoverlay`) or write files (`-MF`, module caches, …) is
+dropped. MSVC-style `/I /D /U /FI /std:` from a `cl`/`clang-cl` database are translated.
 
 ## Staying fresh (out-of-session changes)
 
@@ -313,6 +340,25 @@ the background, while the old index keeps serving, then swaps. This is automatic
 within `maxAutoMb`**; for **network shares and huge repos** it's left to a manual `codecompass update`
 (a full-tree stat-walk is slow over SMB, and the watcher is unreliable there anyway). Override with
 `autoReconcile` (config) / `CODECOMPASS_AUTO_RECONCILE` (env): `true` = always, `false` = never.
+
+If the watcher loses events (its buffer overflowed during a big sync, or the share dropped it) on a network
+or over-limit repo, CodeCompass does **not** start an hours-long rebuild inside the session; instead every
+answer carries a note that results may be stale until you run `codecompass update`. A watcher that dies
+outright is restarted automatically.
+
+### Several sessions on one repo
+
+Two Claude Code windows, a Claude Code and a Codex session, or a session plus a terminal `codecompass
+index`/`update` can all work on the same repo safely:
+
+- **Every write to an index holds a cross-process lock** (an OS file handle, released automatically if the
+  process dies). Writers wait for each other instead of colliding; a terminal `index` that has to wait says
+  `waiting for another CodeCompass process to finish writing this index...`.
+- **Only one session live-watches a repo.** The others serve it read-only and **reload automatically** when
+  it (or a terminal command) commits a change, so nobody serves a stale copy. When the watching session
+  exits, another takes over.
+- `reindex` won't park a tool call behind another process's long build — it says another process is writing
+  and that the session will pick up the result when it finishes.
 
 ## Linked roots (federating external directories)
 
@@ -328,9 +374,19 @@ codecompass link list   [project-dir]          show the project's linked roots +
 ```
 
 You can do the same **from inside the agent** (Claude Code / Codex) with the **`manage_links`** MCP tool —
-`manage_links` with `action: "list" | "add" | "remove"` (and a `path` for add/remove) — so you don't have to
-drop to a terminal. Either way edits the same per-project link set; a running MCP server picks up the change
-on its next query. (The CLI and the tool share one implementation, so they behave identically.)
+`manage_links` with `action: "list" | "add" | "remove" | "focus"` (and a `path` for add/remove) — so you don't
+have to drop to a terminal. Either way edits the same per-project link set; a running MCP server picks up the
+change on its next query. (The CLI and the tool share one implementation, so they behave identically.)
+
+**Focus: search one linked repo at a time.** When a wrapper project links several big repos but you're
+working in just one, `manage_links action=focus path="<repo>"` scopes every following search in the session
+to that root. `path` matches a repo folder name, a path fragment, or an absolute path; a comma-separated list
+focuses several. `action=focus` with no `path` clears it.
+- Every scoped answer says what was excluded, so a narrowed search is never mistaken for "not found".
+- Focusing a root that has no index yet warns immediately and on every scoped answer (it isn't searched).
+- Focus filters what's *shown*, not what's *resolved*: `find_references` still binds across all roots, then
+  lists only the focused roots' hits.
+- It lasts for the session (cleared on restart or when the server is pointed at another project).
 
 - **One index per root, shared across projects.** Each linked root keeps its **own** independent index
   keyed by its absolute path, so a root two projects both link is indexed **once** and reused. `link
@@ -346,7 +402,10 @@ on its next query. (The CLI and the tool share one implementation, so they behav
 - **Result addressing.** Hits in the project stay **repo-relative** (compact); hits in a linked root
   are shown as **absolute** paths, so they're unambiguous and directly readable.
 - **Sensible guards.** You can't link a directory that's inside your project (or inside/around an
-  existing link) — it's already covered. Links are stored **machine-local** (the paths are absolute and
+  existing link) — it's already covered. Nor a drive/share root, your user profile or AppData folder
+  themselves, or anything inside a credentials directory (`.ssh`, `.aws`, `.gnupg`, `.azure`, `.kube`,
+  `.docker`) — an agent shouldn't be able to put secrets into a searchable index
+  (`CODECOMPASS_ALLOW_ANY_LINK=1` overrides). Links are stored **machine-local** (the paths are absolute and
   machine-specific), in the project's cache dir, not in the committed `.codecompass.json`.
 
 `codecompass doctor "<project>"` lists every linked root, whether it exists and is indexed, and how
