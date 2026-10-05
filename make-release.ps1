@@ -142,17 +142,26 @@ $psi.WorkingDirectory = $root
 $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
 $mcpProc = [System.Diagnostics.Process]::Start($psi)
 try {
-    # Drain BOTH pipes from the start: the server logs to stderr at startup, and an undrained stderr pipe that fills
+    # Drain stderr from the start: the server logs to stderr at startup, and an undrained stderr pipe that fills
     # would block it before it ever answers - a spurious "server does not start" abort.
-    $readTask = $mcpProc.StandardOutput.ReadToEndAsync()
     $errTask = $mcpProc.StandardError.ReadToEndAsync()
     $mcpProc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}')
     $mcpProc.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
     $mcpProc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
     $mcpProc.StandardInput.Flush()
-    $mcpProc.StandardInput.Close()             # EOF -> the stdio server answers what it has, then exits
+    # Read replies until the tools/list answer (id 2) arrives, THEN close stdin - like a real client. Closing stdin
+    # right after writing races the SDK: on EOF the session ends and replies not yet written are dropped (seen on
+    # every build, old and new, once the box was under load), which aborted a release of a healthy server.
+    $out = ""; $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $lineTask = $mcpProc.StandardOutput.ReadLineAsync()
+        if (-not $lineTask.Wait([Math]::Max(1, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds))) { break }
+        if ($null -eq $lineTask.Result) { break }   # server exited
+        $out += $lineTask.Result + "`n"
+        if ($lineTask.Result -match '"id"\s*:\s*2\b') { break }
+    }
+    $mcpProc.StandardInput.Close()             # EOF -> the stdio server exits
     if (-not $mcpProc.WaitForExit(30000)) { $mcpProc.Kill() }
-    $out = $readTask.Result
     if ($out -notmatch '"tools"' -or $out -notmatch 'find_definition') {
         throw "MCP server smoke FAILED - no tools/list response. The published server does not start/answer. stderr:`n$($errTask.Result)"
     }
