@@ -75,18 +75,24 @@ public sealed class SymbolIndex
     /// <summary>Case-insensitive substring match over symbol names, for navigation.</summary>
     public IReadOnlyList<Symbol> Find(string queryText, int max = 200)
     {
+        // Hand-written matches first, tool-generated ones after (same rule as SegmentedSymbolIndex.Find).
         var results = new List<Symbol>();
+        var generated = new List<Symbol>();
         for (int id = 0; id < _symbols.Count; id++)
         {
             if (_removed.Contains(id)) continue;
             var s = _symbols[id];
             if (CodeCompass.Core.Ignore.IgnoreRules.QueryDefault.IsIgnoredPath(s.RelativePath)) continue;
-            if (s.Name.Contains(queryText, StringComparison.OrdinalIgnoreCase))
+            if (!s.Name.Contains(queryText, StringComparison.OrdinalIgnoreCase)) continue;
+            if (CodeCompass.Core.Text.GeneratedCode.IsGeneratedPath(s.RelativePath))
             {
-                results.Add(s);
-                if (results.Count >= max) break;
+                if (generated.Count < max) generated.Add(s);
+                continue;
             }
+            results.Add(s);
+            if (results.Count >= max) return results;
         }
+        results.AddRange(generated.Take(max - results.Count));
         return results;
     }
 

@@ -153,7 +153,10 @@ public sealed class SegmentedSymbolIndex : IDisposable
     public IReadOnlyList<Symbol> Find(string queryText, int max = 200)
     {
         if (_pending is { Count: > 0 }) FlushPending();
+        // Hand-written matches first; tool-generated ones (designer/.g.cs - see GeneratedCode) only fill what's left,
+        // decided BEFORE the cap so twenty Resources.Designer.cs ResourceManagers can't crowd out the real code.
         var result = new List<Symbol>();
+        var generated = new List<Symbol>();
         for (int segId = 0; segId < _segments.Count; segId++)
         {
             var seg = _segments[segId];
@@ -161,12 +164,19 @@ public sealed class SegmentedSymbolIndex : IDisposable
             for (int i = 0; i < seg.Count; i++)
             {
                 if (!seg.GetName(i).Contains(queryText, StringComparison.OrdinalIgnoreCase)) continue;
-                if (tomb is not null && tomb.Contains(seg.GetSymbolPath(i))) continue;
-                if (QueryIgnore.IsIgnoredPath(seg.GetSymbolPath(i))) continue;
+                var path = seg.GetSymbolPath(i);
+                if (tomb is not null && tomb.Contains(path)) continue;
+                if (QueryIgnore.IsIgnoredPath(path)) continue;
+                if (CodeCompass.Core.Text.GeneratedCode.IsGeneratedPath(path))
+                {
+                    if (generated.Count < max) generated.Add(seg.GetSymbol(i));
+                    continue;
+                }
                 result.Add(seg.GetSymbol(i));
                 if (result.Count >= max) return result;
             }
         }
+        result.AddRange(generated.Take(max - result.Count));
         return result;
     }
 
