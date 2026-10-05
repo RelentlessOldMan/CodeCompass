@@ -78,6 +78,7 @@ public static class ServerContext
         public required SegmentedSymbolIndex Symbols;
         public WriteOwnership? Own;       // non-null => this session owns writing this root
         public RepositoryWatcher? Watcher; // non-null => owner + live-watching
+        public volatile string? Gen;      // IndexGeneration the installed handles reflect (see _loadedGen)
     }
     private static List<LinkedRoot> _linked = new();
 
@@ -89,6 +90,33 @@ public static class ServerContext
     // swap makes it readable lock-free from inside a query op, which already holds the Rw read lock and
     // must not re-enter it (NoRecursion would throw).
     private static volatile HashSet<string>? _focus;
+
+    // Live-watch ROLE for the primary root (WriteOwnership - a crash-proof OS handle). Only the holder runs the
+    // file watcher and the startup reconcile/prune, so two sessions on one repo don't both re-index every edit.
+    // Every other session serves read-only and reloads when the holder writes (see _loadedGen), and takes over
+    // the role when the holder exits. Writes THEMSELVES are serialized across processes by IndexWriteLock, which
+    // every writer (this server, another session, a terminal `codecompass index/update`) holds per operation.
+    private static WriteOwnership? _own;
+    private static readonly object _ownGate = new();
+    private static bool _liveRequested;
+    private static int _liveDebounceMs = 1000;
+
+    // The IndexGeneration token the installed primary index reflects (null = unknown -> reload when possible). A
+    // mismatch with the cache's current token means another process committed a write: queries reload to stay
+    // fresh, and a local write reloads FIRST - flushing a stale in-memory manifest would orphan that writer's segments.
+    private static volatile string? _loadedGen;
+
+    // The watcher lost events on a root where an in-session full rebuild is gated off (network share / over the
+    // auto-index limit): results may be stale until a terminal `codecompass update`, and every query says so.
+    // Cleared when a fresh update/rebuild is installed (ours, or another process's - judged by meta's timestamp).
+    private static volatile bool _eventsLost;
+    private static DateTime _eventsLostUtc;
+
+    private static string CacheDir => IndexStore.CacheDirPath(Root);
+
+    internal static bool IsLiveWatchOwnerForTest => _own is not null;
+    internal static bool HasWatcherForTest { get { Rw.EnterReadLock(); try { return _watcher is not null; } finally { Rw.ExitReadLock(); } } }
+    internal static void OnChangesForTest(ChangeBatch batch) => OnChanges(batch);
 
     private static IndexState _state = IndexState.NotStarted;
     private static int _progressFiles;
@@ -124,7 +152,8 @@ public static class ServerContext
     {
         get { Rw.EnterReadLock(); try { return _text is not null && _state == IndexState.Ready; } finally { Rw.ExitReadLock(); } }
     }
-    internal static bool SwapForTest(SegmentedIndex text, SegmentedSymbolIndex symbols, int epoch) => Swap(text, symbols, epoch);
+    internal static bool SwapForTest(SegmentedIndex text, SegmentedSymbolIndex symbols, int epoch) =>
+        Swap(text, symbols, epoch, IndexGeneration.Read(CacheDir));
 
     public static void Init(string root)
     {
@@ -156,6 +185,8 @@ public static class ServerContext
             _pendingReconcile = false;
             _rebuilding = false;
             _focus = null; // a focus names the PREVIOUS project's roots - stale after a re-point; start unscoped
+            _loadedGen = null;
+            _eventsLost = false;
             _epoch++; // re-point: any in-flight build for the previous root is now stale (discarded at Swap)
         }
         finally { Rw.ExitWriteLock(); }
@@ -164,6 +195,130 @@ public static class ServerContext
         // Off-lock: tearing down linked roots disposes their watchers, which must never happen under Rw
         // (a watcher.Dispose drains an in-flight OnLinkedChanges -> SwapLinked that itself takes Rw).
         DisposeLinkedRoots();
+
+        // Hand back the previous root's live-watch role, then try to take the new root's. Losing it is normal (another
+        // session already watches this repo): this one serves read-only and reloads whenever that session writes.
+        WriteOwnership? oldOwn;
+        lock (_ownGate) { oldOwn = _own; _own = null; }
+        oldOwn?.Dispose();
+        var own = WriteOwnership.TryAcquire(CacheDir);
+        lock (_ownGate) _own = own;
+        _liveRequested = false; // a re-point starts unwatched until EnableLiveIndex (as before the role existed)
+        if (own is null)
+            Log.For(Root).Info("another CodeCompass session is live-indexing this repo; serving it read-only " +
+                               "(reloads when that session writes; takes over when it exits)");
+    }
+
+    /// <summary>Release everything this session holds: cancel in-flight work, stop watchers, drop linked roots and
+    /// the live-watch role. Called when the MCP host stops, so an in-flight clang worker is killed with the session
+    /// instead of being orphaned, and another session can take over live indexing immediately.</summary>
+    public static void Shutdown()
+    {
+        StopLiveIndex();
+        DisposeLinkedRoots();
+        WriteOwnership? own;
+        lock (_ownGate) { own = _own; _own = null; }
+        own?.Dispose();
+    }
+
+    // A read-only session takes over the live-watch role once its holder exits (the cheap probe is a failed exclusive
+    // open of a local file). It then starts the watcher it was asked for, and reconciles once to catch the edits made
+    // while nobody was watching.
+    private static void MaybePromoteToOwner()
+    {
+        if (_own is not null || string.IsNullOrEmpty(Root)) return;
+        lock (_ownGate)
+        {
+            if (_own is not null) return;
+            var won = WriteOwnership.TryAcquire(CacheDir);
+            if (won is null) return;
+            _own = won;
+        }
+        Log.For(Root).Info("took over live indexing for this repo (the session that held it ended)");
+        if (_liveRequested) StartWatcher();
+        if (_state == IndexState.Ready) Task.Run(MaybeReconcile);
+    }
+
+    // Another process committed a write to the primary cache (its generation token moved): reload so this session
+    // serves what's on disk now instead of a silently stale snapshot. Never blocks a query - if this session's own
+    // write is in flight (BuildGate busy), that write records the generation it commits and we skip.
+    private static void MaybeReloadExternal()
+    {
+        if (_state != IndexState.Ready || string.IsNullOrEmpty(Root)) return;
+        var gen = IndexGeneration.Read(CacheDir);
+        if (gen is null || gen == _loadedGen) return;
+        if (!BuildGate.Wait(0)) return;
+        try
+        {
+            if (_state != IndexState.Ready || _rebuilding) return;
+            gen = IndexGeneration.Read(CacheDir); // read BEFORE loading: a write that lands mid-load just reloads again
+            if (gen is null || gen == _loadedGen) return;
+            int epoch = Volatile.Read(ref _epoch);
+            if (!RepositoryIndexer.TryLoad(Root, out var t, out var s)) return;
+            if (Swap(t, s, epoch, gen))
+            {
+                Log.For(Root).Info("reloaded the index: another CodeCompass process updated it");
+                ClearEventsLostIfRefreshed();
+            }
+        }
+        finally { BuildGate.Release(); }
+    }
+
+    // Same freshness rule for linked roots: whoever writes a linked root (its owner here, another session, or the
+    // CLI), every session federating it reloads on the next query.
+    private static void MaybeReloadLinked()
+    {
+        var linked = _linked;
+        foreach (var lr in linked)
+        {
+            var gen = IndexGeneration.Read(IndexStore.CacheDirPath(lr.Root));
+            if (gen is null || gen == lr.Gen) continue;
+            if (!BuildGate.Wait(0)) return;
+            try
+            {
+                gen = IndexGeneration.Read(IndexStore.CacheDirPath(lr.Root));
+                if (gen is null || gen == lr.Gen) continue;
+                if (RepositoryIndexer.TryLoad(lr.Root, out var t, out var s)) SwapLinked(lr.Root, t, s, gen);
+            }
+            catch (Exception ex) { Log.For(lr.Root).Warn($"linked root reload skipped: {ex.Message}"); }
+            finally { BuildGate.Release(); }
+        }
+    }
+
+    private static void ClearEventsLostIfRefreshed()
+    {
+        if (!_eventsLost) return;
+        var m = IndexMetaFile.Read(Root);
+        if (m is not null && DateTime.TryParse(m.BuiltUtc, System.Globalization.CultureInfo.InvariantCulture,
+                                               System.Globalization.DateTimeStyles.RoundtripKind, out var built)
+            && built.ToUniversalTime() > _eventsLostUtc)
+            _eventsLost = false;
+    }
+
+    // Appended to every query result while _eventsLost is set (see there).
+    private static string EventsLostNote() => _eventsLost
+        ? $"\n(Note: the file watcher lost change events on this network/large workspace and an automatic full " +
+          $"rebuild is disabled here, so results may be STALE. Refresh from a terminal: codecompass update \"{Root}\")"
+        : "";
+
+    // Caller holds BuildGate + the cache's IndexWriteLock + the Rw write lock. If another process committed since the
+    // installed index was loaded, reload it before mutating - a stale manifest flushed over the newer one would drop
+    // that writer's segments from the index.
+    private static void RefreshIfStaleLocked()
+    {
+        var gen = IndexGeneration.Read(CacheDir);
+        if (gen is not null && gen == _loadedGen) return;
+        if (!RepositoryIndexer.TryLoad(Root, out var t, out var s))
+        {
+            Log.For(Root).Warn("the index changed on disk but could not be reloaded; applying edits to the loaded copy");
+            return;
+        }
+        _text?.Dispose(); _symbols?.Dispose(); _snapshot?.Dispose();
+        _text = t; _symbols = s; _snapshot = null;
+        _csharp?.Dispose(); _csharp = null;
+        _cpp?.Dispose(); _cpp = null;
+        _loadedGen = gen;
+        Log.For(Root).Info("reloaded the index before applying edits (another CodeCompass process had updated it)");
     }
 
     // All linked-root LIFECYCLE (load/dispose) is serialized here, and NEVER runs while holding Rw - a
@@ -242,9 +397,10 @@ public static class ServerContext
         {
             try
             {
+                var gen = IndexGeneration.Read(IndexStore.CacheDirPath(linkedRoot)); // before loading (see MaybeReloadExternal)
                 if (!RepositoryIndexer.TryLoad(linkedRoot, out var t, out var s)) continue; // not indexed yet
                 var own = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(linkedRoot));
-                added.Add(new LinkedRoot { Root = linkedRoot, Text = t, Symbols = s, Own = own });
+                added.Add(new LinkedRoot { Root = linkedRoot, Text = t, Symbols = s, Own = own, Gen = gen });
             }
             catch (Exception ex) { Log.For(root).Warn($"linked root not loaded: {linkedRoot}: {ex.Message}"); }
         }
@@ -282,14 +438,30 @@ public static class ServerContext
     // linked root has no compaction-escalation state machine here. Serialized against all builds by BuildGate.
     private static void OnLinkedChanges(string linkedRoot, ChangeBatch batch)
     {
-        BuildGate.Wait();
+        // Capture the teardown token BEFORE waiting: a re-point/shutdown re-arms ShutdownToken, so re-reading it after
+        // the wait would hand this (now stale) callback an uncancelled token and run it to completion.
+        var ct = ShutdownToken;
+        try { BuildGate.Wait(ct); } catch (OperationCanceledException) { return; }
         SegmentedIndex? nt = null;
         SegmentedSymbolIndex? ns = null;
         try
         {
-            if (batch.FullReconcile) { var b = RepositoryIndexer.Build(linkedRoot, ct: ShutdownToken); nt = b.Text; ns = b.Symbols; }
-            else { var u = RepositoryIndexer.UpdatePaths(linkedRoot, batch.ChangedFullPaths); nt = u.Text; ns = u.Symbols; }
-            SwapLinked(linkedRoot, nt, ns);
+            using var wl = IndexWriteLock.Acquire(IndexStore.CacheDirPath(linkedRoot), ct);
+            if (batch.FullReconcile)
+            {
+                // Lost events on a network/huge linked root: a full in-session rebuild is gated off, same as the
+                // project root (see OnChanges). A terminal `codecompass update` refreshes it; we reload on its commit.
+                if (!ShouldAutoReconcile(linkedRoot))
+                {
+                    wl.SkipBump();
+                    Log.For(linkedRoot).Warn("watcher lost events on this linked root; skipped an in-session full rebuild " +
+                                             $"(network/large) - run: codecompass update \"{linkedRoot}\"");
+                    return;
+                }
+                var b = RepositoryIndexer.Build(linkedRoot, ct: ct); nt = b.Text; ns = b.Symbols;
+            }
+            else { var u = RepositoryIndexer.UpdatePaths(linkedRoot, batch.ChangedFullPaths, ct); nt = u.Text; ns = u.Symbols; }
+            SwapLinked(linkedRoot, nt, ns, wl.Commit());
             nt = null; ns = null; // ownership transferred to _linked
         }
         catch (OperationCanceledException) { Log.For(linkedRoot).Info("linked root update canceled (re-point/shutdown)"); }
@@ -299,14 +471,14 @@ public static class ServerContext
 
     // Install fresh indexes for a linked root under the write lock (so no in-flight federated read touches
     // a disposed mmap), disposing the old ones. If the root was unlinked meanwhile, the new ones are dropped.
-    private static void SwapLinked(string linkedRoot, SegmentedIndex text, SegmentedSymbolIndex symbols)
+    private static void SwapLinked(string linkedRoot, SegmentedIndex text, SegmentedSymbolIndex symbols, string? gen)
     {
         SegmentedIndex? oldT = null; SegmentedSymbolIndex? oldS = null; bool installed = false;
         Rw.EnterWriteLock();
         try
         {
             var lr = _linked.FirstOrDefault(l => PathEq(l.Root, linkedRoot));
-            if (lr is not null) { oldT = lr.Text; oldS = lr.Symbols; lr.Text = text; lr.Symbols = symbols; installed = true; }
+            if (lr is not null) { oldT = lr.Text; oldS = lr.Symbols; lr.Text = text; lr.Symbols = symbols; lr.Gen = gen; installed = true; }
         }
         finally { Rw.ExitWriteLock(); }
         oldT?.Dispose(); oldS?.Dispose();
@@ -327,10 +499,17 @@ public static class ServerContext
             // and Update() reloads config for its root internally under BuildGate - so no Load() here, which
             // would race the project root's ambient config from this background thread.
             if (!ShouldAutoReconcile(linkedRoot)) return;
-            BuildGate.Wait();
-            try { var u = RepositoryIndexer.Update(linkedRoot); SwapLinked(linkedRoot, u.Text, u.Symbols); }
+            var ct = ShutdownToken;
+            BuildGate.Wait(ct);
+            try
+            {
+                using var wl = IndexWriteLock.Acquire(IndexStore.CacheDirPath(linkedRoot), ct);
+                var u = RepositoryIndexer.Update(linkedRoot, ct: ct);
+                SwapLinked(linkedRoot, u.Text, u.Symbols, wl.Commit());
+            }
             finally { BuildGate.Release(); }
         }
+        catch (OperationCanceledException) { Log.For(linkedRoot).Info("linked root reconcile canceled (re-point/shutdown)"); }
         catch (Exception ex) { Log.For(linkedRoot).Warn($"linked root reconcile skipped: {ex.Message}"); }
     }
 
@@ -375,7 +554,10 @@ public static class ServerContext
     internal static string QueryAll(Func<IReadOnlyList<IndexHandle>, string> op)
     {
         EnsureStartedLocked();
+        MaybePromoteToOwner();  // take over live indexing if the session that held it has exited
+        MaybeReloadExternal();  // another process (session / terminal command) committed a write -> serve it, not a stale copy
         MaybeReconcileLinks(); // cheap stat; picks up a terminal `link add`/`remove` and guarantees the query sees the current set
+        MaybeReloadLinked();
         Rw.EnterReadLock();
         try
         {
@@ -391,7 +573,7 @@ public static class ServerContext
                 // return a bare "no match" over nothing, which would read as "the symbol doesn't exist."
                 return "Focus is set, but none of the focused root(s) are indexed/loaded. Clear it with " +
                        "manage_links action=focus (no path), or build the focused root's index.";
-            string focusNote = FocusDisclosure(all.Count, handles);
+            string focusNote = FocusDisclosure(all.Count, handles) + EventsLostNote();
 
             // Every tool funnels through here. An unexpected throw inside op (a clang edge case, a corrupt
             // segment surfacing mid-read, an OOM in a semantic pass) would otherwise escape to the MCP framework
@@ -509,7 +691,7 @@ public static class ServerContext
         string root = Root;
 
         string token, text;
-        if (reconciling) { token = "reconciling"; text = "refreshing (external changes)…"; }
+        if (reconciling) { token = "reconciling"; text = "refreshing (external changes)â€¦"; }
         else
         {
             switch (state)
@@ -517,7 +699,7 @@ public static class ServerContext
                 case IndexState.Ready: token = "ready"; text = $"{files:N0} files"; break;
                 case IndexState.Building:
                     long total = Interlocked.Read(ref _progressTotalBytes), done = Interlocked.Read(ref _progressBytes);
-                    text = total > 0 ? $"indexing {100.0 * done / total:F0}%" : "indexing…"; token = "building"; break;
+                    text = total > 0 ? $"indexing {100.0 * done / total:F0}%" : "indexingâ€¦"; token = "building"; break;
                 case IndexState.NeedsCliBuild: token = "needsCliBuild"; text = "not indexed - run: codecompass index"; break;
                 default: token = "idle"; text = "idle"; break;
             }
@@ -626,19 +808,32 @@ public static class ServerContext
     /// serving the old index, then swaps atomically. On failure the old index is kept. While it
     /// runs, watcher changes are captured (not written) so they don't race the rebuild for the
     /// on-disk cache, then drained afterward.</summary>
-    public static IndexStats Rebuild()
+    public static IndexStats? Rebuild()
     {
         Log.For(Root).Info("manual reindex requested");
+        var ct = ShutdownToken;
+        int epoch = Volatile.Read(ref _epoch);
         BuildGate.Wait(); // one builder at a time; waits out any in-flight rebuild/compaction
+        // Never park a tool call behind another PROCESS's write (a terminal `codecompass index` can run for an
+        // hour): report it instead - its result is picked up automatically when it commits (MaybeReloadExternal).
+        var wl = IndexWriteLock.TryAcquire(CacheDir);
+        if (wl is null)
+        {
+            BuildGate.Release();
+            Log.For(Root).Info("manual reindex skipped: another CodeCompass process is writing this index");
+            return null;
+        }
         Rw.EnterWriteLock();
         try { _rebuilding = true; } // divert the watcher to the pending queue; waits out any in-flight incremental
         finally { Rw.ExitWriteLock(); }
         try
         {
-            int epoch = Volatile.Read(ref _epoch);
-            var built = RepositoryIndexer.Build(Root, ct: ShutdownToken); // off-lock; old index still serves reads
-            if (Swap(built.Text, built.Symbols, epoch))
+            var built = RepositoryIndexer.Build(Root, ct: ct); // off-lock; old index still serves reads
+            if (Swap(built.Text, built.Symbols, epoch, wl.Commit()))
+            {
+                _eventsLost = false;
                 Log.For(Root).Info($"manual reindex complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+            }
             return built.Stats;
         }
         catch (OperationCanceledException)
@@ -651,6 +846,7 @@ public static class ServerContext
         }
         finally
         {
+            wl.Dispose();
             Rw.EnterWriteLock();
             try { _rebuilding = false; }
             finally { Rw.ExitWriteLock(); }
@@ -668,8 +864,8 @@ public static class ServerContext
     // Dispose the previous indexes and install new ones under the write lock (waits for any
     // in-flight search to finish, so a search never touches a disposed mmap). Returns false (and disposes the
     // incoming indexes, leaving current state untouched) if the workspace was re-pointed since the build that
-    // produced them started - see _epoch.
-    private static bool Swap(SegmentedIndex text, SegmentedSymbolIndex symbols, int epoch)
+    // produced them started - see _epoch. <paramref name="gen"/> is the IndexGeneration the new handles reflect.
+    private static bool Swap(SegmentedIndex text, SegmentedSymbolIndex symbols, int epoch, string? gen)
     {
         RoslynCSharpAnalyzer? oldCs = null;
         ClangCppAnalyzer? oldCpp = null;
@@ -689,6 +885,7 @@ public static class ServerContext
                 _csharp = null;
                 _cpp = null;
                 _state = IndexState.Ready;
+                _loadedGen = gen;
                 installed = true;
             }
         }
@@ -711,11 +908,20 @@ public static class ServerContext
 
     public static void EnableLiveIndex(int debounceMs = 1000)
     {
+        _liveRequested = true;
+        _liveDebounceMs = debounceMs;
+        // Only the live-watch role holder watches; a read-only session starts its watcher if it takes over the role.
+        if (_own is null) return;
+        StartWatcher();
+    }
+
+    private static void StartWatcher()
+    {
         Rw.EnterWriteLock();
         try
         {
             if (_watcher is not null) return;
-            _watcher = new RepositoryWatcher(Root, OnChanges, debounceMs);
+            _watcher = new RepositoryWatcher(Root, OnChanges, _liveDebounceMs);
             _watcher.Start();
         }
         finally { Rw.ExitWriteLock(); }
@@ -730,11 +936,13 @@ public static class ServerContext
         {
             if (_state is IndexState.Ready or IndexState.Building) return;
 
-            // Pick up an index built out-of-band (e.g. the user just ran the CLI).
+            // Pick up an index built out-of-band (e.g. the user just ran the CLI). Read the generation BEFORE loading,
+            // so a write that lands mid-load is seen as a newer generation and reloaded, never mistaken for this one.
+            var gen = IndexGeneration.Read(CacheDir);
             if (RepositoryIndexer.TryLoad(Root, out var text, out var symbols))
             {
                 Rw.EnterWriteLock();
-                try { _text = text; _symbols = symbols; _state = IndexState.Ready; }
+                try { _text = text; _symbols = symbols; _state = IndexState.Ready; _loadedGen = gen; }
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info($"loaded existing index ({text.DocumentCount:N0} files)");
                 // Once per session: if this index was built by an indexer whose output logic is behind this
@@ -781,15 +989,29 @@ public static class ServerContext
 
     private static void BackgroundBuild()
     {
-        BuildGate.Wait(); // serialize against a manual reindex / watcher rebuild
+        var ct = ShutdownToken;
+        int epoch = Volatile.Read(ref _epoch);
+        try { BuildGate.Wait(ct); } // serialize against a manual reindex / watcher rebuild
+        catch (OperationCanceledException) { return; }
         bool ok = false;
         try
         {
-            int epoch = Volatile.Read(ref _epoch);
-            var built = RepositoryIndexer.Build(Root,
-                (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); }, ShutdownToken);
-            ok = Swap(built.Text, built.Symbols, epoch);
-            if (ok) Log.For(Root).Info($"background build complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+            using var wl = IndexWriteLock.Acquire(CacheDir, ct);
+            // Another session (or a terminal build) may have produced this index while we queued for the write lock -
+            // load theirs rather than building the same thing twice.
+            if (RepositoryIndexer.TryLoad(Root, out var existing, out var existingSymbols))
+            {
+                wl.SkipBump();
+                ok = Swap(existing, existingSymbols, epoch, IndexGeneration.Read(CacheDir));
+                if (ok) Log.For(Root).Info("loaded the index another CodeCompass process built while this one waited");
+            }
+            else
+            {
+                var built = RepositoryIndexer.Build(Root,
+                    (f, b) => { Volatile.Write(ref _progressFiles, f); Interlocked.Exchange(ref _progressBytes, b); }, ct);
+                ok = Swap(built.Text, built.Symbols, epoch, wl.Commit());
+                if (ok) Log.For(Root).Info($"background build complete: {built.Stats.Files:N0} files in {built.Stats.Seconds:F1}s");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -815,6 +1037,7 @@ public static class ServerContext
     {
         try
         {
+            if (_own is null) return; // the live-watch role holder reconciles; a read-only session reloads its result
             if (ShouldAutoReconcile()) { BackgroundReconcile(); return; }
             // The full stat-walk reconcile is gated off (network share or huge repo). Unless the user
             // explicitly disabled auto-reconcile, still run the CHEAP ignore-only prune: a stale index (built
@@ -855,25 +1078,33 @@ public static class ServerContext
     // _rebuilding makes the watcher capture (not apply) changes so it doesn't race the on-disk write.
     private static void BackgroundReconcile()
     {
+        var ct = ShutdownToken;
+        int epoch = Volatile.Read(ref _epoch);
         Rw.EnterWriteLock();
         try { _rebuilding = true; _reconciling = true; }
         finally { Rw.ExitWriteLock(); }
         PublishStatus(); // reconciling
 
-        BuildGate.Wait(); // serialize against a manual reindex / watcher rebuild
+        bool gated = false;
         try
         {
-            int epoch = Volatile.Read(ref _epoch);
-            var u = RepositoryIndexer.Update(Root);
-            if (Swap(u.Text, u.Symbols, epoch) &&
-                (u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild))
-                Log.For(Root).Info($"startup reconcile applied external changes: +{u.Stats.Added} ~{u.Stats.Modified} -{u.Stats.Removed}" +
-                                   (u.Stats.FullRebuild ? " (full rebuild)" : ""));
+            BuildGate.Wait(ct); // serialize against a manual reindex / watcher rebuild
+            gated = true;
+            using var wl = IndexWriteLock.Acquire(CacheDir, ct);
+            var u = RepositoryIndexer.Update(Root, ct: ct);
+            if (Swap(u.Text, u.Symbols, epoch, wl.Commit()))
+            {
+                _eventsLost = false; // a full walk caught whatever the watcher missed
+                if (u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild)
+                    Log.For(Root).Info($"startup reconcile applied external changes: +{u.Stats.Added} ~{u.Stats.Modified} -{u.Stats.Removed}" +
+                                       (u.Stats.FullRebuild ? " (full rebuild)" : ""));
+            }
         }
+        catch (OperationCanceledException) { Log.For(Root).Info("startup reconcile canceled (re-point/shutdown)"); }
         catch (Exception ex) { Log.For(Root).Error("startup reconcile failed; keeping the loaded index", ex); }
         finally
         {
-            BuildGate.Release();
+            if (gated) BuildGate.Release();
             Rw.EnterWriteLock();
             try { _rebuilding = false; _reconciling = false; }
             finally { Rw.ExitWriteLock(); }
@@ -888,22 +1119,31 @@ public static class ServerContext
     // live-watch write. No-op (and no swap) when the index is already clean.
     private static void BackgroundPruneIgnored()
     {
-        BuildGate.Wait();
+        var ct = ShutdownToken;
+        int epoch = Volatile.Read(ref _epoch);
+        try { BuildGate.Wait(ct); } catch (OperationCanceledException) { return; }
         Rw.EnterWriteLock();
         try { _rebuilding = true; }
         finally { Rw.ExitWriteLock(); }
         try
         {
-            int epoch = Volatile.Read(ref _epoch);
+            using var wl = IndexWriteLock.Acquire(CacheDir, ct);
             var u = RepositoryIndexer.PruneIgnored(Root);
             if (u.Pruned > 0)
             {
-                if (Swap(u.Text, u.Symbols, epoch)) // Swap disposes the handles itself if the workspace was re-pointed
+                if (Swap(u.Text, u.Symbols, epoch, wl.Commit())) // Swap disposes the handles itself if the workspace was re-pointed
                     Log.For(Root).Info($"pruned {u.Pruned} stale now-ignored path(s) from the index " +
                                        "(an older/looser build had indexed them; query-time filter already hid them)");
             }
-            else { u.Text.Dispose(); u.Symbols.Dispose(); } // already clean - drop the extra handles, keep serving
+            else
+            {
+                // Already clean - drop the extra handles and keep serving. PruneIgnored's own (nested) hold still
+                // rewrote nothing, so don't make every other session reload an unchanged index.
+                u.Text.Dispose(); u.Symbols.Dispose();
+                wl.SkipBump();
+            }
         }
+        catch (OperationCanceledException) { Log.For(Root).Info("ignore-prune canceled (re-point/shutdown)"); }
         catch (Exception ex) { Log.For(Root).Warn($"ignore-prune skipped: {ex.Message}"); }
         finally
         {
@@ -942,67 +1182,91 @@ public static class ServerContext
         $"from a terminal (it shows progress and won't time out): codecompass index \"{Root}\" " +
         $"- then retry. (Raise CODECOMPASS_MAX_AUTO_MB to auto-index larger workspaces.)";
 
-    private static void OnChanges(ChangeBatch batch)
+    // Capture a watcher batch into the pending queue when a build/rebuild owns the cache (state Building, or a
+    // rebuild/reconcile in flight), so the edit isn't lost - the owner drains it when it finishes. Returns true if
+    // captured. A rebuild sets its flag BEFORE queuing on BuildGate, so this is also re-checked after the gates.
+    private static bool CaptureIfBusy(ChangeBatch batch)
     {
-        // Capture changes that land during a build so they aren't lost (the build's snapshot
-        // may pre-date them and no further event would re-fire).
         Rw.EnterUpgradeableReadLock();
         try
         {
-            if (_state == IndexState.Building || _rebuilding)
+            if (_state != IndexState.Building && !_rebuilding) return false;
+            Rw.EnterWriteLock();
+            try
             {
-                Rw.EnterWriteLock();
-                try
-                {
-                    if (batch.FullReconcile) _pendingReconcile = true;
-                    else _pendingPaths.AddRange(batch.ChangedFullPaths);
-                }
-                finally { Rw.ExitWriteLock(); }
-                return;
+                if (batch.FullReconcile) _pendingReconcile = true;
+                else _pendingPaths.AddRange(batch.ChangedFullPaths);
             }
-            if (_state != IndexState.Ready) return;
+            finally { Rw.ExitWriteLock(); }
+            return true;
+        }
+        finally { Rw.ExitUpgradeableReadLock(); }
+    }
+
+    private static void OnChanges(ChangeBatch batch)
+    {
+        // Capture the teardown token and epoch BEFORE any wait: a re-point re-arms ShutdownToken and bumps the epoch,
+        // so values read after waiting would belong to the NEW context and let this stale callback run to completion
+        // (blocking the watcher's Dispose barrier, and building the new root's tree from an old root's event).
+        var ct = ShutdownToken;
+        int epoch = Volatile.Read(ref _epoch);
+        if (CaptureIfBusy(batch)) return;
+        if (_state != IndexState.Ready) return;
+
+        // Every write takes the gates in ONE order: BuildGate (this process's builders) -> IndexWriteLock (all
+        // processes) -> Rw. Both waits are cancellable, and neither holds Rw, so a long write by another process (a
+        // terminal `codecompass index`) only parks this callback - queries keep serving the loaded index meanwhile.
+        try { BuildGate.Wait(ct); } catch (OperationCanceledException) { return; }
+        bool ok = false, keptServing = false;
+        try
+        {
+            using var wl = IndexWriteLock.Acquire(CacheDir, ct);
+            if (ct.IsCancellationRequested || Volatile.Read(ref _epoch) != epoch) { wl.SkipBump(); return; }
+            if (CaptureIfBusy(batch) || _state != IndexState.Ready) { wl.SkipBump(); return; }
 
             if (!batch.FullReconcile)
             {
-                // Targeted incremental: fast, done under the write lock. If segments have piled
-                // up, escalate to a compacting rebuild (below) instead of just returning.
+                // Targeted incremental: fast, done under the write lock. If segments have piled up, escalate to a
+                // compaction instead of just returning.
                 bool compact;
                 Rw.EnterWriteLock();
                 try
                 {
+                    RefreshIfStaleLocked(); // another process wrote since we loaded: mutate THEIR state, not our stale copy
                     ApplyIncremental(batch.ChangedFullPaths, batch.ChangedFullPaths.Count);
                     compact = RepositoryIndexer.NeedsCompaction(_text!, _symbols!);
                     if (compact) _state = IndexState.Building;
                 }
                 finally { Rw.ExitWriteLock(); }
+                _loadedGen = wl.Commit();
                 if (!compact) return;
                 Log.For(Root).Info("compacting: segment count high after incremental edits; merging segments");
+                var c = RepositoryIndexer.Compact(Root, ct);
+                ok = Swap(c.Text, c.Symbols, epoch, wl.Commit());
             }
             else
             {
-                // Full reconcile (events were lost): mark Building and rebuild off-lock below, so
-                // tool calls aren't blocked for the whole rebuild.
+                // Events were lost (watcher buffer overflow). Only a full re-walk can be trusted - but on a network share
+                // or a repo over the auto-index limit that is an hours-long rebuild, the very work the startup reconcile
+                // and the reindex tool refuse to do in-session. Keep serving, and say on every query that results may
+                // be stale until a terminal `codecompass update` (whose commit this session then reloads).
+                if (!ShouldAutoReconcile())
+                {
+                    wl.SkipBump();
+                    _eventsLostUtc = DateTime.UtcNow;
+                    _eventsLost = true;
+                    Log.For(Root).Warn("watcher lost change events; skipped an in-session full rebuild on this network/large " +
+                                       $"workspace - results may be stale until: codecompass update \"{Root}\"");
+                    return;
+                }
                 Rw.EnterWriteLock();
                 try { _state = IndexState.Building; }
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info("watcher requested full reconcile; rebuilding");
+                var b = RepositoryIndexer.Build(Root, ct: ct);
+                ok = Swap(b.Text, b.Symbols, epoch, wl.Commit());
+                if (ok) _eventsLost = false;
             }
-        }
-        finally { Rw.ExitUpgradeableReadLock(); }
-
-        // Off-lock so tool calls aren't blocked for the whole operation, but under BuildGate so it
-        // can't race a manual reindex for the segment directory. A true reconcile (events were
-        // lost) must re-read files (Build); a compaction just merges existing segments.
-        BuildGate.Wait();
-        bool ok = false, keptServing = false;
-        try
-        {
-            int epoch = Volatile.Read(ref _epoch);
-            SegmentedIndex nt;
-            SegmentedSymbolIndex ns;
-            if (batch.FullReconcile) { var b = RepositoryIndexer.Build(Root, ct: ShutdownToken); nt = b.Text; ns = b.Symbols; }
-            else { var c = RepositoryIndexer.Compact(Root, ShutdownToken); nt = c.Text; ns = c.Symbols; }
-            ok = Swap(nt, ns, epoch);
         }
         catch (OperationCanceledException)
         {
@@ -1030,7 +1294,7 @@ public static class ServerContext
         if (ok || keptServing) DrainPending();
     }
 
-    // Caller holds the write lock.
+    // Caller holds BuildGate, the cache's IndexWriteLock, and the Rw write lock (and has run RefreshIfStaleLocked).
     private static void ApplyIncremental(IReadOnlyList<string> changedFullPaths, int changedCount)
     {
         try
@@ -1051,39 +1315,64 @@ public static class ServerContext
     // that land during the drain itself; anything after that the next watcher event will catch.
     private static void DrainPending()
     {
+        var ct = ShutdownToken;
+        int epoch = Volatile.Read(ref _epoch);
         for (int round = 0; round < 5; round++)
         {
-            List<string> paths;
-            bool reconcile;
-            Rw.EnterWriteLock();
+            Rw.EnterReadLock();
+            try { if (_pendingPaths.Count == 0 && !_pendingReconcile) return; }
+            finally { Rw.ExitReadLock(); }
+
+            // Same gate order as OnChanges: BuildGate -> IndexWriteLock -> Rw.
+            try { BuildGate.Wait(ct); } catch (OperationCanceledException) { return; }
+            bool rebuildingSet = false;
             try
             {
-                reconcile = _pendingReconcile;
-                _pendingReconcile = false;
-                paths = _pendingPaths.ToList();
-                _pendingPaths.Clear();
-                if (paths.Count == 0 && !reconcile) return;
-                if (!reconcile && _state == IndexState.Ready)
-                    ApplyIncremental(paths, paths.Count);
-            }
-            finally { Rw.ExitWriteLock(); }
-
-            if (reconcile)
-            {
-                Log.For(Root).Info("draining a full-reconcile request captured during build");
-                // Divert the watcher to the pending queue during this off-lock Build, exactly as
-                // BackgroundReconcile does - otherwise an OnChanges arriving mid-Build sees _state==Ready &&
-                // !_rebuilding and runs a targeted ApplyIncremental against the same cache dir the Build is
-                // rewriting (racing writers -> corrupt cache / lost edit). Anything captured is drained next round.
+                using var wl = IndexWriteLock.Acquire(CacheDir, ct);
+                if (Volatile.Read(ref _epoch) != epoch) { wl.SkipBump(); return; }
+                List<string> paths;
+                bool reconcile;
                 Rw.EnterWriteLock();
-                try { _rebuilding = true; } finally { Rw.ExitWriteLock(); }
-                BuildGate.Wait(); // serialize with any other rebuild
-                try { int epoch = Volatile.Read(ref _epoch); var b = RepositoryIndexer.Build(Root, ct: ShutdownToken); Swap(b.Text, b.Symbols, epoch); }
-                catch (OperationCanceledException) { Log.For(Root).Info("drained reconcile canceled (re-point/shutdown)"); return; }
-                catch (Exception ex) { Log.For(Root).Error("drained reconcile failed", ex); return; }
-                finally
+                try
                 {
-                    BuildGate.Release();
+                    reconcile = _pendingReconcile;
+                    _pendingReconcile = false;
+                    paths = _pendingPaths.ToList();
+                    _pendingPaths.Clear();
+                    if (paths.Count == 0 && !reconcile) { wl.SkipBump(); return; }
+                    if (!reconcile && _state == IndexState.Ready)
+                    {
+                        RefreshIfStaleLocked();
+                        ApplyIncremental(paths, paths.Count);
+                    }
+                    // Divert the watcher to the pending queue during an off-lock reconcile Build, exactly as
+                    // BackgroundReconcile does - an OnChanges arriving mid-Build is captured, drained next round.
+                    if (reconcile) { _rebuilding = true; rebuildingSet = true; }
+                }
+                finally { Rw.ExitWriteLock(); }
+
+                if (!reconcile) { _loadedGen = wl.Commit(); continue; }
+
+                if (!ShouldAutoReconcile())
+                {
+                    // Same gate as OnChanges: no in-session full rebuild of a network/huge root; disclose instead.
+                    wl.SkipBump();
+                    _eventsLostUtc = DateTime.UtcNow;
+                    _eventsLost = true;
+                    Log.For(Root).Warn($"a captured full-reconcile request was not run in-session (network/large); run: codecompass update \"{Root}\"");
+                    continue;
+                }
+                Log.For(Root).Info("draining a full-reconcile request captured during build");
+                var b = RepositoryIndexer.Build(Root, ct: ct);
+                if (Swap(b.Text, b.Symbols, epoch, wl.Commit())) _eventsLost = false;
+            }
+            catch (OperationCanceledException) { Log.For(Root).Info("drained update canceled (re-point/shutdown)"); return; }
+            catch (Exception ex) { Log.For(Root).Error("drained update failed", ex); return; }
+            finally
+            {
+                BuildGate.Release();
+                if (rebuildingSet)
+                {
                     Rw.EnterWriteLock();
                     try { _rebuilding = false; } finally { Rw.ExitWriteLock(); }
                 }

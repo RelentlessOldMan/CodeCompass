@@ -25,6 +25,10 @@ CodeCompass.Core.Diagnostics.DiagnosticsSession.Start("cli", trackSession: false
 if (args.Length > 0 && args[0] is not ("hook-block" or "hook-context" or "clang-refs-worker"))
     Log.Global.Info($"cli v{BuildInfo.Version}: {string.Join(' ', args)}");
 
+// A write command blocked behind another process's in-flight write (an MCP session applying edits, another
+// terminal) waits for it; say so on stderr so the wait never reads as a hang.
+IndexWriteLock.WaitNotice = msg => Console.Error.WriteLine(msg);
+
 return args.Length == 0
     ? Usage()
     : args[0].ToLowerInvariant() switch
@@ -826,8 +830,20 @@ static int CmdWatch(string[] args)
         Console.Error.WriteLine("note: watching a network path - FileSystemWatcher change events are unreliable over SMB, " +
                                 "so edits may be missed. Run 'codecompass update' after a big external change (e.g. a source-control sync).");
 
+    // One live watcher per index: if an MCP session (or another `watch`) already holds the live-watch role, it is
+    // keeping this index fresh - a second watcher would only re-apply every edit.
+    var cacheDir = IndexStore.GetCacheDir(root);
+    using var role = WriteOwnership.TryAcquire(cacheDir);
+    if (role is null)
+    {
+        Console.Error.WriteLine("another CodeCompass session (an MCP server or `codecompass watch`) is already live-indexing " +
+                                "this repo - it keeps the index fresh; nothing to do here.");
+        return 1;
+    }
+
     SegmentedIndex text;
     SegmentedSymbolIndex symbols;
+    string? loadedGen = IndexGeneration.Read(cacheDir); // read before loading (see ServerContext.MaybeReloadExternal)
     if (RepositoryIndexer.TryLoad(root, out text, out symbols))
     {
         Console.Error.WriteLine("loaded existing index");
@@ -835,18 +851,23 @@ static int CmdWatch(string[] args)
     else
     {
         Console.Error.WriteLine("building initial index...");
+        using var wl = IndexWriteLock.Acquire(cacheDir);
         var b = RepositoryIndexer.Build(root);
         text = b.Text;
         symbols = b.Symbols;
+        loadedGen = wl.Commit();
         Console.Error.WriteLine($"indexed {b.Stats.Files} files");
     }
     var snapshot = RepositoryIndexer.LoadSnapshot(root);
 
-    // Keep the index in memory and apply targeted changes in place (no reopen per batch).
+    // Keep the index in memory and apply targeted changes in place (no reopen per batch). Each batch holds the
+    // cross-process write lock, and reloads first if another process (a terminal `update`, an MCP reindex)
+    // committed since we loaded - flushing our stale manifest over theirs would drop their segments.
     using var watcher = new RepositoryWatcher(root, batch =>
     {
         try
         {
+            using var wl = IndexWriteLock.Acquire(cacheDir);
             if (batch.FullReconcile)
             {
                 text.Dispose();
@@ -856,11 +877,24 @@ static int CmdWatch(string[] args)
                 text = b.Text;
                 symbols = b.Symbols;
                 snapshot = RepositoryIndexer.LoadSnapshot(root);
+                loadedGen = wl.Commit();
                 Console.Error.WriteLine("reindexed: full rebuild");
                 Log.For(root).Info("watch: full rebuild");
             }
             else
             {
+                var gen = IndexGeneration.Read(cacheDir);
+                if (gen is null || gen != loadedGen)
+                {
+                    if (RepositoryIndexer.TryLoad(root, out var t2, out var s2))
+                    {
+                        text.Dispose(); symbols.Dispose(); snapshot.Dispose();
+                        text = t2; symbols = s2;
+                        snapshot = RepositoryIndexer.LoadSnapshot(root);
+                        loadedGen = gen;
+                        Log.For(root).Info("watch: reloaded the index (another CodeCompass process updated it)");
+                    }
+                }
                 var c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, batch.ChangedFullPaths);
                 RepositoryIndexer.Persist(root, text, symbols, snapshot);
                 if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
@@ -878,6 +912,7 @@ static int CmdWatch(string[] args)
                     Console.Error.WriteLine("compacted: merged segments");
                     Log.For(root).Info("watch: compacted (merged segments)");
                 }
+                loadedGen = wl.Commit();
             }
         }
         catch (Exception ex)

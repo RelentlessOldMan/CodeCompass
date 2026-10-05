@@ -36,6 +36,15 @@ public static class RepositoryIndexer
         string root, Action<int, long>? onProgress = null, System.Threading.CancellationToken ct = default)
     {
         root = Path.GetFullPath(root);
+        // Every mutation of a cache holds the cross-process write lock (see IndexWriteLock): another session or a
+        // terminal command writing the same cache waits for us instead of colliding on segment numbers/manifests.
+        using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root), ct);
+        return BuildLocked(root, onProgress, ct);
+    }
+
+    private static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, IndexStats Stats) BuildLocked(
+        string root, Action<int, long>? onProgress, System.Threading.CancellationToken ct)
+    {
         CodeCompassConfig.Load(root);
         var dir = IndexStore.GetCacheDir(root);
         var ignore = new IgnoreRules();
@@ -514,14 +523,16 @@ public static class RepositoryIndexer
     /// <param name="onScan">Optional heartbeat: invoked with the running count of files stat-walked,
     /// so a caller can show progress during the (silent, potentially slow over a network share)
     /// change-detection pass.</param>
-    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, UpdateStats Stats) Update(string root, Action<int>? onScan = null)
+    public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, UpdateStats Stats) Update(
+        string root, Action<int>? onScan = null, System.Threading.CancellationToken ct = default)
     {
         root = Path.GetFullPath(root);
+        using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root), ct);
         CodeCompassConfig.Load(root);
         var sw = Stopwatch.StartNew();
 
-        if (!TryLoad(root, out var text, out var symbols)) return FullRebuild(root, text, symbols, sw);
-        if (!TryLoadSnapshot(root, out var old)) return FullRebuild(root, text, symbols, sw);
+        if (!TryLoad(root, out var text, out var symbols)) return FullRebuild(root, text, symbols, sw, ct);
+        if (!TryLoadSnapshot(root, out var old)) return FullRebuild(root, text, symbols, sw, ct);
 
         using (old)
         {
@@ -546,6 +557,9 @@ public static class RepositoryIndexer
 
                 foreach (var file in walker.Walk(root))
                 {
+                    // A re-point/shutdown abandons the walk before anything is persisted: the loaded handles are
+                    // ours to dispose, and the on-disk index stays exactly as it was.
+                    if (ct.IsCancellationRequested) { text.Dispose(); symbols.Dispose(); ct.ThrowIfCancellationRequested(); }
                     if (onScan is not null && (++walked & 0x1FF) == 0) onScan(walked); // heartbeat every 512 files
                     var rel = file.RelativePath;
                     seen.Add(rel);
@@ -599,7 +613,7 @@ public static class RepositoryIndexer
             }
 
             if (added + modified + removed > RebuildThreshold)
-                return FullRebuild(root, text, symbols, sw);
+                return FullRebuild(root, text, symbols, sw, ct);
 
             SaveAll(root, text, symbols, newSnapshot);
             sw.Stop();
@@ -626,6 +640,7 @@ public static class RepositoryIndexer
     public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, int Pruned) PruneIgnored(string root)
     {
         root = Path.GetFullPath(root);
+        using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root));
         if (!TryLoad(root, out var text, out var symbols)) return (text, symbols, 0);
 
         var ignore = new IgnoreRules();
@@ -653,18 +668,19 @@ public static class RepositoryIndexer
 
     /// <summary>Disk-based targeted update: apply just the given changed paths.</summary>
     public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, UpdateStats Stats) UpdatePaths(
-        string root, IReadOnlyCollection<string> changedFullPaths)
+        string root, IReadOnlyCollection<string> changedFullPaths, System.Threading.CancellationToken ct = default)
     {
         root = Path.GetFullPath(root);
+        using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root), ct);
         var sw = Stopwatch.StartNew();
 
-        if (!TryLoad(root, out var text, out var symbols)) return FullRebuild(root, text, symbols, sw);
-        if (!TryLoadSnapshot(root, out var snapshot)) return FullRebuild(root, text, symbols, sw);
+        if (!TryLoad(root, out var text, out var symbols)) return FullRebuild(root, text, symbols, sw, ct);
+        if (!TryLoadSnapshot(root, out var snapshot)) return FullRebuild(root, text, symbols, sw, ct);
 
         using (snapshot)
         {
             if (changedFullPaths.Count > RebuildThreshold)
-                return FullRebuild(root, text, symbols, sw);
+                return FullRebuild(root, text, symbols, sw, ct);
 
             var counts = ApplyChanges(text, symbols, snapshot, root, changedFullPaths);
             SaveAll(root, text, symbols, snapshot);
@@ -680,6 +696,7 @@ public static class RepositoryIndexer
     public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols) Compact(string root, System.Threading.CancellationToken ct = default)
     {
         root = Path.GetFullPath(root);
+        using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root), ct);
         if (!TryLoad(root, out var text, out var symbols))
         {
             var b = Build(root, ct: ct); // first-time compaction falls back to a full (cancellable) build
@@ -700,11 +717,12 @@ public static class RepositoryIndexer
     }
 
     private static (SegmentedIndex, SegmentedSymbolIndex, UpdateStats) FullRebuild(
-        string root, SegmentedIndex? oldText, SegmentedSymbolIndex? oldSymbols, Stopwatch sw)
+        string root, SegmentedIndex? oldText, SegmentedSymbolIndex? oldSymbols, Stopwatch sw,
+        System.Threading.CancellationToken ct)
     {
         oldText?.Dispose();
         oldSymbols?.Dispose();
-        var b = Build(root);
+        var b = Build(root, ct: ct);
         sw.Stop();
         return (b.Text, b.Symbols, new UpdateStats(b.Stats.Files, 0, 0, b.Stats.Seconds, FullRebuild: true));
     }
@@ -753,7 +771,9 @@ public static class RepositoryIndexer
         return new ChangeCounts(added, modified, removed);
     }
 
-    /// <summary>Persist in-memory indexes + snapshot to the cache.</summary>
+    /// <summary>Persist in-memory indexes + snapshot to the cache. The caller must hold the cache's
+    /// <see cref="IndexWriteLock"/> and must have reloaded if <see cref="IndexGeneration"/> moved since these
+    /// handles were opened - flushing a stale manifest would drop another writer's segments.</summary>
     public static void Persist(string root, SegmentedIndex text, SegmentedSymbolIndex symbols,
                                DiskSnapshot snapshot) =>
         SaveAll(root, text, symbols, snapshot);

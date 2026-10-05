@@ -478,6 +478,9 @@ public static class CodeCompassTools
         // policy exists to prevent. Refuse it and point at the CLI, consistent with the initial-index deferral.
         if (ServerContext.ReindexWouldExceedAutoLimit(out _)) return ServerContext.CliBuildGuidance();
         var s = ServerContext.Rebuild();
+        if (s is null)
+            return "Another CodeCompass process is writing this index right now (e.g. `codecompass index` or `update` " +
+                   "in a terminal). This session reloads its result automatically when it finishes - no reindex needed.";
         return $"Reindexed {s.Files} files ({s.Bytes / (1024.0 * 1024.0):F1} MB) in {s.Seconds:F2}s; " +
                $"{s.Symbols} symbols.";
     }
