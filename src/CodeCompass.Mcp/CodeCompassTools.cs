@@ -34,6 +34,7 @@ public static class CodeCompassTools
         // Whitespace-only queries have no trigrams, so they'd fall to a full-corpus scan returning noise at
         // high I/O cost - reject them like the other tools do (IsNullOrWhiteSpace, not IsNullOrEmpty).
         if (string.IsNullOrWhiteSpace(query)) return "Provide a non-empty search string.";
+        if (query.Length < MinIndexedQuery) return ShortQueryMessage(query);
         maxResults = Math.Clamp(maxResults, 1, 1000); // agent-supplied; guard against 0/negative/absurd
         // Federate across the primary index + every linked root. Fetch one extra per index to detect
         // truncation across the union; primary hits stay repo-relative, linked hits show absolute paths.
@@ -54,6 +55,15 @@ public static class CodeCompassTools
         sb.Append(Footer(Math.Min(hits.Count, maxResults), truncated, "match", "matches"));
         return sb.ToString();
     });
+
+    // The trigram index can't narrow a query shorter than one trigram: every file becomes a candidate and is READ
+    // (hours over a large share, under the read lock). search_code refuses such queries; the reference tools skip the
+    // index-backed passes for them and say so.
+    private const int MinIndexedQuery = 3;
+
+    private static string ShortQueryMessage(string query) =>
+        $"\"{query}\" is too short to search: the index matches 3+ characters, and a shorter query would read every " +
+        "file. Add surrounding text (e.g. \"if (\" rather than \"if\").";
 
     // A federated hit's display path: primary (project) hits stay repo-relative for compactness; a hit
     // from a linked external root is shown as its ABSOLUTE path, so it's unambiguous and directly readable.
@@ -203,7 +213,7 @@ public static class CodeCompassTools
                 n++;
                 if (n < startLine) continue;
                 if (n > endLine) break;
-                sb.Append(n).Append(": ").AppendLine(line);
+                sb.Append(n).Append(": ").AppendLine(LineSnippet.Display(line)); // bounded + scrubbed (untrusted content)
             }
             return sb.Length > 0 ? sb.ToString() : null;
         }
@@ -242,7 +252,10 @@ public static class CodeCompassTools
         var cppCandidates = new List<string>();
         var csCandidates = new List<string>();
         var csDisplay = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
-        foreach (var h in handles)
+        // A name shorter than one trigram makes EVERY file a candidate: the C/C++ pass and the lexical backfill would
+        // read the whole corpus. Only the C# semantic pass (which doesn't use the index) runs; the result says so.
+        bool indexable = name.Length >= MinIndexedQuery;
+        foreach (var h in indexable ? handles : Array.Empty<ServerContext.IndexHandle>())
             foreach (var rel in h.Text.CandidateFiles(name))
             {
                 var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
@@ -294,7 +307,7 @@ public static class CodeCompassTools
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.OrdinalIgnoreCase);
 
-        if (hits.Count <= maxResults)
+        if (hits.Count <= maxResults && indexable)
             foreach (var h in handles)
             {
                 // Reference mode: canonical candidate order (build-order-independent: a local and a UNC index
@@ -306,7 +319,7 @@ public static class CodeCompassTools
                     // incomplete, skip build noise, require a whole-word match, and skip comment/string spans. The
                     // span filter reads the file, so give it the absolute path; display/dedup keep the relative one.
                     var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, m.Path.Replace('/', System.IO.Path.DirectorySeparatorChar)));
-                    if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete, spanFilter, m.Line)) continue;
+                    if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset)) continue;
                     var key = $"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}";
                     if (!semKeys.Add(key)) continue;                             // already found semantically - don't double-count
                     hits.Add(($"{key}: {m.LineText}", 'l'));
@@ -348,6 +361,10 @@ public static class CodeCompassTools
             ? " (Note: " + ReferenceMerge.CSharpConditionalNote(
                   csConditional.Select(f => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f)).ToList()) + ")"
             : "";
+        if (!indexable)
+            csNote += $" (Note: \"{name}\" is under {MinIndexedQuery} characters, too short for the text index - only C# " +
+                      "semantic references were searched; C/C++ and other languages were NOT. search_code with " +
+                      "surrounding text (e.g. \"" + name + "(\") can find those.)";
 
         if (hits.Count == 0)
             return $"No references found for \"{name}\". Tip: try search_code for a raw text search " +
@@ -392,7 +409,9 @@ public static class CodeCompassTools
         // disabled text can't be semantically bound - and name the file(s) in the disclosure.
         var calleeCsCands = new List<string>();
         var calleeCsDisplay = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
-        foreach (var h in handles)
+        // Under one trigram every .cs file would be a candidate (each read in full to look for #if): skip it, and say so.
+        bool indexable = name.Length >= MinIndexedQuery;
+        foreach (var h in indexable ? handles : Array.Empty<ServerContext.IndexHandle>())
             foreach (var rel in h.Text.CandidateFiles(name))
                 if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase))
                 {
@@ -417,6 +436,9 @@ public static class CodeCompassTools
             ? " (Note: " + ReferenceMerge.CSharpConditionalCalleesNote(
                   calleeCond.Select(f => calleeCsDisplay.TryGetValue(f, out var d) ? d : System.IO.Path.GetFileName(f)).ToList(), extraCallees.Count) + ")"
             : "";
+        if (!indexable)
+            calleeCsNote += $" (Note: \"{name}\" is too short for the text index, so calls inside #if/#elif-guarded " +
+                            "branches were not checked.)";
         if (callees.Count == 0 && extraCallees.Count == 0)
             // Distinguish "no such symbol" from "found, but calls no repo code" - answering a bare
             // "nothing" to both is the silent-empty hazard that turns a typo into a false finding.

@@ -24,9 +24,11 @@ public static class FileScanner
 
             int lineEnd = text.IndexOf('\n', idx);
             if (lineEnd < 0) lineEnd = text.Length;
-            var lineText = text.Substring(lineStart, lineEnd - lineStart).TrimEnd('\r');
+            if (lineEnd > lineStart && text[lineEnd - 1] == '\r') lineEnd--;
+            // Windowed straight out of the file body: a multi-MB single "line" is never copied per hit.
+            var (lineText, offset) = Text.LineSnippet.Make(text, lineStart, Math.Max(0, lineEnd - lineStart), idx, query.Length);
 
-            results.Add(new SearchMatch(rel, line + lineOffset, idx - lineStart + 1, lineText));
+            results.Add(new SearchMatch(rel, line + lineOffset, idx - lineStart + 1, lineText, offset));
             if (results.Count >= maxResults) return;
             scanned = idx + Math.Max(1, query.Length);
         }
@@ -49,7 +51,8 @@ public static class FileScanner
             int from = 0, idx;
             while ((idx = lineText.IndexOf(query, from, comparison)) >= 0)
             {
-                results.Add(new SearchMatch(rel, line, idx + 1, lineText));
+                var (shown, offset) = Text.LineSnippet.Make(lineText, idx, query.Length);
+                results.Add(new SearchMatch(rel, line, idx + 1, shown, offset));
                 if (results.Count >= maxResults) return;
                 from = idx + Math.Max(1, query.Length);
             }

@@ -4,8 +4,11 @@ using CodeCompass.Core.Text;
 
 namespace CodeCompass.Core.Indexing;
 
-/// <summary>A single search hit: 1-based line and column, plus the matched line's text.</summary>
-public readonly record struct SearchMatch(string Path, int Line, int Column, string LineText);
+/// <summary>A single search hit: 1-based line and column, plus the matched line's display text (see
+/// <see cref="LineSnippet"/>: bounded and scrubbed). <see cref="LineTextOffset"/> is the line column of
+/// <see cref="LineText"/>'s first character (0 unless a very long line was windowed), so <c>Column - 1 - LineTextOffset</c>
+/// indexes the match within <see cref="LineText"/>.</summary>
+public readonly record struct SearchMatch(string Path, int Line, int Column, string LineText, int LineTextOffset = 0);
 
 /// <summary>
 /// Trigram inverted index for fast literal substring search. Each distinct 3-char
@@ -269,23 +272,8 @@ public sealed class TrigramIndex
         return result;
     }
 
-    private static void ScanFile(string rel, string text, string query, List<SearchMatch> results, int maxResults)
-    {
-        int line = 1, lineStart = 0, scanned = 0, idx;
-        while ((idx = text.IndexOf(query, scanned, StringComparison.Ordinal)) >= 0)
-        {
-            for (int k = scanned; k < idx; k++)
-                if (text[k] == '\n') { line++; lineStart = k + 1; }
-
-            int lineEnd = text.IndexOf('\n', idx);
-            if (lineEnd < 0) lineEnd = text.Length;
-            var lineText = text.Substring(lineStart, lineEnd - lineStart).TrimEnd('\r');
-
-            results.Add(new SearchMatch(rel, line, idx - lineStart + 1, lineText));
-            if (results.Count >= maxResults) return;
-            scanned = idx + query.Length;
-        }
-    }
+    private static void ScanFile(string rel, string text, string query, List<SearchMatch> results, int maxResults) =>
+        FileScanner.ScanText(rel, text, query, results, maxResults);
 
     public void Save(Stream stream)
     {

@@ -965,6 +965,12 @@ static int CmdSearch(string[] args)
     // A whitespace-only query has no trigrams and would scan the whole corpus for a bare space, dumping
     // almost every line. Reject it like the MCP tools do, with a helpful message instead of a noise flood.
     if (string.IsNullOrWhiteSpace(query)) { Console.Error.WriteLine("Provide a non-empty search string."); return 2; }
+    // Under one trigram every file is a candidate and would be read in full - refuse, like the MCP tool.
+    if (query.Length < 3)
+    {
+        Console.Error.WriteLine($"\"{query}\" is too short to search: the index matches 3+ characters. Add surrounding text (e.g. \"if (\").");
+        return 2;
+    }
 
     if (!RepositoryIndexer.TryLoad(root, out var index, out _)) return NoIndex(root);
 
@@ -1056,6 +1062,16 @@ static int CmdRefs(string[] args)
     foreach (var s in cs)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
+    // A name under one trigram can't be narrowed by the index: the C/C++ pass and the lexical backfill would read
+    // every file. Same rule as the MCP tool - only the C# semantic pass (above) runs, and the output says so.
+    if (name.Length < 3)
+    {
+        Console.Out.WriteLine($"-- \"{name}\" is under 3 characters, too short for the text index: only C# semantic " +
+                              "references were searched; C/C++ and other languages were NOT (use `search` with surrounding text).");
+        Console.Error.WriteLine($"-- {cs.Count} C# semantic reference(s)");
+        return 0;
+    }
+
     // Load the index once: it drives the TARGETED C/C++ parse (only files that could contain the name) and
     // the lexical fallback below. If unindexed, the clang analyzer self-scans (slower, but still correct).
     bool haveIndex = RepositoryIndexer.TryLoad(root, out var index, out _);
@@ -1128,7 +1144,7 @@ static int CmdRefs(string[] args)
             // Absolute path for the span filter (it reads the file to classify comments/strings); display + dedup
             // stay on the repo-relative m.Path. Extension-based gates in IsLexicalReference are unaffected.
             var full = Path.GetFullPath(Path.Combine(root, m.Path.Replace('/', Path.DirectorySeparatorChar)));
-            if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete, spanFilter, m.Line)) continue;
+            if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset)) continue;
             if (!semKeys.Add($"{m.Path}:{m.Line}:{m.Column}")) continue;                       // already found semantically
             Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
             lexical++;

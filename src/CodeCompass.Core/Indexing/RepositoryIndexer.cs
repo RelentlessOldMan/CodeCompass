@@ -795,7 +795,17 @@ public static class RepositoryIndexer
         }
 
         long size;
-        try { size = new FileInfo(full).Length; }
+        try
+        {
+            var fi = new FileInfo(full);
+            // A file that became a symlink (or was created as one) is never followed - same rule as the walk.
+            if (FileWalker.IsLink(fi))
+            {
+                if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel); snapshot.Remove(rel); removed++; }
+                return;
+            }
+            size = fi.Length;
+        }
         catch { return; }
         if (size > ignore.MaxFileSizeBytes) // over the file cap -> not indexed (drop if we had it)
         {

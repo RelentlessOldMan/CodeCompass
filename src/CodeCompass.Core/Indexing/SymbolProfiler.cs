@@ -101,7 +101,9 @@ public static class SymbolProfiler
                 if (ignore.IsIgnoredFile(name, 0)) continue;
                 if (LanguageRegistry.ForPath(name) is null) continue; // no grammar -> no symbols to profile
                 long size;
-                try { size = new FileInfo(file).Length; } catch { continue; }
+                FileInfo fi;
+                try { fi = new FileInfo(file); size = fi.Length; } catch { continue; }
+                if (Walking.FileWalker.IsLink(fi)) continue; // same rule as the index walk: never follow a file link
                 var ext = Path.GetExtension(name).ToLowerInvariant();
                 var rel = Path.GetRelativePath(root, file).Replace('\\', '/');
                 if (!byExt.TryGetValue(ext, out var list)) byExt[ext] = list = new();

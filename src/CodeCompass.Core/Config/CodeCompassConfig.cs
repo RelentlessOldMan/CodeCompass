@@ -166,6 +166,12 @@ public static class CodeCompassConfig
         return n is >= 0 ? n.Value : 10; // 0 = never evict
     }
 
+    // A .codecompass.json lives IN the repo, and a cloned repo is untrusted: it must not be able to order a 100,000-
+    // thread walk, a whole-file read of a multi-GB file, or a silent in-session index of a huge tree. Values from the
+    // repo's own file are clamped to sane ceilings; environment variables (the operator's own choice) are not.
+    private const long MaxRepoFileAutoMb = 4096;
+    private static int? FromRepoFile(int? value, int max) => value is int v && v > max ? max : value;
+    private static long? FromRepoFile(long? value, long max) => value is long v && v > max ? max : value;
     // Each knob has a pure overload taking an explicit RepoConfig (deterministic; used by tests and
     // tools) and an ambient no-arg overload that resolves against the active repo config.
 
@@ -175,7 +181,7 @@ public static class CodeCompassConfig
     public static long MaxFileBytes() => MaxFileBytes(_current);
     public static long MaxFileBytes(RepoConfig cfg)
     {
-        long? mb = EnvLong("CODECOMPASS_MAX_FILE_MB") ?? cfg.MaxFileMb;
+        long? mb = EnvLong("CODECOMPASS_MAX_FILE_MB") ?? FromRepoFile(cfg.MaxFileMb, 2000);
         return mb is > 0 ? mb.Value * 1024 * 1024 : 2000L * 1024 * 1024;
     }
 
@@ -193,7 +199,7 @@ public static class CodeCompassConfig
     public static long MaxAutoBytes(RepoConfig cfg)
     {
         // 0 is valid here (forces CLI build), so distinguish "set" from "absent".
-        long? mb = EnvLong("CODECOMPASS_MAX_AUTO_MB") ?? cfg.MaxAutoMb;
+        long? mb = EnvLong("CODECOMPASS_MAX_AUTO_MB") ?? FromRepoFile(cfg.MaxAutoMb, MaxRepoFileAutoMb);
         return (mb is >= 0 ? mb.Value : 100) * 1024 * 1024;
     }
 
@@ -201,7 +207,7 @@ public static class CodeCompassConfig
     public static int Threads(int defaultCores) => Threads(_current, defaultCores);
     public static int Threads(RepoConfig cfg, int defaultCores)
     {
-        int? n = EnvInt("CODECOMPASS_THREADS") ?? cfg.Threads;
+        int? n = EnvInt("CODECOMPASS_THREADS") ?? FromRepoFile(cfg.Threads, 4 * Math.Max(1, defaultCores));
         return n is > 0 ? n.Value : defaultCores;
     }
 
@@ -212,7 +218,7 @@ public static class CodeCompassConfig
     public static int WalkThreads(int defaultCores) => WalkThreads(_current, defaultCores);
     public static int WalkThreads(RepoConfig cfg, int defaultCores)
     {
-        int? n = EnvInt("CODECOMPASS_WALK_THREADS") ?? cfg.WalkThreads;
+        int? n = EnvInt("CODECOMPASS_WALK_THREADS") ?? FromRepoFile(cfg.WalkThreads, 4 * Math.Max(1, defaultCores));
         return n is > 0 ? n.Value : Math.Min(defaultCores, 8);
     }
 

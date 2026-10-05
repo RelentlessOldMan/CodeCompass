@@ -333,7 +333,10 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         {
             var text = tree.GetText();
             if (line < text.Lines.Count)
-                lineText = text.Lines[line].ToString().Trim();
+            {
+                var raw = text.Lines[line].ToString();
+                lineText = CodeCompass.Core.Text.LineSnippet.Make(raw, Math.Clamp(column, 0, raw.Length), 1).Text.Trim(); // bounded + scrubbed
+            }
         }
         var (root, rel) = OwnerOf(span.Path);
         return new SemanticLocation(rel, line + 1, column + 1, lineText, root);

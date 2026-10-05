@@ -101,6 +101,21 @@ public sealed class FileWalker
         return true;
     }
 
+    /// <summary>Is this file a symbolic link / junction? Reading one follows it, so a link in an untrusted clone
+    /// (git creates them with core.symlinks) pointing at e.g. ~/.ssh/id_rsa would put that file's content in the
+    /// index and quote it into search results. Only TRUE links count: other reparse points - OneDrive/cloud
+    /// placeholders, dedup'd files - carry the same attribute but are ordinary content and must stay indexed.
+    /// The link-target probe is paid only when the attribute is set (rare).</summary>
+    internal static bool IsLink(FileSystemInfo info)
+    {
+        try
+        {
+            if ((info.Attributes & FileAttributes.ReparsePoint) == 0) return false;
+            return info.LinkTarget is not null;
+        }
+        catch { return true; } // can't tell -> don't follow it
+    }
+
     // Build a FileRecord for a file, or return false if it's skipped (over the size cap or ignored). Reads
     // size/mtime from the enumerated FileInfo (cached, no extra round-trip). Thread-safe over-cap accounting.
     private bool TryFileRecord(FileInfo file, string root, out FileRecord rec)
@@ -124,6 +139,7 @@ public sealed class FileWalker
         }
 
         if (_ignore.IsIgnoredFile(file.Name, size)) return false;
+        if (IsLink(file)) return false;
 
         long mtime;
         try { mtime = file.LastWriteTimeUtc.Ticks; } catch { mtime = 0; }

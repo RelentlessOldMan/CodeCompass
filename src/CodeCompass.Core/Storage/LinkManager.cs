@@ -23,6 +23,7 @@ public static class LinkManager
         project = Path.GetFullPath(project);
         linked = Path.GetFullPath(linked);
         if (!Directory.Exists(linked)) return new(AddStatus.Rejected, $"not a directory: {linked}");
+        if (SensitiveLinkTarget(linked) is string why0) return new(AddStatus.Rejected, "cannot link: " + why0);
         var existingLinks = LinkStore.Read(project);
         // Exact re-add is "already linked" (clearer than the self-overlap message the nesting check would give).
         if (existingLinks.Any(r => string.Equals(Path.GetFullPath(r), linked, StringComparison.OrdinalIgnoreCase)))
@@ -124,6 +125,37 @@ public static class LinkManager
         System.DateTime.TryParse(iso, System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.RoundtripKind, out var dt)
             ? dt.ToUniversalTime().ToString("u") : iso;
+
+    // Directory names that hold credentials/keys - never code. Linking one would put its files in the index, where
+    // search_code quotes them back (the path a prompt-injected agent would take to exfiltrate secrets).
+    private static readonly HashSet<string> CredentialDirNames = new(StringComparer.OrdinalIgnoreCase)
+    { ".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker", ".git-credentials" };
+
+    /// <summary>Why <paramref name="linked"/> must not be linked, or null if it's fine: a drive or share ROOT (the
+    /// whole volume), the user's profile directory itself, or anything inside a credential directory.
+    /// CODECOMPASS_ALLOW_ANY_LINK=1 lifts this for someone who really means it.</summary>
+    internal static string? SensitiveLinkTarget(string linked)
+    {
+        if (Environment.GetEnvironmentVariable("CODECOMPASS_ALLOW_ANY_LINK") is "1" or "true") return null;
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(linked));
+        var root = Path.GetPathRoot(full);
+        if (root is not null && string.Equals(Path.TrimEndingDirectorySeparator(root), full, StringComparison.OrdinalIgnoreCase))
+            return $"{full} is a drive or share root - link the project directory instead.";
+        // The profile and the AppData folders THEMSELVES (not everything under them - %TEMP% lives in LocalAppData).
+        foreach (var special in new[] { Environment.SpecialFolder.UserProfile, Environment.SpecialFolder.ApplicationData,
+                                        Environment.SpecialFolder.LocalApplicationData })
+        {
+            var dir = Environment.GetFolderPath(special);
+            if (!string.IsNullOrEmpty(dir) &&
+                string.Equals(Path.TrimEndingDirectorySeparator(dir), full, StringComparison.OrdinalIgnoreCase))
+                return $"{full} is a user profile/settings directory - link a project directory instead.";
+        }
+        foreach (var part in full.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            if (CredentialDirNames.Contains(part))
+                return $"{full} is inside '{part}', which holds credentials/keys rather than code. " +
+                       "(Set CODECOMPASS_ALLOW_ANY_LINK=1 to override.)";
+        return null;
+    }
 
     // True if `a` and `b` are the same directory or one is nested in the other (so linking `b` is redundant).
     private static bool Nested(string a, string b, out string why)

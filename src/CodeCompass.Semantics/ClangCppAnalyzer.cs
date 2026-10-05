@@ -591,26 +591,115 @@ public sealed class ClangCppAnalyzer : IDisposable
         return tokens;
     }
 
-    // Drop the compiler executable, the source file, and output/compile-step flags;
-    // keep include paths, defines, std, etc. that clang needs to bind correctly.
+    // Flags that take their value as the NEXT token when not joined (-DX vs -D X), kept with that value.
+    private static readonly HashSet<string> KeptWithValue = new(StringComparer.Ordinal)
+    {
+        "-D", "-U", "-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros", "-isysroot", "--sysroot",
+        "-iprefix", "-iwithprefix", "-iwithprefixbefore", "-x", "-target", "-arch",
+    };
+
+    // Joined-form prefixes of the same flags (-DX, -I/path, -std=c++17, --target=...), kept as-is.
+    private static readonly string[] KeptPrefixes =
+    {
+        "-D", "-U", "-I", "-isystem", "-iquote", "-idirafter", "-isysroot", "--sysroot=", "-std=", "--std=",
+        "--target=", "-x", "-W", "-m", "-f", "-O",
+    };
+
+    // Dropped together with their next-token value: they forward raw args, load code, remap the filesystem, or
+    // write files (-Xclang -load <dll>, -ivfsoverlay <overlay>, -MF <depfile>, -B <tool dir>, ...).
+    private static readonly HashSet<string> DroppedWithValue = new(StringComparer.Ordinal)
+    {
+        "-Xclang", "-Xpreprocessor", "-Xlinker", "-Xassembler", "-MF", "-MT", "-MQ", "-ivfsoverlay", "-B",
+        "-include-pch", "-load", "-o", "-mllvm",
+    };
+
+    // -W/-f/-m forms that are NOT parse options: argument forwarding (-Wp,-MD,<file> writes a file), plugin/module
+    // loading, and every output-writing knob.
+    private static readonly string[] DroppedSubstrings =
+    {
+        "plugin", "module", "crash", "profile", "coverage", "save-", "time-trace", "dump", "record", "instrument",
+        "build-session", "embed", "depfile", "stack-usage", "callgraph",
+    };
+
+    /// <summary>
+    /// Turn a compile_commands.json entry's argv into the args handed to libclang - as an ALLOWLIST. The compile DB
+    /// comes from the repo being indexed, which is untrusted: passing it through let a hostile clone have clang load
+    /// a plugin DLL (-Xclang -load, -fplugin=), remap files (-ivfsoverlay), or write files anywhere (-MF,
+    /// -fmodules-cache-path, -Wp,-MD). Only options that change how the code PARSES survive: defines, include
+    /// paths, forced includes, language/standard, target, and the -f/-m/-W/-O dialect knobs minus the dangerous
+    /// ones above. The compiler, the source file, -c/-o and anything unrecognized are dropped. MSVC-style
+    /// /I /D /U /FI /std: are translated (passed through raw, clang took them as extra input files and failed the
+    /// whole translation unit).
+    /// </summary>
     internal static string[] CleanArgs(List<string> tokens, string fileName)
     {
         var result = new List<string>();
-        var baseName = Path.GetFileName(fileName);
-        for (int i = 0; i < tokens.Count; i++)
+        // MSVC spellings only from an MSVC driver: on a Unix compile DB a positional /Data/x.c must never be read as /D.
+        bool msvc = tokens.Count > 0 && IsMsvcDriver(tokens[0]);
+        for (int i = 1; i < tokens.Count; i++) // [0] is the compiler executable
         {
             var t = tokens[i];
-            if (i == 0) continue;                             // compiler executable
-            if (t is "-c") continue;
-            if (t is "-o") { i++; continue; }                 // skip -o <output>
-            // The source file is a POSITIONAL arg whose filename equals the source basename - not a flag. Match
-            // that precisely so a define/include whose value merely ends with the basename (e.g. -DX=path/to/x.c)
-            // isn't dropped, which would change the parse and miss references.
-            if (!t.StartsWith("-", StringComparison.Ordinal) &&
-                Path.GetFileName(t).Equals(baseName, StringComparison.OrdinalIgnoreCase)) continue;
-            result.Add(t);
+            if (t.Length == 0 || t == "-c") continue;
+            bool hasNext = i + 1 < tokens.Count;
+
+            if (DroppedWithValue.Contains(t)) { i++; continue; }
+            if (KeptWithValue.Contains(t))
+            {
+                if (hasNext) { result.Add(t); result.Add(tokens[++i]); }
+                continue;
+            }
+
+            if (t[0] == '/')
+            {
+                if (!msvc) continue;
+                // cl accepts both /DNAME and /D NAME.
+                if (t is "/D" or "/U" or "/I" or "/FI")
+                {
+                    if (hasNext) result.Add(TranslateMsvc(t + tokens[++i])!);
+                    continue;
+                }
+                if (TranslateMsvc(t) is string translated) result.Add(translated);
+                continue;
+            }
+            if (t[0] != '-') continue; // positional (the source file itself, a stray input, an @rsp file): drop
+
+            if (t.StartsWith("-Wp,", StringComparison.Ordinal) || t.StartsWith("-Wl,", StringComparison.Ordinal) ||
+                t.StartsWith("-Wa,", StringComparison.Ordinal)) continue; // raw argument forwarding (-Wp,-MD,<file> writes)
+            if (t.StartsWith("-M", StringComparison.Ordinal)) continue;      // dependency-file generation (writes files)
+            if (t.StartsWith("-include", StringComparison.Ordinal) || t.StartsWith("-imacros", StringComparison.Ordinal))
+            {
+                // Joined form (-include<file>); the separate form and -include-pch were handled above.
+                if (t.Length > 8 && !t.StartsWith("-include-pch", StringComparison.Ordinal)) result.Add(t);
+                continue;
+            }
+            if (t is "-pthread" or "-nostdinc" or "-nostdinc++" or "-nostdlibinc" or "-nobuiltininc" or "-undef"
+                  or "-trigraphs" or "-ansi" or "-pedantic") { result.Add(t); continue; }
+
+            bool kept = false;
+            foreach (var p in KeptPrefixes) if (t.StartsWith(p, StringComparison.Ordinal)) { kept = true; break; }
+            if (!kept) continue;
+            if (t.StartsWith("-f", StringComparison.Ordinal) || t.StartsWith("-m", StringComparison.Ordinal) ||
+                t.StartsWith("-W", StringComparison.Ordinal))
+                foreach (var s in DroppedSubstrings)
+                    if (t.Contains(s, StringComparison.OrdinalIgnoreCase)) { kept = false; break; }
+            if (kept) result.Add(t);
         }
         return result.ToArray();
+    }
+
+    private static bool IsMsvcDriver(string compiler)
+    {
+        var name = Path.GetFileNameWithoutExtension(compiler.Trim('"')).ToLowerInvariant();
+        return name is "cl" or "clang-cl";
+    }
+
+    // /Ipath /Dname /Uname /FIfile /std:c++17 (cl.exe / clang-cl compile DBs) -> the GNU spellings libclang parses.
+    private static string? TranslateMsvc(string t)
+    {
+        if (t.Length > 3 && t.StartsWith("/FI", StringComparison.Ordinal)) return "-include" + t[3..];
+        if (t.StartsWith("/std:", StringComparison.Ordinal)) return "-std=" + t[5..];
+        if (t.Length > 2 && (t[1] == 'I' || t[1] == 'D' || t[1] == 'U')) return "-" + t[1] + t[2..];
+        return null;
     }
 
     // lineCache is passed in per query and discarded when the query returns, so scattered references in
@@ -625,7 +714,10 @@ public sealed class ClangCppAnalyzer : IDisposable
             lineCache[loc.Full] = lines;
         }
         if (loc.Line >= 1 && loc.Line <= lines.Length)
-            text = lines[loc.Line - 1].Trim();
+        {
+            var raw = lines[loc.Line - 1];
+            text = CodeCompass.Core.Text.LineSnippet.Make(raw, Math.Clamp(loc.Column - 1, 0, raw.Length), 1).Text.Trim(); // bounded + scrubbed
+        }
 
         var (root, rel) = OwnerOf(loc.Full) ?? ("", loc.Full.Replace('\\', '/'));
         return new SemanticLocation(rel, loc.Line, loc.Column, text, root);
