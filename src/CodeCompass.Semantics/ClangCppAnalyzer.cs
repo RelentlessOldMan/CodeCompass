@@ -53,7 +53,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     // at once is what drove a broad find_references to ~16 GB (a token referenced across 200x 2-8 MB files,
     // ~4 GB per TU x degree 4). Above this cap the file is left to the LEXICAL reference layer (still found,
     // just not clang-confirmed), so memory stays bounded without dropping results. Env CODECOMPASS_CPP_MAX_TU_MB.
-    private static long MaxTuBytes()
+    internal static long MaxTuBytes()
     {
         var env = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_MAX_TU_MB");
         if (long.TryParse(env, out var mb) && mb > 0) return mb * 1024 * 1024;
@@ -115,6 +115,7 @@ public sealed class ClangCppAnalyzer : IDisposable
         public int Parsed;
         public bool MemoryStopped; // the semantic pass hit its memory budget and stopped before parsing every candidate
         public bool TooManyCandidates; // the candidate set exceeded the semantic-parse limit, so the pass was skipped up front (latency guard)
+        public int SkippedTooBig;      // candidate sources over the per-TU size cap, left to the lexical layer
         public readonly HashSet<string> UnresolvedIncludes = new(StringComparer.OrdinalIgnoreCase);
     }
 
@@ -123,7 +124,7 @@ public sealed class ClangCppAnalyzer : IDisposable
     /// partial or empty result can be disclosed honestly instead of read as a confident zero.</summary>
     public readonly record struct CppRefResult(
         IReadOnlyList<SemanticLocation> Locations, int CandidateTus, int ParsedTus, IReadOnlyList<string> UnresolvedIncludes,
-        bool MemoryStopped = false, bool TooManyCandidates = false);
+        bool MemoryStopped = false, bool TooManyCandidates = false, int SkippedTooBig = 0, bool WorkerFailed = false);
 
     public ClangCppAnalyzer(string root) : this(new[] { root }) { }
 
@@ -160,24 +161,27 @@ public sealed class ClangCppAnalyzer : IDisposable
         var result = new List<SemanticLocation>();
         if (model.UsrsByName.TryGetValue(name, out var usrs))
         {
-            var seen = new HashSet<Loc>();
-            var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal); // per-query; freed on return
+            // DETERMINISTIC: candidate TUs are parsed in parallel and merged in completion order, and USRs live in a
+            // hash set - so emit in a canonical (path, line, column) order BEFORE truncating at `max`, or two identical
+            // queries could return different reference SETS.
+            var all = new HashSet<Loc>();
             foreach (var usr in usrs)
+                if (model.RefsByUsr.TryGetValue(usr, out var locs)) all.UnionWith(locs);
+            var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal); // per-query; freed on return
+            foreach (var l in Canonical(all))
             {
-                if (!model.RefsByUsr.TryGetValue(usr, out var locs)) continue;
-                foreach (var l in locs)
-                    if (seen.Add(l))
-                    {
-                        result.Add(ToSemantic(l, lineCache));
-                        if (result.Count >= max) { return Cover(model, result); }
-                    }
+                result.Add(ToSemantic(l, lineCache));
+                if (result.Count >= max) break;
             }
         }
         return Cover(model, result);
     }
 
+    private static IEnumerable<Loc> Canonical(IEnumerable<Loc> locs) =>
+        locs.OrderBy(l => l.Full, StringComparer.Ordinal).ThenBy(l => l.Line).ThenBy(l => l.Column);
+
     private static CppRefResult Cover(Model m, List<SemanticLocation> locs) =>
-        new(locs, m.Candidates, m.Parsed, m.UnresolvedIncludes.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(), m.MemoryStopped, m.TooManyCandidates);
+        new(locs, m.Candidates, m.Parsed, m.UnresolvedIncludes.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(), m.MemoryStopped, m.TooManyCandidates, m.SkippedTooBig);
 
     /// <summary>Definitions of the C/C++ symbol <paramref name="name"/>. See <see cref="FindReferences"/>
     /// for <paramref name="candidateFiles"/>.</summary>
@@ -187,10 +191,8 @@ public sealed class ClangCppAnalyzer : IDisposable
         var result = new List<SemanticLocation>();
         if (model.DefsByName.TryGetValue(name, out var locs))
         {
-            var seen = new HashSet<Loc>();
             var lineCache = new Dictionary<string, string[]>(StringComparer.Ordinal);
-            foreach (var l in locs)
-                if (seen.Add(l)) result.Add(ToSemantic(l, lineCache));
+            foreach (var l in Canonical(new HashSet<Loc>(locs))) result.Add(ToSemantic(l, lineCache));
         }
         return result;
     }
@@ -220,8 +222,10 @@ public sealed class ClangCppAnalyzer : IDisposable
         if (maxSem > 0 && candidateFiles is not null && candidateFiles.Count > maxSem)
             return new Model { Candidates = candidateFiles.Count, TooManyCandidates = true };
 
-        var files = ResolveFiles(name, candidateFiles).ToList();
-        var model = new Model { Candidates = files.Count };
+        var files = ResolveFiles(name, candidateFiles, out int skippedTooBig);
+        // A size-skipped candidate is NOT silently "covered": it makes the pass incomplete (the caller's lexical
+        // backfill then searches it) and is disclosed - see SemanticCoverage.IsCppPassIncomplete.
+        var model = new Model { Candidates = files.Count, SkippedTooBig = skippedTooBig };
         if (files.Count == 0) return model;
 
         // Per-QUERY memory budget. clang TU memory is NATIVE and, empirically, is not returned to the OS as we
@@ -273,7 +277,7 @@ public sealed class ClangCppAnalyzer : IDisposable
         {
             ct.ThrowIfCancellationRequested(); // shutdown/re-point: abort before a (possibly long) single-TU parse
             if (OverBudget()) model.MemoryStopped = true;
-            else { try { ParseInto(files[0], model); } catch { } }
+            else { try { ParseInto(files[0], model); } catch (Exception ex) { LogParseFailure(files[0], ex); } }
             return model;
         }
 
@@ -287,12 +291,19 @@ public sealed class ClangCppAnalyzer : IDisposable
             {
                 if (loopState.ShouldExitCurrentIteration) return local;
                 if (OverBudget()) { stopped = true; loopState.Stop(); return local; } // stop scheduling more TUs
-                try { ParseInto(full, local); } catch { }
+                try { ParseInto(full, local); } catch (Exception ex) { LogParseFailure(full, ex); }
                 return local;
             },
             local => { lock (_mergeLock) { MergeInto(model, local); } });
         if (stopped) model.MemoryStopped = true;
         return model;
+    }
+
+    // A TU whose parse or AST walk threw is NOT counted as parsed (Parsed is bumped only after the walk), so the pass
+    // reads as incomplete and the lexical backfill covers it - this only makes the failure visible in the log.
+    private static void LogParseFailure(string full, Exception ex)
+    {
+        try { Log.Global.Warn($"C/C++ semantic parse failed for {full}: {ex.GetType().Name}: {ex.Message} (left to the lexical layer)"); } catch { }
     }
 
     // Current process working set (native + managed) - the signal that actually reflects clang's native TU
@@ -327,8 +338,10 @@ public sealed class ClangCppAnalyzer : IDisposable
     // The absolute source files to parse for this query: the supplied candidates (filtered to C/C++ sources
     // under one of our roots), or - when none are supplied - a self-scan that reads each source file's text
     // and keeps those containing the name (the fallback for unit tests / callers without a trigram index).
-    private IEnumerable<string> ResolveFiles(string name, IReadOnlyCollection<string>? candidateFiles)
+    private List<string> ResolveFiles(string name, IReadOnlyCollection<string>? candidateFiles, out int skippedTooBig)
     {
+        var result = new List<string>();
+        skippedTooBig = 0;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (candidateFiles is not null)
         {
@@ -338,7 +351,9 @@ public sealed class ClangCppAnalyzer : IDisposable
                 try { full = Path.GetFullPath(f); } catch { continue; }
                 if (!SourceExtensions.Contains(Path.GetExtension(full))) continue; // headers are parsed via #include
                 if (OwnerOf(full) is null) continue;                               // must be under a root
-                if (seen.Add(full) && File.Exists(full) && !TooBigForClang(full)) yield return full;
+                if (!seen.Add(full) || !File.Exists(full)) continue;
+                if (TooBigForClang(full)) { skippedTooBig++; continue; }
+                result.Add(full);
             }
         }
         else
@@ -348,9 +363,12 @@ public sealed class ClangCppAnalyzer : IDisposable
                 foreach (var file in walker.Walk(root))
                 {
                     if (!SourceExtensions.Contains(Path.GetExtension(file.RelativePath))) continue;
-                    if (seen.Add(file.FullPath) && !TooBigForClang(file.FullPath) && FileContains(file.FullPath, name)) yield return file.FullPath;
+                    if (!seen.Add(file.FullPath) || !FileContains(file.FullPath, name)) continue;
+                    if (TooBigForClang(file.FullPath)) { skippedTooBig++; continue; }
+                    result.Add(file.FullPath);
                 }
         }
+        return result;
     }
 
     // Cheap text pre-filter for the self-scan fallback: does the file contain the name at all? (A real
@@ -392,13 +410,15 @@ public sealed class ClangCppAnalyzer : IDisposable
         // throws - e.g. GetOrCreate's allocation under memory pressure, exactly the giant-TU case - the raw
         // handle would leak. Track whether the managed wrapper took ownership: dispose the wrapper if it did
         // (which disposes the handle), else dispose the raw handle directly. Never both -> no double-free.
-        model.Parsed++;
         TranslationUnit? translationUnit = null;
         try
         {
             CollectUnresolvedIncludes(tu, model); // names of #includes clang couldn't find (missing from the tree)
             lock (_clangGate) { translationUnit = TranslationUnit.GetOrCreate(tu); }
             Walk(translationUnit.TranslationUnitDecl, model);
+            // Counted only once its references are fully collected: a walk that throws leaves Parsed < Candidates,
+            // which marks the pass incomplete (lexical backfill + disclosure) instead of a silent partial "complete".
+            model.Parsed++;
         }
         finally
         {
@@ -434,11 +454,20 @@ public sealed class ClangCppAnalyzer : IDisposable
         catch { /* diagnostics are best-effort; a failure just omits the disclosure */ }
     }
 
-    private void Walk(Cursor cursor, Model model)
+    // Pre-order DFS with an explicit stack: recursion to AST depth can overflow the stack on a pathologically nested
+    // (generated or hostile) TU - an uncatchable StackOverflowException that would take down the long-lived server on
+    // the in-process path. Children are pushed in reverse so the visit order matches the recursive walk exactly.
+    private void Walk(Cursor root, Model model)
     {
-        Visit(cursor.Handle, model);
-        foreach (var child in cursor.CursorChildren)
-            Walk(child, model);
+        var stack = new Stack<Cursor>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            var cursor = stack.Pop();
+            Visit(cursor.Handle, model);
+            var children = cursor.CursorChildren;
+            for (int i = children.Count - 1; i >= 0; i--) stack.Push(children[i]);
+        }
     }
 
     private void Visit(CXCursor h, Model model)
@@ -713,14 +742,33 @@ public sealed class ClangCppAnalyzer : IDisposable
             catch { lines = Array.Empty<string>(); }
             lineCache[loc.Full] = lines;
         }
+        int column = loc.Column;
         if (loc.Line >= 1 && loc.Line <= lines.Length)
         {
             var raw = lines[loc.Line - 1];
-            text = CodeCompass.Core.Text.LineSnippet.Make(raw, Math.Clamp(loc.Column - 1, 0, raw.Length), 1).Text.Trim(); // bounded + scrubbed
+            column = CharColumn(raw, loc.Column);
+            text = CodeCompass.Core.Text.LineSnippet.Make(raw, Math.Clamp(column - 1, 0, raw.Length), 1).Text.Trim(); // bounded + scrubbed
         }
 
         var (root, rel) = OwnerOf(loc.Full) ?? ("", loc.Full.Replace('\\', '/'));
-        return new SemanticLocation(rel, loc.Line, loc.Column, text, root);
+        return new SemanticLocation(rel, loc.Line, column, text, root);
+    }
+
+    /// <summary>libclang reports columns in UTF-8 BYTES; everything else (the lexical layer, editors) counts UTF-16
+    /// characters. Convert, so a non-ASCII prefix on the line (an accented comment, a non-ASCII string) doesn't put
+    /// the semantic hit at a different column than the lexical one - which broke dedup and listed it twice.</summary>
+    internal static int CharColumn(string line, int byteColumn1)
+    {
+        int targetBytes = byteColumn1 - 1, bytes = 0, i = 0;
+        while (i < line.Length && bytes < targetBytes)
+        {
+            char c = line[i];
+            if (char.IsHighSurrogate(c) && i + 1 < line.Length && char.IsLowSurrogate(line[i + 1])) { bytes += 4; i += 2; continue; }
+            // U+FFFD usually stands for ONE undecodable byte (a non-UTF-8 file), not its 3-byte UTF-8 encoding.
+            bytes += c < 0x80 || c == '\uFFFD' ? 1 : c < 0x800 ? 2 : 3;
+            i++;
+        }
+        return i + 1;
     }
 
     // Map an absolute path to its (owning root, forward-slash relative path), or null if it's under none of

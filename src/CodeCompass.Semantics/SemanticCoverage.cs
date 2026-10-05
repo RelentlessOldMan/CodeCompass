@@ -84,6 +84,10 @@ public static class SemanticCoverage
     /// path in 1.0.176 but not the CLI until 1.0.183, and the unresolved-include case was missed on both
     /// until 1.0.187. One predicate both call removes that whole divergence class.</para>
     /// </summary>
-    public static bool IsCppPassIncomplete(bool memoryStopped, int parsedTus, int candidateTus, int unresolvedIncludeCount)
-        => memoryStopped || parsedTus < candidateTus || unresolvedIncludeCount > 0;
+    /// <para><paramref name="skippedTooBig"/>: candidate sources over the per-TU size cap were never parsed, so their
+    /// references must come from the lexical layer. <paramref name="workerFailed"/>: the isolated worker died or timed
+    /// out (not a memory stop), so nothing was parsed.</para>
+    public static bool IsCppPassIncomplete(bool memoryStopped, int parsedTus, int candidateTus, int unresolvedIncludeCount,
+        int skippedTooBig = 0, bool workerFailed = false)
+        => memoryStopped || parsedTus < candidateTus || unresolvedIncludeCount > 0 || skippedTooBig > 0 || workerFailed;
 }

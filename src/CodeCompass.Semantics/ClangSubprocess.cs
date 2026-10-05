@@ -72,6 +72,7 @@ public static class ClangSubprocess
         public List<string> UnresolvedIncludes { get; set; } = new();
         public bool MemoryStopped { get; set; }
         public bool TooManyCandidates { get; set; }
+        public int SkippedTooBig { get; set; }
     }
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
@@ -99,11 +100,12 @@ public static class ClangSubprocess
     public static ClangCppAnalyzer.CppRefResult ContainedFailure(IReadOnlyCollection<string>? candidates, string? stderr)
     {
         int cand = candidates?.Count ?? 0;
-        // 0 parsed < N candidates already marks the pass incomplete; when we have no candidate count, set
-        // memoryStopped so IsCppPassIncomplete is still true and the lexical backfill runs regardless.
-        bool memStopped = IsOomSignature(stderr) || cand == 0;
+        // An OOM signature is a memory stop (its disclosure names the memory knobs); anything else - a crash, a
+        // timeout, a broken pipe - is a WORKER failure, disclosed as such rather than mislabeled as memory. Either
+        // way the pass is incomplete, so the lexical backfill runs.
+        bool memStopped = IsOomSignature(stderr);
         return new ClangCppAnalyzer.CppRefResult(
-            Array.Empty<SemanticLocation>(), cand, 0, Array.Empty<string>(), memStopped);
+            Array.Empty<SemanticLocation>(), cand, 0, Array.Empty<string>(), memStopped, WorkerFailed: !memStopped);
     }
 
     /// <summary>Run the C/C++ reference pass in a child process. Returns true and sets <paramref name="result"/>
@@ -193,6 +195,13 @@ public static class ClangSubprocess
             p.WaitForExit(); // parameterless: ensures the async stdout/stderr readers have fully flushed
             var payload = outTask.GetAwaiter().GetResult();
             var errText = errTask.GetAwaiter().GetResult(); // observe stderr so it's never an unobserved task
+            if (p.ExitCode == BadRequestExit)
+            {
+                // The worker rejected the request before parsing anything (no native work happened, so there's no
+                // crash to contain): the in-process analyzer can safely run it instead.
+                Log.Global.Warn($"clang subprocess: worker rejected the request for '{name}'; using in-process fallback. stderr: {Tail(errText)}");
+                return false;
+            }
             if (p.ExitCode != 0)
             {
                 // The worker ran and died. Overwhelmingly this is an uncatchable LLVM OOM abort() on a
@@ -211,7 +220,7 @@ public static class ClangSubprocess
                 .Select(l => new SemanticLocation(l.RelativePath, l.Line, l.Column, l.LineText, l.Root ?? ""))
                 .ToList();
             result = new ClangCppAnalyzer.CppRefResult(locs, resp.CandidateTus, resp.ParsedTus,
-                resp.UnresolvedIncludes ?? new List<string>(), resp.MemoryStopped, resp.TooManyCandidates);
+                resp.UnresolvedIncludes ?? new List<string>(), resp.MemoryStopped, resp.TooManyCandidates, resp.SkippedTooBig);
             return true;
         }
         catch (Exception ex)
@@ -303,8 +312,12 @@ public static class ClangSubprocess
     {
         try
         {
-            var req = JsonSerializer.Deserialize<RefRequest>(input, Json);
-            if (req is null || string.IsNullOrEmpty(req.Name)) return 2;
+            RefRequest? req;
+            try { req = JsonSerializer.Deserialize<RefRequest>(input, Json); }
+            catch (JsonException) { return BadRequestExit; }
+            if (req is null || string.IsNullOrEmpty(req.Name)) return BadRequestExit;
+            // Test seam: a deterministic mid-parse crash, so the parent's containment path can be exercised for real.
+            if (Environment.GetEnvironmentVariable("CODECOMPASS_TEST_WORKER_CRASH") == "1") return 3;
 
             var roots = req.Roots.Count > 0 ? (IReadOnlyList<string>)req.Roots : new[] { Directory.GetCurrentDirectory() };
             var candidates = req.Candidates.Count > 0 ? req.Candidates : null;
@@ -317,6 +330,7 @@ public static class ClangSubprocess
                 ParsedTus = res.ParsedTus,
                 MemoryStopped = res.MemoryStopped,
                 TooManyCandidates = res.TooManyCandidates,
+                SkippedTooBig = res.SkippedTooBig,
                 UnresolvedIncludes = res.UnresolvedIncludes.ToList(),
                 Locations = res.Locations.Select(l => new LocDto
                 {
@@ -330,7 +344,11 @@ public static class ClangSubprocess
         }
         catch
         {
-            return 3; // any failure -> nonzero exit; the parent falls back to in-process
+            return 3; // failed DURING the parse: the parent contains it as an incomplete pass (never re-parses in-process)
         }
     }
+
+    /// <summary>Worker exit code for a request it rejected before doing any native work - the one failure the parent
+    /// may safely retry in-process. Every other nonzero exit is contained (see <see cref="ContainedFailure"/>).</summary>
+    public const int BadRequestExit = 2;
 }

@@ -79,6 +79,13 @@ public static class ReferenceMerge
     public static string CSharpInactiveCalleesHeader(int count) =>
         $"-- {count} more callee(s) in #if/#elif-guarded branches, resolved by NAME (may include unrelated same-named declarations; verify with find_definition):";
 
+    /// <summary>The C# twin of an unparsed TU: sources the semantic model couldn't READ (an editor's exclusive lock,
+    /// an access error) are absent from it, so references in them come only from the lexical backfill.</summary>
+    public static string CSharpUnreadableNote(IReadOnlyList<string> unreadableFilesDisplay) =>
+        unreadableFilesDisplay.Count == 0 ? "" :
+        "C# coverage INCOMPLETE - " + FileList(unreadableFilesDisplay) + " could not be read when the semantic model was built, " +
+        "so references in them are shown lexically (they'll be picked up after the next edit/reindex).";
+
     private static string FileList(IReadOnlyList<string> files)
     {
         var shown = string.Join(", ", files.Take(5));
@@ -90,7 +97,8 @@ public static class ReferenceMerge
     /// covered): how many candidate TUs parsed, whether the memory budget stopped it, and which #includes were
     /// unresolved. Each host wraps these bits in its own surface prose (CLI stderr line vs MCP note); sharing
     /// the bits keeps the substance (wording, thresholds, header list) identical across both.</summary>
-    public static List<string> CppCoverageBits(int cppParsed, int cppCandidates, bool memoryStopped, IReadOnlyList<string> unresolvedIncludes, bool tooManyCandidates = false)
+    public static List<string> CppCoverageBits(int cppParsed, int cppCandidates, bool memoryStopped, IReadOnlyList<string> unresolvedIncludes, bool tooManyCandidates = false,
+        int skippedTooBig = 0, bool workerFailed = false)
     {
         var bits = new List<string>();
         // A deliberate broad-symbol short-circuit: the semantic pass was skipped UP FRONT because the candidate
@@ -102,7 +110,9 @@ public static class ReferenceMerge
             bits.Add($"{cppCandidates:N0} candidate C/C++ file(s) exceeded the semantic-parse limit, so references are shown lexically (raise CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES, or set it to 0, to force a semantic parse)");
             return bits;
         }
-        if (cppParsed < cppCandidates) bits.Add($"{cppParsed:N0}/{cppCandidates:N0} candidate C/C++ file(s) parsed");
+        if (workerFailed) bits.Add("the C/C++ parse worker failed or timed out (not a memory stop), so these references are shown lexically (see the log; raise CODECOMPASS_CPP_WORKER_TIMEOUT_SEC if it timed out)");
+        if (skippedTooBig > 0) bits.Add($"{skippedTooBig:N0} candidate C/C++ file(s) over the {ClangCppAnalyzer.MaxTuBytes() / 1048576:N0} MB semantic-parse size cap were searched lexically instead (raise CODECOMPASS_CPP_MAX_TU_MB)");
+        if (cppParsed < cppCandidates && !workerFailed) bits.Add($"{cppParsed:N0}/{cppCandidates:N0} candidate C/C++ file(s) parsed");
         if (memoryStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_SESSION_MEM_MB for the per-session ceiling or CODECOMPASS_CPP_QUERY_MEM_MB for a single query)");
         if (unresolvedIncludes.Count > 0)
         {

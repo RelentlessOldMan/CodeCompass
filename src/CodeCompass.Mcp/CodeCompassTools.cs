@@ -47,7 +47,7 @@ public static class CodeCompassTools
         if (hits.Count == 0)
             return (caseSensitive
                 ? $"No matches for \"{query}\". Tip: retry with caseSensitive:false for a case-insensitive match, or try a shorter/more distinctive substring."
-                : $"No matches for \"{query}\". Tip: try a shorter or more distinctive substring.") + CoverageCaveat();
+                : $"No matches for \"{query}\". Tip: try a shorter or more distinctive substring.") + CoverageCaveat(handles);
 
         bool truncated = hits.Count > maxResults;
         var sb = new StringBuilder();
@@ -101,32 +101,35 @@ public static class CodeCompassTools
     // aren't searched at all, so a match could be in one - disclose it rather than let the agent read a
     // zero as "doesn't exist." Empty when there are no known coverage gaps. (Coverage is recorded in the
     // per-repo meta at build/update time.)
-    private static string CoverageCaveat(bool includeSymbolSkipped = false)
+    // Summed over the roots this query actually searched (primary + linked, after any focus): a gap in a linked
+    // root is as real as one in the project, and a focused-out root's gaps are irrelevant to this answer.
+    // (Index-staleness is disclosed on EVERY result by ServerContext.QueryAll, not only on zeros.)
+    private static string CoverageCaveat(IReadOnlyList<ServerContext.IndexHandle> handles, bool includeSymbolSkipped = false)
     {
-        try
+        int overCap = 0, symbolSkipped = 0;
+        foreach (var h in handles)
         {
-            var meta = CodeCompass.Core.Storage.IndexMetaFile.Read(ServerContext.Root);
-            if (meta is null) return "";
-            var sb = new StringBuilder();
-            if (meta.FilesOverCap > 0)
-                sb.Append($" (Note: {meta.FilesOverCap:N0} file(s) exceed the size cap and are NOT indexed - " +
-                          "a match could be in one; run `codecompass survey` to see them.)");
-            // Symbol-only gap: files that ARE text-searchable but had NO symbols extracted (over the symbol
-            // cap, a numeric data blob, or streamed). A go-to-definition zero could be one of these, so the
-            // symbol tools disclose it - search_code already covers these files, so it doesn't.
-            if (includeSymbolSkipped && meta.FilesSymbolSkipped > 0)
-                sb.Append($" (Note: {meta.FilesSymbolSkipped:N0} large/generated file(s) are text-searchable but " +
-                          "had NO symbols extracted - a definition could be in one; try search_code, or run " +
-                          "`codecompass survey`.)");
-            // Actionable staleness, surfaced where the agent sees it (not only in the central log / doctor):
-            // the index's OUTPUT logic is behind this binary, so a rebuild would change results. Content-version
-            // keyed, so it stays silent across ordinary product-version upgrades (no cry-wolf).
-            var behind = CodeCompass.Core.Storage.IndexMetaFile.BehindNote(meta, ServerContext.Root);
-            if (behind.Length > 0) sb.Append($" (Note: {behind}.)");
-            return sb.ToString();
+            try
+            {
+                var meta = CodeCompass.Core.Storage.IndexMetaFile.Read(h.Root);
+                if (meta is null) continue;
+                overCap += meta.FilesOverCap;
+                symbolSkipped += meta.FilesSymbolSkipped;
+            }
+            catch { /* meta is best-effort; a missing caveat just omits the note */ }
         }
-        catch { /* meta is best-effort; a missing caveat just omits the note */ }
-        return "";
+        var sb = new StringBuilder();
+        if (overCap > 0)
+            sb.Append($" (Note: {overCap:N0} file(s) exceed the size cap and are NOT indexed - " +
+                      "a match could be in one; run `codecompass survey` to see them.)");
+        // Symbol-only gap: files that ARE text-searchable but had NO symbols extracted (over the symbol
+        // cap, a numeric data blob, or streamed). A go-to-definition zero could be one of these, so the
+        // symbol tools disclose it - search_code already covers these files, so it doesn't.
+        if (includeSymbolSkipped && symbolSkipped > 0)
+            sb.Append($" (Note: {symbolSkipped:N0} large/generated file(s) are text-searchable but " +
+                      "had NO symbols extracted - a definition could be in one; try search_code, or run " +
+                      "`codecompass survey`.)");
+        return sb.ToString();
     }
 
     // A whole-word text match in a data/doc file or a build artifact isn't a code reference - shared with
@@ -164,7 +167,7 @@ public static class CodeCompassTools
                 matches.Add((h, s));
         if (matches.Count == 0)
             return $"No definition found for \"{name}\". Tips: search_symbols for a partial or one-off name; " +
-                   "search_code if it may be a macro/#define, a language without symbol support, or spelled differently." + CoverageCaveat(includeSymbolSkipped: true);
+                   "search_code if it may be a macro/#define, a language without symbol support, or spelled differently." + CoverageCaveat(handles, includeSymbolSkipped: true);
 
         var sb = new StringBuilder();
         foreach (var (h, s) in matches)
@@ -240,10 +243,11 @@ public static class CodeCompassTools
         // the lexical fallback iterates each root's text index (linked hits shown as absolute paths).
         int probe = maxResults + 1;
         var hits = new List<(string Line, char Kind)>();
-        // The analyzer spans every root; when a focus is active, keep only hits whose owning root is in scope.
-        foreach (var s in ServerContext.CSharp.FindReferences(name, probe, ServerContext.ShutdownToken))
-            if (InScope(handles, s.Root))
-                hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
+        // The analyzer spans every root (so cross-root references resolve); under a focus only in-scope hits count -
+        // filtered INSIDE the analyzer, before its `probe` cut, so out-of-scope hits can't crowd in-scope ones out.
+        var csharp = ServerContext.CSharp;
+        foreach (var s in csharp.FindReferences(name, probe, ServerContext.ShutdownToken, s => InScope(handles, s.Root)))
+            hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
 
         // C/C++ semantic is TARGETED: a reference to `name` can only be in a file whose text contains it,
         // and the trigram index lists exactly those files. So gather the candidate C/C++ sources across all
@@ -262,8 +266,8 @@ public static class CodeCompassTools
                 if (IsCppSourceFile(rel)) cppCandidates.Add(full);
                 else if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase)) { csCandidates.Add(full); csDisplay[full] = DisplayPath(h, rel); }
             }
-        int cppCand = 0, cppParsed = 0;
-        bool cppMemStopped = false, cppTooBroad = false;
+        int cppCand = 0, cppParsed = 0, cppSkipped = 0;
+        bool cppMemStopped = false, cppTooBroad = false, cppWorkerFailed = false;
         IReadOnlyList<string> cppUnresolved = System.Array.Empty<string>();
         if (cppCandidates.Count > 0)
         {
@@ -272,7 +276,9 @@ public static class CodeCompassTools
             // across broad C/C++ queries (native LLVM allocator never returns pages in-process). Falls back
             // to the in-process analyzer on any subprocess failure, so correctness never regresses.
             ClangCppAnalyzer.CppRefResult r;
-            var cppRoots = handles.Select(h => h.Root).ToList();
+            // Resolution spans ALL roots (primary first - the worker labels root [0]'s hits as the primary's), exactly
+            // like the in-process analyzer; a focus filters the DISPLAYED hits below, never what clang can resolve.
+            var cppRoots = ServerContext.AllRootsForQuery();
             var worker = ClangSubprocess.Enabled ? ClangSubprocess.WorkerExePath() : null;
             if (ClangSubprocess.Enabled && worker is null)
                 CodeCompass.Core.Diagnostics.Log.Global.Warn("clang subprocess enabled but worker exe (CodeCompass.Cli) not found next to the server; using in-process (memory may grow across broad C/C++ queries)");
@@ -285,21 +291,25 @@ public static class CodeCompassTools
             // surface that as a cancellation so the query abandons cleanly rather than returning a partial result.
             ServerContext.ShutdownToken.ThrowIfCancellationRequested();
             foreach (var s in r.Locations)
-                hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
+                if (InScope(handles, s.Root))
+                    hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
             cppCand = r.CandidateTus; cppParsed = r.ParsedTus; cppUnresolved = r.UnresolvedIncludes;
             cppMemStopped = r.MemoryStopped; cppTooBroad = r.TooManyCandidates;
+            cppSkipped = r.SkippedTooBig; cppWorkerFailed = r.WorkerFailed;
         }
         // The C/C++ semantic pass is INCOMPLETE when it stopped for memory, some TUs didn't parse, OR there
         // were unresolved #includes (a TU can PARSE with errors yet resolve nothing, so cppParsed==cppCand
         // does NOT mean "fully resolved"). In any of those cases the lexical layer would otherwise drop every
         // C/C++ file (SemanticCoverage treats them as "covered"), yielding a bare "0" on a symbol with real
         // hits. So when incomplete, let lexical cover C/C++ files too, deduped against the semantic hits.
-        bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppMemStopped, cppParsed, cppCand, cppUnresolved.Count);
+        bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppMemStopped, cppParsed, cppCand, cppUnresolved.Count, cppSkipped, cppWorkerFailed);
         // Roslyn parses with an empty preprocessor set, so it silently misses references in inactive #if/#elif
         // branches. When any candidate .cs uses conditional compilation, treat the C# pass as incomplete so
         // the lexical backfill covers .cs too (deduped) and we disclose it - the C# twin of cppIncomplete.
         var csConditional = SemanticCoverage.CSharpConditionalFiles(csCandidates);
-        bool csharpIncomplete = csConditional.Count > 0;
+        // .cs files the semantic model couldn't read are absent from it - incomplete, so backfill + name them.
+        var csUnreadable = csharp.UnreadableFiles;
+        bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0;
         // Per-query comment/string classifier so the lexical backfill skips <see cref> doc-comment / string-literal
         // hits in covered-language files (the v1.0.212 precision regression); reads + caches each file once.
         var spanFilter = new LexicalSpanFilter();
@@ -346,7 +356,7 @@ public static class CodeCompassTools
         string cppNote = "";
         if (cppCandidates.Count > 0)
         {
-            var bits = ReferenceMerge.CppCoverageBits(cppParsed, cppCand, cppMemStopped, cppUnresolved, cppTooBroad);
+            var bits = ReferenceMerge.CppCoverageBits(cppParsed, cppCand, cppMemStopped, cppUnresolved, cppTooBroad, cppSkipped, cppWorkerFailed);
             if (bits.Count > 0)
                 cppNote = " (Note: C/C++ coverage INCOMPLETE - " + string.Join("; ", bits) +
                           ". Missing headers aren't in the tree (no -I/compile DB can fix that), so a low or zero " +
@@ -357,10 +367,12 @@ public static class CodeCompassTools
         }
         // C# conditional-compilation disclosure: Roslyn can't see inactive #if/#elif branches, so a semantic
         // count may miss #if-guarded references (shown lexically where the backfill found them).
-        string csNote = csharpIncomplete
+        string csNote = csConditional.Count > 0
             ? " (Note: " + ReferenceMerge.CSharpConditionalNote(
                   csConditional.Select(f => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f)).ToList()) + ")"
             : "";
+        if (csUnreadable.Count > 0)
+            csNote += " (Note: " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(System.IO.Path.GetFileName).ToList()!) + ")";
         if (!indexable)
             csNote += $" (Note: \"{name}\" is under {MinIndexedQuery} characters, too short for the text index - only C# " +
                       "semantic references were searched; C/C++ and other languages were NOT. search_code with " +
@@ -368,7 +380,7 @@ public static class CodeCompassTools
 
         if (hits.Count == 0)
             return $"No references found for \"{name}\". Tip: try search_code for a raw text search " +
-                   "(it may not resolve as a symbol here), or check the exact spelling/case." + cppNote + csNote + CoverageCaveat();
+                   "(it may not resolve as a symbol here), or check the exact spelling/case." + cppNote + csNote + CoverageCaveat(handles);
 
         bool truncated = hits.Count > maxResults;
         var shown = hits.Take(maxResults).ToList();
@@ -399,8 +411,7 @@ public static class CodeCompassTools
         // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
         // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
         // The analyzer spans every root; under an active focus keep only callees whose DEFINITION is in scope.
-        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1, ServerContext.ShutdownToken)
-            .Where(c => InScope(handles, c.Root)).ToList();
+        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1, ServerContext.ShutdownToken, c => InScope(handles, c.Root)).ToList();
         // Conditional-compilation handling (see find_references): FindCallees walks the method body via Roslyn,
         // which parses with an empty preprocessor set and can't see inactive #if/#elif branches - so a call
         // guarded by conditional compilation is SILENTLY missing (the forward/reverse asymmetry: refs finds the
@@ -420,8 +431,7 @@ public static class CodeCompassTools
                 }
         var calleeCond = SemanticCoverage.CSharpConditionalFiles(calleeCsCands);
         var recovered = calleeCond.Count > 0
-            ? ServerContext.CSharp.FindCalleesInInactiveBranches(name, maxResults + 1, ServerContext.ShutdownToken)
-                .Where(r => InScope(handles, r.Root)).ToList()
+            ? ServerContext.CSharp.FindCalleesInInactiveBranches(name, maxResults + 1, ServerContext.ShutdownToken, r => InScope(handles, r.Root)).ToList()
             : (IReadOnlyList<SemanticLocation>)System.Array.Empty<SemanticLocation>();
         // Dedup recovered vs the FULL semantic list (incl. any truncated overflow row), so a call present in both
         // an active and an inactive branch is never shown twice - and the disclosure counts what's actually shown.
@@ -446,7 +456,7 @@ public static class CodeCompassTools
                 ? $"\"{name}\" is defined here, but calls no in-repo methods - it may call only " +
                   "framework/external code, or it isn't C# (callees are semantic for C# only)."
                 : $"No symbol named \"{name}\" is indexed - check the exact spelling/case, or it may be a " +
-                  "macro or an unsupported language. (find_callees resolves C# only.)") + calleeCsNote + CoverageCaveat();
+                  "macro or an unsupported language. (find_callees resolves C# only.)") + calleeCsNote + CoverageCaveat(handles);
 
         bool truncated = callees.Count > maxResults;
         var sb = new StringBuilder();
@@ -481,7 +491,7 @@ public static class CodeCompassTools
         }
         if (matches.Count == 0)
             return $"No symbols matching \"{query}\". Tip: try search_code for a text search " +
-                   "(it may not be a captured symbol - e.g. a macro, or an unsupported language)." + CoverageCaveat(includeSymbolSkipped: true);
+                   "(it may not be a captured symbol - e.g. a macro, or an unsupported language)." + CoverageCaveat(handles, includeSymbolSkipped: true);
 
         bool truncated = matches.Count > maxResults;
         var sb = new StringBuilder();
@@ -570,10 +580,15 @@ public static class CodeCompassTools
                 matched = matched.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 ServerContext.SetFocus(matched);
                 int excluded = universe.Count - matched.Count;
-                return excluded > 0
+                var reply = excluded > 0
                     ? $"Focused on {matched.Count} of {universe.Count} root(s): {string.Join(", ", matched)}. " +
                       $"{excluded} root(s) excluded from searches until you clear focus (action=focus, no path)."
                     : $"Focus set to all {universe.Count} root(s) - nothing is excluded (clear with action=focus, no path).";
+                // A focused root without an index would silently contribute nothing - say so now, not after a zero.
+                foreach (var root in matched.Where(r => !RepositoryIndexer.HasIndex(r)))
+                    reply += $"\nWARNING: {root} is not indexed - it will be ABSENT from scoped searches until you build it: " +
+                             $"codecompass index \"{root}\"";
+                return reply;
             }
             case "add":
             {

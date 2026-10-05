@@ -940,6 +940,17 @@ public static class RepositoryIndexer
         return ignore.IsIgnoredFile(parts[^1], 0);
     }
 
+    /// <summary>Cheap probe (file existence only, nothing opened): does <paramref name="root"/> have an index?</summary>
+    public static bool HasIndex(string root)
+    {
+        try
+        {
+            var dir = IndexStore.CacheDirPath(Path.GetFullPath(root));
+            return Directory.Exists(dir) && SegmentedIndex.Exists(dir) && SegmentedSymbolIndex.Exists(dir);
+        }
+        catch { return false; }
+    }
+
     public static bool TryLoad(string root, out SegmentedIndex text, out SegmentedSymbolIndex symbols)
     {
         root = Path.GetFullPath(root);

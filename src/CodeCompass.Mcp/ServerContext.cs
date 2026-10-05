@@ -297,6 +297,24 @@ public static class ServerContext
             _eventsLost = false;
     }
 
+    // Actionable index staleness on EVERY result (not only on a zero - an older indexer under-reports non-empty answers
+    // too): a searched root whose index was built by an indexer whose OUTPUT logic is behind this binary. Keyed on the
+    // content version, so it stays silent across ordinary product-version upgrades (no cry-wolf). Mirrors the CLI.
+    private static string StalenessNote(IReadOnlyList<IndexHandle> handles)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var h in handles)
+        {
+            try
+            {
+                var behind = IndexMetaFile.BehindNote(IndexMetaFile.Read(h.Root), h.Root);
+                if (behind.Length > 0) sb.Append($"\n(Note: {behind}.)");
+            }
+            catch { /* best-effort */ }
+        }
+        return sb.ToString();
+    }
+
     // Appended to every query result while _eventsLost is set (see there).
     private static string EventsLostNote() => _eventsLost
         ? $"\n(Note: the file watcher lost change events on this network/large workspace and an automatic full " +
@@ -539,11 +557,26 @@ public static class ServerContext
     // or when the focus happens to select every root (nothing excluded). Called from inside the read lock.
     private static string FocusDisclosure(int totalRoots, IReadOnlyList<IndexHandle> inScope)
     {
-        if (_focus is null || inScope.Count >= totalRoots) return "";
-        var names = string.Join(", ", inScope.Select(h => Path.GetFileName(NormalizeRoot(h.Root))));
+        var focus = _focus;
+        if (focus is null) return "";
+        // A focused root with no loaded index (linked but never built, or deferred as too large) is NOT searched - say
+        // so, or its absence reads as a deliberate exclusion and a zero as "not in that repo".
+        int notLoaded = Math.Max(0, focus.Count - inScope.Count);
         int excluded = totalRoots - inScope.Count;
-        return $"\n(Scoped to {names}; {excluded} other root(s) excluded from this search. " +
-               "Clear with manage_links action=focus.)";
+        if (excluded <= 0 && notLoaded == 0) return "";
+        var sb = new System.Text.StringBuilder($"\n(Scoped to {RootNames(inScope.Select(h => h.Root))}");
+        if (excluded > 0) sb.Append($"; {excluded} other root(s) excluded from this search");
+        if (notLoaded > 0) sb.Append($"; {notLoaded} focused root(s) have no index yet and were NOT searched - build with `codecompass index \"<root>\"`");
+        return sb.Append(". Clear with manage_links action=focus.)").ToString();
+    }
+
+    // Folder names, unless two share one (C:\a\src and D:\b\src) - then full paths, so the scope is unambiguous.
+    internal static string RootNames(IEnumerable<string> roots)
+    {
+        var norm = roots.Select(NormalizeRoot).ToList();
+        var names = norm.Select(r => Path.GetFileName(r)).ToList();
+        bool clash = names.Distinct(StringComparer.OrdinalIgnoreCase).Count() < names.Count;
+        return string.Join(", ", clash ? norm : names);
     }
 
     /// <summary>
@@ -575,7 +608,7 @@ public static class ServerContext
                 // return a bare "no match" over nothing, which would read as "the symbol doesn't exist."
                 return "Focus is set, but none of the focused root(s) are indexed/loaded. Clear it with " +
                        "manage_links action=focus (no path), or build the focused root's index.";
-            string focusNote = FocusDisclosure(all.Count, handles) + EventsLostNote();
+            string focusNote = FocusDisclosure(all.Count, handles) + EventsLostNote() + StalenessNote(handles);
 
             // Every tool funnels through here. An unexpected throw inside op (a clang edge case, a corrupt
             // segment surfacing mid-read, an OOM in a semantic pass) would otherwise escape to the MCP framework
@@ -592,7 +625,7 @@ public static class ServerContext
             catch (Exception ex)
             {
                 try { Log.Global.Warn($"query op failed: {ex.GetType().Name}: {ex.Message}"); } catch { }
-                return "The query failed unexpectedly. It has been logged; try a narrower query, and if it persists rebuild the index with `codecompass index`.";
+                return $"The query failed unexpectedly. It has been logged; try a narrower query, and if it persists rebuild the index with: codecompass index \"{Root}\"";
             }
         }
         finally { Rw.ExitReadLock(); }
@@ -729,6 +762,10 @@ public static class ServerContext
     {
         get { lock (AnalyzerGate) { TouchSemantic(); return _cpp ??= new ClangCppAnalyzer(AllRootsSnapshot()); } }
     }
+
+    /// <summary>Every root (primary first), regardless of focus - what the semantic layers RESOLVE against. Call from
+    /// inside a query op (read lock held).</summary>
+    internal static IReadOnlyList<string> AllRootsForQuery() => AllRootsSnapshot();
 
     // The project root first (primary, for path display) then every linked root. Call under an Rw read/write
     // lock (the getters hold the query read lock) so _linked isn't swapped mid-read.

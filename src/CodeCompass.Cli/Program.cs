@@ -1058,7 +1058,8 @@ static int CmdRefs(string[] args)
 
     // Precise semantic references (comments/strings excluded). Note: from the CLI these
     // build fresh each run; the MCP server keeps them warm across calls.
-    var cs = new RoslynCSharpAnalyzer(root).FindReferences(name);
+    var csAnalyzer = new RoslynCSharpAnalyzer(root);
+    var cs = csAnalyzer.FindReferences(name);
     foreach (var s in cs)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
 
@@ -1118,7 +1119,8 @@ static int CmdRefs(string[] args)
     // Single source of truth (shared with the MCP path) for "the C/C++ pass was incomplete, so backfill
     // lexical rather than treat these files as covered" - covers memory-stop, unparsed TUs, AND unresolved
     // includes (a TU can PARSE with errors yet resolve nothing).
-    bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppRes.MemoryStopped, cppRes.ParsedTus, cppRes.CandidateTus, cppRes.UnresolvedIncludes.Count);
+    bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppRes.MemoryStopped, cppRes.ParsedTus, cppRes.CandidateTus,
+        cppRes.UnresolvedIncludes.Count, cppRes.SkippedTooBig, cppRes.WorkerFailed);
     // The C# semantic pass (Roslyn, empty preprocessor set) can't see code in inactive #if/#elif branches, so
     // it SILENTLY misses references guarded by conditional compilation. When any candidate .cs uses it, treat
     // the C# pass as incomplete: backfill lexical for .cs too (deduped) and disclose - the C# twin of the
@@ -1126,7 +1128,8 @@ static int CmdRefs(string[] args)
     var csConditional = csCandidates is not null
         ? SemanticCoverage.CSharpConditionalFiles(csCandidates)
         : (IReadOnlyList<string>)System.Array.Empty<string>();
-    bool csharpIncomplete = csConditional.Count > 0;
+    var csUnreadable = csAnalyzer.UnreadableFiles; // absent from the semantic model -> incomplete, backfill + name them
+    bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0;
     // Classifies comment/string spans in covered-language candidate files so the backfill below skips hits that
     // live in them (an <see cref> doc-comment or a "name" in a string literal is not a reference). One per query.
     var spanFilter = new LexicalSpanFilter();
@@ -1163,9 +1166,10 @@ static int CmdRefs(string[] args)
     // correctness QUALIFIER on the answer (not a progress diagnostic), so it goes to STDOUT alongside the hits
     // - a caller doing `refs ... > out.txt` must not silently lose the disclosure. Matches MCP, which embeds
     // the same note in its returned result.
-    if ((cppCandidates?.Count ?? 0) > 0)
+    if ((cppCandidates?.Count ?? 0) > 0 || cppRes.CandidateTus > 0 || cppRes.SkippedTooBig > 0)
     {
-        var bits = ReferenceMerge.CppCoverageBits(cppRes.ParsedTus, cppRes.CandidateTus, cppRes.MemoryStopped, cppRes.UnresolvedIncludes, cppRes.TooManyCandidates);
+        var bits = ReferenceMerge.CppCoverageBits(cppRes.ParsedTus, cppRes.CandidateTus, cppRes.MemoryStopped, cppRes.UnresolvedIncludes,
+            cppRes.TooManyCandidates, cppRes.SkippedTooBig, cppRes.WorkerFailed);
         if (bits.Count > 0)
             Console.Out.WriteLine("-- C/C++ coverage INCOMPLETE: " + string.Join("; ", bits) +
                 " (missing headers aren't in the tree - a low/zero C/C++ count may mean 'couldn't parse', not 'no references').");
@@ -1173,9 +1177,11 @@ static int CmdRefs(string[] args)
     // C# conditional-compilation disclosure: Roslyn can't see inactive #if/#elif branches, so a semantic
     // count may miss #if-guarded call sites (shown lexically where the backfill found them). Fires to STDOUT
     // alongside the hits, same as the C/C++ caveat, so a `refs > out.txt` keeps the qualifier.
-    if (csharpIncomplete)
+    if (csConditional.Count > 0)
         Console.Out.WriteLine("-- " + ReferenceMerge.CSharpConditionalNote(
             csConditional.Select(f => Path.GetRelativePath(root, f)).ToList()));
+    if (csUnreadable.Count > 0)
+        Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(f => Path.GetRelativePath(root, f)).ToList()));
 
     Console.Error.WriteLine($"-- {cs.Count} C# + {cpp.Count} C/C++ semantic + {lexical} lexical reference(s)");
     WarnIfIndexerBehind(root);

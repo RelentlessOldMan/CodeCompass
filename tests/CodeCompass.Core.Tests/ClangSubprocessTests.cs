@@ -176,8 +176,9 @@ public class ClangSubprocessTests
     public void ContainedFailure_NoCandidates_StillIncomplete()
     {
         var r = ClangSubprocess.ContainedFailure(null, "worker died");
-        Assert.True(r.MemoryStopped);
-        Assert.True(SemanticCoverage.IsCppPassIncomplete(r.MemoryStopped, r.ParsedTus, r.CandidateTus, 0));
+        Assert.False(r.MemoryStopped); // not an OOM signature: a worker failure, not a memory stop (review P2-7)
+        Assert.True(r.WorkerFailed);
+        Assert.True(SemanticCoverage.IsCppPassIncomplete(r.MemoryStopped, r.ParsedTus, r.CandidateTus, 0, 0, r.WorkerFailed));
     }
 
     [Theory]
@@ -192,7 +193,7 @@ public class ClangSubprocessTests
 
     // End-to-end: a REAL worker that exits nonzero must be CONTAINED (ok==true, incomplete result), NOT
     // reported as false (which would send the caller into the crashing in-process retry). An empty name forces
-    // the worker's nonzero exit deterministically without needing to actually OOM libclang. Soft-skips if the
+    // the worker's nonzero exit deterministically (its test seam) without needing to actually OOM libclang. Soft-skips if the
     // CLI exe isn't built (bare `dotnet test`); the release gate builds it and runs this for real.
     [Fact]
     public void TryFindReferences_WorkerNonZeroExit_ContainedAsIncomplete()
@@ -200,12 +201,24 @@ public class ClangSubprocessTests
         var cli = FindCliExe();
         if (cli is null) return;
         var cands = new[] { "x.c", "y.c", "z.c" };
-        var ok = ClangSubprocess.TryFindReferences(cli, new[] { Path.GetTempPath() }, "", cands, 200, 60, out var r);
+        ClangCppAnalyzer.CppRefResult r;
+        bool ok;
+        var old = Environment.GetEnvironmentVariable("CODECOMPASS_TEST_WORKER_CRASH");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_TEST_WORKER_CRASH", "1"); // inherited by the child
+            ok = ClangSubprocess.TryFindReferences(cli, new[] { Path.GetTempPath() }, "sym", cands, 200, 60, out r);
+        }
+        finally { Environment.SetEnvironmentVariable("CODECOMPASS_TEST_WORKER_CRASH", old); }
         Assert.True(ok, "a worker crash must be contained (return true with an incomplete result), not fall through to in-process");
         Assert.Empty(r.Locations);
         Assert.Equal(0, r.ParsedTus);
         Assert.Equal(cands.Length, r.CandidateTus);
-        Assert.True(SemanticCoverage.IsCppPassIncomplete(r.MemoryStopped, r.ParsedTus, r.CandidateTus, 0));
+        Assert.True(r.WorkerFailed);
+        Assert.True(SemanticCoverage.IsCppPassIncomplete(r.MemoryStopped, r.ParsedTus, r.CandidateTus, 0, 0, r.WorkerFailed));
+
+        // A request the worker REJECTS (no native work happened) is the one failure that may safely run in-process.
+        Assert.False(ClangSubprocess.TryFindReferences(cli, new[] { Path.GetTempPath() }, "", cands, 200, 60, out _));
     }
 
     private static string? FindCliExe()

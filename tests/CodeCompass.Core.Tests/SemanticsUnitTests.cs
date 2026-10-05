@@ -118,11 +118,12 @@ public class SemanticsUnitTests
     }
 
     [Fact]
-    public void RunWorkerCore_MalformedJson_ReturnsThree()
+    public void RunWorkerCore_MalformedJson_IsABadRequest()
     {
-        // Non-JSON hits the catch-all -> exit 3 (worker failure), NOT the code-2 bad-request path.
+        // Non-JSON is rejected before any native work, so it's the RETRYABLE bad-request exit - the parent may run it
+        // in-process. (Exit 3 is reserved for failures DURING a parse, which the parent contains instead.)
         using var input = new MemoryStream(Encoding.UTF8.GetBytes("this is not json {"));
         using var output = new MemoryStream();
-        Assert.Equal(3, ClangSubprocess.RunWorkerCore(input, output));
+        Assert.Equal(ClangSubprocess.BadRequestExit, ClangSubprocess.RunWorkerCore(input, output));
     }
 }

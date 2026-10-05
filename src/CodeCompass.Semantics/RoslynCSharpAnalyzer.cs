@@ -62,21 +62,32 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     /// <summary>Definitions of <paramref name="name"/> declared in the C# sources.</summary>
     public IReadOnlyList<SemanticLocation> FindDefinitions(string name, System.Threading.CancellationToken ct = default)
     {
-        var (_, project) = EnsureBuilt();
+        var (_, project) = EnsureBuilt(ct);
         var result = new List<SemanticLocation>();
         foreach (var symbol in FindDeclarations(project, name, ct))
+        {
+            ct.ThrowIfCancellationRequested();
             foreach (var loc in symbol.Locations)
                 if (loc.IsInSource)
                     result.Add(ToLocation(loc));
-        return result;
+        }
+        return Canonical(result, int.MaxValue, null);
     }
 
-    /// <summary>True (semantic) references to any C# symbol named <paramref name="name"/>.</summary>
-    public IReadOnlyList<SemanticLocation> FindReferences(string name, int max = 200, System.Threading.CancellationToken ct = default)
+    /// <summary>C# sources that could not be read when the workspace was built (an editor's exclusive lock, an
+    /// access error). They are ABSENT from the compilation, so a reference in one is invisible to the semantic
+    /// pass - callers must treat the pass as incomplete (lexical backfill) and name them.</summary>
+    public IReadOnlyList<string> UnreadableFiles { get { lock (_gate) return _unreadable.ToList(); } }
+    private readonly List<string> _unreadable = new();
+
+    /// <summary>True (semantic) references to any C# symbol named <paramref name="name"/>. <paramref name="include"/>
+    /// (optional) keeps only hits it accepts - applied BEFORE the <paramref name="max"/> cut, so a session focus
+    /// can't have its in-scope hits crowded out by out-of-scope ones.</summary>
+    public IReadOnlyList<SemanticLocation> FindReferences(string name, int max = 200, System.Threading.CancellationToken ct = default,
+        Func<SemanticLocation, bool>? include = null)
     {
-        var (solution, project) = EnsureBuilt();
-        var result = new List<SemanticLocation>();
-        var seen = new HashSet<(string, int, int)>();
+        var (solution, project) = EnsureBuilt(ct);
+        var all = new List<SemanticLocation>();
 
         foreach (var symbol in FindDeclarations(project, name, ct))
         {
@@ -90,16 +101,25 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                     if (IsInDocComment(loc)) continue; // <see cref="X"/> resolves as a real reference, but
                                                        // it lives in a comment - excluded so the "ignores
                                                        // comments" contract actually holds.
-                    var s = ToLocation(loc);
-                    if (seen.Add((s.RelativePath, s.Line, s.Column)))
-                    {
-                        result.Add(s);
-                        if (result.Count >= max) return result;
-                    }
+                    all.Add(ToLocation(loc));
                 }
             }
         }
-        return result;
+        return Canonical(all, max, include);
+    }
+
+    // DETERMINISTIC result: SymbolFinder's enumeration order is not contractual (it works on documents in parallel),
+    // so dedup and sort by (root, path, line, column) BEFORE truncating - otherwise identical queries could return
+    // different subsets at the cap.
+    private static List<SemanticLocation> Canonical(List<SemanticLocation> all, int max, Func<SemanticLocation, bool>? include, bool sort = true)
+    {
+        var seen = new HashSet<(string, string, int, int)>();
+        var kept = all.Where(s => (include is null || include(s)) && seen.Add((s.Root, s.RelativePath, s.Line, s.Column)));
+        if (sort)
+            kept = kept.OrderBy(s => s.Root, StringComparer.Ordinal)
+                       .ThenBy(s => s.RelativePath, StringComparer.Ordinal)
+                       .ThenBy(s => s.Line).ThenBy(s => s.Column);
+        return kept.Take(max).ToList();
     }
 
     /// <summary>The in-repository methods/types that the C# method(s) named <paramref name="name"/>
@@ -107,15 +127,17 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     /// framework/external calls are omitted. That resolution is exactly what a syntactic call graph
     /// cannot do (it returns every same-named overload in the repo); here each result is the callee's
     /// own definition, so an agent can jump straight to the next hop without reading the body.</summary>
-    public IReadOnlyList<SemanticLocation> FindCallees(string name, int max = 100, System.Threading.CancellationToken ct = default)
+    public IReadOnlyList<SemanticLocation> FindCallees(string name, int max = 100, System.Threading.CancellationToken ct = default,
+        Func<SemanticLocation, bool>? include = null)
     {
-        var (_, project) = EnsureBuilt();
+        var (_, project) = EnsureBuilt(ct);
         var result = new List<SemanticLocation>();
         var compilation = project.GetCompilationAsync(ct).GetAwaiter().GetResult();
         if (compilation is null) return result;
 
-        var seen = new HashSet<(string, int, int)>();
-        foreach (var symbol in FindDeclarations(project, name, ct))
+        // Body order is kept (it's the call order an agent walks); only the order of same-named declarations is
+        // unstable across runs, so visit those in a canonical order.
+        foreach (var symbol in FindDeclarations(project, name, ct).OrderBy(DeclKey, StringComparer.Ordinal))
         {
             ct.ThrowIfCancellationRequested(); // bail promptly on shutdown/re-point between symbols
             if (symbol is not IMethodSymbol) continue;
@@ -133,16 +155,19 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                     {
                         if (!loc.IsInSource) continue; // in-repo only - drops BCL/framework calls (the noise filter)
                         var s = ToLocation(loc);
-                        if (seen.Add((s.RelativePath, s.Line, s.Column)))
-                        {
-                            result.Add(s with { LineText = string.IsNullOrEmpty(s.LineText) ? target.Name : $"{target.Name}  {s.LineText}" });
-                            if (result.Count >= max) return result;
-                        }
+                        result.Add(s with { LineText = string.IsNullOrEmpty(s.LineText) ? target.Name : $"{target.Name}  {s.LineText}" });
                     }
                 }
             }
         }
-        return result;
+        return Canonical(result, max, include, sort: false);
+    }
+
+    // A stable key for a declaration: its first source location (path, then position).
+    private static string DeclKey(ISymbol s)
+    {
+        var loc = s.Locations.FirstOrDefault(l => l.IsInSource);
+        return loc is null ? s.ToDisplayString() : $"{loc.SourceTree?.FilePath}\u0001{loc.SourceSpan.Start:D10}";
     }
 
     /// <summary>Callees that <see cref="FindCallees"/> CANNOT see because they sit inside inactive
@@ -154,9 +179,10 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     /// binding (disabled text can't be bound), so it may surface more than one same-named declaration - callers
     /// MUST label these as "resolved by name" and segregate them from the authoritative semantic list. Empty
     /// when the method has no disabled regions, so callers can gate on conditional compilation and skip the work.</summary>
-    public IReadOnlyList<SemanticLocation> FindCalleesInInactiveBranches(string name, int max = 100, System.Threading.CancellationToken ct = default)
+    public IReadOnlyList<SemanticLocation> FindCalleesInInactiveBranches(string name, int max = 100, System.Threading.CancellationToken ct = default,
+        Func<SemanticLocation, bool>? include = null)
     {
-        var (_, project) = EnsureBuilt();
+        var (_, project) = EnsureBuilt(ct);
         var result = new List<SemanticLocation>();
 
         // 1. Harvest call-like names from the DISABLED regions of each method named `name`.
@@ -193,7 +219,6 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
 
         // 2. Resolve each name to its in-repo definition(s). By name only - disabled text can't be semantically
         // bound - so overloads/same-named decls across the repo all surface; that's the labeled caveat.
-        var seen = new HashSet<(string, int, int)>();
         foreach (var n in names)
         {
             ct.ThrowIfCancellationRequested();
@@ -204,15 +229,11 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                 {
                     if (!loc.IsInSource) continue; // in-repo only, same noise filter as FindCallees
                     var s = ToLocation(loc);
-                    if (seen.Add((s.RelativePath, s.Line, s.Column)))
-                    {
-                        result.Add(s with { LineText = string.IsNullOrEmpty(s.LineText) ? sym.Name : $"{sym.Name}  {s.LineText}" });
-                        if (result.Count >= max) return result;
-                    }
+                    result.Add(s with { LineText = string.IsNullOrEmpty(s.LineText) ? sym.Name : $"{sym.Name}  {s.LineText}" });
                 }
             }
         }
-        return result;
+        return Canonical(result, max, include);
     }
 
     // The invoked simple name of a call expression: `Foo()` -> Foo, `x.Foo()` -> Foo. Anything else (e.g. a
@@ -249,7 +270,10 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     private static IEnumerable<ISymbol> FindDeclarations(Project project, string name, System.Threading.CancellationToken ct = default) =>
         SymbolFinder.FindDeclarationsAsync(project, name, ignoreCase: false, ct).GetAwaiter().GetResult();
 
-    private (Solution Solution, Project Project) EnsureBuilt()
+    // Cancellable: the build walks and reads every .cs under every root (minutes over a share) while the caller holds
+    // the server's read lock - a re-point must be able to stop it. A cancelled build installs nothing (the solution is
+    // only assigned at the end), so the next call starts over cleanly.
+    private (Solution Solution, Project Project) EnsureBuilt(System.Threading.CancellationToken ct = default)
     {
         lock (_gate)
         {
@@ -265,15 +289,17 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                 .WithCompilationOptions(new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
             var solution = workspace.CurrentSolution.AddProject(info);
+            var unreadable = new List<string>();
 
             var walker = new FileWalker(new IgnoreRules());
             foreach (var root in _roots)
             foreach (var file in walker.Walk(root))
             {
                 if (!file.RelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
+                if (ct.IsCancellationRequested) { workspace.Dispose(); ct.ThrowIfCancellationRequested(); }
                 string text;
                 try { text = File.ReadAllText(file.FullPath); }
-                catch { continue; }
+                catch { unreadable.Add(file.FullPath); continue; } // disclosed via UnreadableFiles, never silently "covered"
 
                 // Key documents by ABSOLUTE path so two roots with the same relative path (e.g. both have
                 // src/App.cs) don't collide; ToLocation maps the path back to its owning root for display.
@@ -289,6 +315,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _workspace = workspace;
             _solution = solution;
             _projectId = projectId;
+            _unreadable.Clear();
+            _unreadable.AddRange(unreadable);
             return (solution, solution.GetProject(projectId)!);
         }
     }
