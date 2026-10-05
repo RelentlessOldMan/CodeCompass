@@ -97,7 +97,67 @@ public class LedgerTrustTests
         }
     }
 
+    // Files at/over the streaming threshold (128 MB) take a separate read path in both build and update; the same trust
+    // decision must apply there.
+    private static void WriteLarge(string path, string tail, byte fill, long mtimeTicks)
+    {
+        var chunk = new byte[1 << 20];
+        Array.Fill(chunk, fill);
+        if (fill != 0) for (int i = 99; i < chunk.Length; i += 100) chunk[i] = (byte)'\n'; // text: give it lines
+        using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+        {
+            long need = LargeFileIndexer.StreamThresholdBytes + (2 << 20);
+            for (long w = 0; w < need; w += chunk.Length) fs.Write(chunk, 0, chunk.Length);
+            var t = System.Text.Encoding.ASCII.GetBytes("\n" + tail + "\n");
+            fs.Write(t, 0, t.Length);
+        }
+        File.SetLastWriteTimeUtc(path, new DateTime(mtimeTicks, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void StreamedLargeFile_SameTickEdit_IsReindexedByUpdate()
+    {
+        using var repo = new TempRepo();
+        var path = repo.FullPath("big.txt");
+        long tick = WholeSecond(DateTime.UtcNow.AddSeconds(-30));
+        WriteLarge(path, "token_big_one", (byte)'a', tick);
+        BuildIndex(repo.Root);
+
+        WriteLarge(path, "token_big_two", (byte)'a', tick); // same size, same coarse tick
+        var (t, s, _) = RepositoryIndexer.Update(repo.Root);
+        t.Dispose(); s.Dispose();
+
+        Assert.True(Finds(repo.Root, "token_big_two"));
+    }
+
+    [Fact]
+    public void StreamedLargeBinaryFile_IsRecordedAsBinary_WithTheSameTrustRule()
+    {
+        using var repo = new TempRepo();
+        var path = repo.FullPath("blob.txt"); // a text extension, binary CONTENT: detection by content, not by name
+        long tick = WholeSecond(DateTime.UtcNow.AddSeconds(-30));
+        WriteLarge(path, "x", 0, tick); // NUL bytes: binary
+        BuildIndex(repo.Root);
+        var (t, s, _) = RepositoryIndexer.Update(repo.Root); // recent coarse entry: re-read, still binary
+        t.Dispose(); s.Dispose();
+
+        Assert.True(DiskSnapshot.TryOpen(IndexStore.CacheDirPath(repo.Root), out var snap));
+        using (snap)
+        {
+            Assert.True(snap.TryGetValue("blob.txt", out var st));
+            Assert.True(st.IsBinary);
+            Assert.Equal(0, st.MTimeTicks); // recent + coarse: recorded as unknown
+        }
+    }
+
     // ---- the decision itself ----
+
+    [Fact]
+    public void RecordedMTime_UnreadablePath_IsUnknown()
+    {
+        long recent = DateTime.UtcNow.AddMinutes(-5).Ticks | 1234567;
+        Assert.Equal(0, LedgerTrust.RecordedMTime("bad\0path.txt", 1, recent, DateTime.UtcNow.Ticks));
+    }
 
     [Fact]
     public void RecordedMTime_OldFile_IsTrustedWithoutAnotherStat()
