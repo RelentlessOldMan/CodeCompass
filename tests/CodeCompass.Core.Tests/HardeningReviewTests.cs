@@ -125,9 +125,16 @@ public class HardeningReviewTests
             idx.Flush();
             idx.Dispose();
 
-            // Overwrite the tombstone file with a negative segment count.
-            File.WriteAllBytes(Path.Combine(dir, "symbols.tombstones"), BitConverter.GetBytes(-1));
+            // The authoritative tombstones ride in the manifest ("#T <base64>"): corrupt THAT copy's count.
+            var manifest = Path.Combine(dir, "symbols.manifest");
+            var lines = File.ReadAllLines(manifest)
+                .Select(l => l.StartsWith("#T ") ? "#T " + Convert.ToBase64String(BitConverter.GetBytes(-1)) : l).ToArray();
+            File.WriteAllLines(manifest, lines);
+            Assert.Throws<InvalidDataException>(() => SegmentedSymbolIndex.Open(dir));
 
+            // A manifest from before tombstones moved into it falls back to the separate file - same guard there.
+            File.WriteAllLines(manifest, lines.Where(l => !l.StartsWith("#T ")));
+            File.WriteAllBytes(Path.Combine(dir, "symbols.tombstones"), BitConverter.GetBytes(-1));
             Assert.Throws<InvalidDataException>(() => SegmentedSymbolIndex.Open(dir));
         }
         finally { try { Directory.Delete(dir, true); } catch { } }

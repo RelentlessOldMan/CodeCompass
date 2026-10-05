@@ -26,6 +26,10 @@ internal static class Varint
             if (offset >= data.Length) throw new InvalidDataException("varint runs past end of buffer (truncated postings)");
             if (shift > 28) throw new InvalidDataException("varint exceeds 32 bits (corrupt postings)"); // >5 bytes
             byte b = data[offset++];
+            // The 5th byte has room for only 4 payload bits (7*4 = 28 already used): anything above them - or a
+            // continuation bit - would be silently shifted out, decoding a corrupt list to wrong-but-plausible doc ids
+            // (which can DROP real candidates) instead of failing as corrupt.
+            if (shift == 28 && (b & 0xF0) != 0) throw new InvalidDataException("varint exceeds 32 bits (corrupt postings)");
             result |= (uint)(b & 0x7F) << shift;
             if ((b & 0x80) == 0) break;
             shift += 7;

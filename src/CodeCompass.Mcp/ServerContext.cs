@@ -187,6 +187,7 @@ public static class ServerContext
             _focus = null; // a focus names the PREVIOUS project's roots - stale after a re-point; start unscoped
             _loadedGen = null;
             _eventsLost = false;
+            _statusOverride = null;
             _epoch++; // re-point: any in-flight build for the previous root is now stale (discarded at Swap)
         }
         finally { Rw.ExitWriteLock(); }
@@ -727,7 +728,11 @@ public static class ServerContext
         finally { Rw.ExitReadLock(); }
     }
 
-    private static string StatusMessage() => _state == IndexState.Building ? BuildingMessage() : CliBuildMessage();
+    // Why the index can't be served right now when it's neither building nor simply absent (see EnsureStartedLocked).
+    private static volatile string? _statusOverride;
+
+    private static string StatusMessage() =>
+        _state == IndexState.Building ? BuildingMessage() : _statusOverride ?? CliBuildMessage();
 
     // Publish the current state to the per-repo status file so `codecompass statusline` can show it in
     // Claude Code's status area. Lock-free (defensive reads) and the write is offloaded to a background
@@ -942,6 +947,7 @@ public static class ServerContext
                 _cpp = null;
                 _state = IndexState.Ready;
                 _loadedGen = gen;
+                _statusOverride = null;
                 installed = true;
             }
         }
@@ -995,10 +1001,10 @@ public static class ServerContext
             // Pick up an index built out-of-band (e.g. the user just ran the CLI). Read the generation BEFORE loading,
             // so a write that lands mid-load is seen as a newer generation and reloaded, never mistaken for this one.
             var gen = IndexGeneration.Read(CacheDir);
-            if (RepositoryIndexer.TryLoad(Root, out var text, out var symbols))
+            if (RepositoryIndexer.TryLoad(Root, out var text, out var symbols, out var why))
             {
                 Rw.EnterWriteLock();
-                try { _text = text; _symbols = symbols; _state = IndexState.Ready; _loadedGen = gen; }
+                try { _text = text; _symbols = symbols; _state = IndexState.Ready; _loadedGen = gen; _statusOverride = null; }
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info($"loaded existing index ({text.DocumentCount:N0} files)");
                 // Once per session: if this index was built by an indexer whose output logic is behind this
@@ -1012,6 +1018,23 @@ public static class ServerContext
                 // by reconciling in the background - the gate/decision runs off-lock in MaybeReconcile.
                 Task.Run(MaybeReconcile);
                 Task.Run(MaybeReconcileLinks); // warm the federated set off-lock (own watchers/reconcile)
+                return;
+            }
+
+            // An index exists but this binary can't use it right now. Neither case may start a background build: a
+            // transient read failure retries on the next query, and an index from a NEWER CodeCompass (another install
+            // on this machine updated first) must not be rebuilt over - the two would rebuild each other's forever.
+            if (why == IndexLoadFailure.Transient)
+            {
+                _statusOverride = "The index for this workspace couldn't be read just now (a transient file lock or share " +
+                                  "hiccup). Retry the query in a moment.";
+                return;
+            }
+            if (why == IndexLoadFailure.NewerFormat)
+            {
+                _statusOverride = "This workspace's index was written by a NEWER CodeCompass than this one, so it can't be read " +
+                                  "here (and won't be rebuilt over). Upgrade this CodeCompass install - or, to rebuild it for this " +
+                                  $"version deliberately: codecompass index \"{Root}\"";
                 return;
             }
 

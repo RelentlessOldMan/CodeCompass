@@ -555,41 +555,104 @@ public sealed class SegmentedIndex : IDisposable
         return result;
     }
 
-    // Mirrors TrigramIndex.ScanFile exactly so results/positions are identical.
+    // The manifest carries the tombstones too (one "#T <base64>" line), so the segment list and the deletions that
+    // apply to it are committed by ONE atomic replace. As two files, a crash between them left a manifest naming a new
+    // segment without that batch's tombstones: edited files matched old AND new content, deleted files came back.
+    // The separate tombstone file is still written afterwards, for an OLDER binary sharing this cache (it ignores the
+    // "#T" line: not a bare segment filename).
+    private const string ManifestTombstonePrefix = "#T ";
+
     private void SaveManifest() => AtomicFile.WriteText(Path.Combine(_dir, ManifestName), w =>
     {
         w.WriteLine(_root);
         w.WriteLine(_nextSegmentNumber);
         foreach (var s in _segments) w.WriteLine(Path.GetFileName(s.FilePath));
+        w.WriteLine(ManifestTombstonePrefix + Convert.ToBase64String(TombstoneBytes()));
     });
 
-    private void SaveTombstones() => AtomicFile.Write(Path.Combine(_dir, TombstoneName), fs =>
+    private void SaveTombstones() => AtomicFile.Write(Path.Combine(_dir, TombstoneName), fs => fs.Write(TombstoneBytes()));
+
+    private byte[] TombstoneBytes()
     {
-        using var w = new BinaryWriter(fs, System.Text.Encoding.UTF8, leaveOpen: true);
-        w.Write(_tombstones.Count);
-        foreach (var (seg, locals) in _tombstones)
+        using var ms = new MemoryStream();
+        using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8, leaveOpen: true))
         {
-            w.Write(seg);
-            w.Write(locals.Count);
-            foreach (var l in locals) w.Write(l);
+            w.Write(_tombstones.Count);
+            foreach (var (seg, locals) in _tombstones)
+            {
+                w.Write(seg);
+                w.Write(locals.Count);
+                foreach (var l in locals) w.Write(l);
+            }
         }
-    });
+        return ms.ToArray();
+    }
+
+    private void ReadTombstones(Stream s)
+    {
+        using var r = new BinaryReader(s);
+        int count = r.ReadInt32();
+        if (count < 0) throw new InvalidDataException($"corrupt tombstone file: negative segment count ({count})");
+        for (int i = 0; i < count; i++)
+        {
+            int seg = r.ReadInt32();
+            int n = r.ReadInt32();
+            if (n < 0) throw new InvalidDataException($"corrupt tombstone file: negative entry count ({n})");
+            // Cap the pre-size: an untrusted `n` must not force a huge allocation before any id is read.
+            // The set still grows to fit; an `n` that overruns the file throws EndOfStream.
+            var set = new HashSet<int>(Math.Min(n, 4096));
+            for (int j = 0; j < n; j++) set.Add(r.ReadInt32());
+            _tombstones[seg] = set;
+        }
+    }
 
     private void CleanupOrphans() => NumberedFiles.CleanupOrphans(_dir, SegmentPattern,
         new HashSet<string>(_segments.Select(s => Path.GetFileName(s.FilePath)), StringComparer.OrdinalIgnoreCase));
 
+    // A manifest naming a segment that's gone is read AGAIN (a writer may have replaced the manifest and cleaned up the
+    // old segments between our manifest read and our opens); only a persistent gap is corruption. Loading anyway used
+    // to serve an index silently missing that segment's documents.
     private void Load()
     {
+        for (int attempt = 1; ; attempt++)
+        {
+            try { LoadOnce(); return; }
+            catch (MissingSegmentException) when (attempt < 3)
+            {
+                foreach (var s in _segments) s.Dispose();
+                _segments.Clear(); _tombstones.Clear(); _nextSegmentNumber = 0;
+                Thread.Sleep(50 * attempt);
+            }
+            catch (MissingSegmentException ex)
+            {
+                foreach (var s in _segments) s.Dispose();
+                _segments.Clear();
+                throw new InvalidDataException(ex.Message);
+            }
+        }
+    }
+
+    private sealed class MissingSegmentException(string message) : Exception(message);
+
+    private void LoadOnce()
+    {
         var manifestPath = Path.Combine(_dir, ManifestName);
+        byte[]? manifestTombstones = null;
         if (File.Exists(manifestPath))
         {
-            var lines = File.ReadAllLines(manifestPath);
+            var lines = AtomicFile.ReadWithRetry(manifestPath, File.ReadAllLines);
             if (lines.Length >= 2) int.TryParse(lines[1], out _nextSegmentNumber);
             for (int i = 2; i < lines.Length; i++)
             {
+                if (lines[i].StartsWith(ManifestTombstonePrefix, StringComparison.Ordinal))
+                {
+                    manifestTombstones = Convert.FromBase64String(lines[i][ManifestTombstonePrefix.Length..]);
+                    continue;
+                }
                 if (!PathSafety.IsBareFileName(lines[i])) continue; // a tampered manifest can't point outside _dir
                 var file = Path.Combine(_dir, lines[i]);
-                if (File.Exists(file)) _segments.Add(new SegmentReader(file));
+                if (!File.Exists(file)) throw new MissingSegmentException($"index manifest names a missing segment: {lines[i]}");
+                _segments.Add(new SegmentReader(file));
             }
         }
 
@@ -610,28 +673,15 @@ public sealed class SegmentedIndex : IDisposable
                 Log.Global.Warn($"index manifest missing/empty at {_dir}; reconstructed {_segments.Count} segment(s) from disk (run codecompass index to restore tombstones/compaction)");
         }
 
-        // next=0 after manifest-less recovery (or a too-small manifest number) < segment count -> recompute to max+1
-        if (_nextSegmentNumber < _segments.Count) _nextSegmentNumber = NextSegmentNumber(_dir);
+        // Never below a number already on disk: a crash after a segment was written but before the manifest recorded
+        // it leaves that file behind, and the next flush must not FileMode.Create over it (a reader may have it mapped;
+        // "numbers are never reused" is what makes keeping old maps safe). Covers manifest-less recovery too.
+        _nextSegmentNumber = Math.Max(_nextSegmentNumber, NextSegmentNumber(_dir));
 
-        var tombPath = Path.Combine(_dir, TombstoneName);
+        if (manifestTombstones is not null) { ReadTombstones(new MemoryStream(manifestTombstones)); return; }
+        var tombPath = Path.Combine(_dir, TombstoneName); // a manifest written before tombstones moved into it
         if (File.Exists(tombPath))
-        {
-            using var fs = File.OpenRead(tombPath);
-            using var r = new BinaryReader(fs);
-            int count = r.ReadInt32();
-            if (count < 0) throw new InvalidDataException($"corrupt tombstone file: negative segment count ({count})");
-            for (int i = 0; i < count; i++)
-            {
-                int seg = r.ReadInt32();
-                int n = r.ReadInt32();
-                if (n < 0) throw new InvalidDataException($"corrupt tombstone file: negative entry count ({n})");
-                // Cap the pre-size: an untrusted `n` must not force a huge allocation before any id is read.
-                // The set still grows to fit; an `n` that overruns the file throws EndOfStream.
-                var set = new HashSet<int>(Math.Min(n, 4096));
-                for (int j = 0; j < n; j++) set.Add(r.ReadInt32());
-                _tombstones[seg] = set;
-            }
-        }
+            ReadTombstones(new MemoryStream(AtomicFile.ReadWithRetry(tombPath, File.ReadAllBytes)));
         // path map is built lazily (see EnsurePathMap) so a search-only open stays cheap
     }
 

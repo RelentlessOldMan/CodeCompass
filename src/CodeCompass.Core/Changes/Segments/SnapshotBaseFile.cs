@@ -73,6 +73,10 @@ public static class SnapshotBaseFile
         view.Write(pathOffsetsOff + (long)count * 8, pathAcc); // terminating offset
         if (pathAcc != pathBlobLen) throw new InvalidOperationException(
             $"snapshot base: path blob was {pathAcc} bytes, declared {pathBlobLen}");
+        // Durable before the manifest names this base: write the mapped pages to the file, then the file to disk
+        // (FlushViewOfFile alone doesn't reach the platter; FlushFileBuffers does).
+        view.Flush();
+        fs.Flush(flushToDisk: true);
     }
 
     private static void FillHash(byte[] buf, string hexHash)
@@ -118,6 +122,13 @@ public sealed class SnapshotBaseReader : IDisposable
             _sizesOff < _pathBlobOff || _mtimesOff < _sizesOff || _hashesOff < _mtimesOff ||
             _hashesOff + (long)Count * SnapshotBaseFile.HashBytes > cap)
             throw new InvalidDataException("corrupt CodeCompass snapshot base (bad section offsets)");
+        // Each section must be big enough for its count - otherwise a torn header (zeroed offsets, Count intact) passes
+        // the ordering checks above and GetState reads in-bounds GARBAGE: changed files look unchanged and the index
+        // silently stays stale. Fail at open instead, where callers rebuild. (Mirrors SegmentReader's checks.)
+        if (_pathBlobOff - _pathOffsetsOff < ((long)Count + 1) * 8 ||
+            _mtimesOff - _sizesOff < (long)Count * 8 ||
+            _hashesOff - _mtimesOff < (long)Count * 8)
+            throw new InvalidDataException("corrupt CodeCompass snapshot base (section too small for its count)");
     }
 
     public string GetPath(int i)

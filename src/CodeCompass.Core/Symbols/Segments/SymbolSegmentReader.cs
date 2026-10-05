@@ -1,3 +1,4 @@
+using CodeCompass.Core.Storage;
 using System.IO.MemoryMappedFiles;
 using System.Text;
 
@@ -26,7 +27,9 @@ public sealed class SymbolSegmentReader : IDisposable
         _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
 
         if (_view.ReadUInt32(0) != SymbolSegmentBuilder.Magic) throw new InvalidDataException("not a CodeCompass symbol segment");
-        if (_view.ReadInt32(4) != SymbolSegmentBuilder.Version) throw new InvalidDataException("unsupported symbol segment version");
+        int version = _view.ReadInt32(4);
+        if (version > SymbolSegmentBuilder.Version) throw new IndexFormatTooNewException("symbol segment", version, SymbolSegmentBuilder.Version);
+        if (version != SymbolSegmentBuilder.Version) throw new InvalidDataException("unsupported symbol segment version");
         Count = _view.ReadInt32(8);
         PathCount = _view.ReadInt32(12);
         _nameOffsetsOff = _view.ReadInt64(16);

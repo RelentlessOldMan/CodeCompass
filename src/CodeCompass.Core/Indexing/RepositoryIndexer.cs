@@ -531,7 +531,7 @@ public static class RepositoryIndexer
         CodeCompassConfig.Load(root);
         var sw = Stopwatch.StartNew();
 
-        if (!TryLoad(root, out var text, out var symbols)) return FullRebuild(root, text, symbols, sw, ct);
+        if (!TryLoad(root, out var text, out var symbols, out var why)) { ThrowIfMustNotRebuild(root, why); return FullRebuild(root, text, symbols, sw, ct); }
         if (!TryLoadSnapshot(root, out var old)) return FullRebuild(root, text, symbols, sw, ct);
 
         using (old)
@@ -674,7 +674,7 @@ public static class RepositoryIndexer
         using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root), ct);
         var sw = Stopwatch.StartNew();
 
-        if (!TryLoad(root, out var text, out var symbols)) return FullRebuild(root, text, symbols, sw, ct);
+        if (!TryLoad(root, out var text, out var symbols, out var why)) { ThrowIfMustNotRebuild(root, why); return FullRebuild(root, text, symbols, sw, ct); }
         if (!TryLoadSnapshot(root, out var snapshot)) return FullRebuild(root, text, symbols, sw, ct);
 
         using (snapshot)
@@ -697,8 +697,9 @@ public static class RepositoryIndexer
     {
         root = Path.GetFullPath(root);
         using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root), ct);
-        if (!TryLoad(root, out var text, out var symbols))
+        if (!TryLoad(root, out var text, out var symbols, out var why))
         {
+            ThrowIfMustNotRebuild(root, why);
             var b = Build(root, ct: ct); // first-time compaction falls back to a full (cancellable) build
             return (b.Text, b.Symbols);
         }
@@ -951,27 +952,56 @@ public static class RepositoryIndexer
         catch { return false; }
     }
 
-    public static bool TryLoad(string root, out SegmentedIndex text, out SegmentedSymbolIndex symbols)
+    public static bool TryLoad(string root, out SegmentedIndex text, out SegmentedSymbolIndex symbols) =>
+        TryLoad(root, out text, out symbols, out _);
+
+    /// <summary>As <see cref="TryLoad(string, out SegmentedIndex, out SegmentedSymbolIndex)"/>, reporting WHY it failed:
+    /// only Missing/Corrupt warrant a rebuild. A transient read failure (a sharing violation, an AV scanner, a share
+    /// hiccup) must not trigger a full rebuild of a huge repo, and an index from a newer CodeCompass must not be rebuilt
+    /// over (two installs would rebuild each other's index forever).</summary>
+    public static bool TryLoad(string root, out SegmentedIndex text, out SegmentedSymbolIndex symbols, out IndexLoadFailure why)
     {
         root = Path.GetFullPath(root);
         text = null!;
         symbols = null!;
+        why = IndexLoadFailure.None;
         var dir = IndexStore.GetCacheDir(root);
         try
         {
-            if (!SegmentedIndex.Exists(dir) || !SegmentedSymbolIndex.Exists(dir)) return false;
+            if (!SegmentedIndex.Exists(dir) || !SegmentedSymbolIndex.Exists(dir)) { why = IndexLoadFailure.Missing; return false; }
             text = SegmentedIndex.Open(root, dir);
             symbols = SegmentedSymbolIndex.Open(dir);
             return true;
         }
-        catch
+        catch (Exception ex)
         {
             text?.Dispose();
             symbols?.Dispose();
             text = null!;
             symbols = null!;
+            why = ex switch
+            {
+                IndexFormatTooNewException => IndexLoadFailure.NewerFormat,
+                EndOfStreamException => IndexLoadFailure.Corrupt,          // a truncated file, not a busy one
+                InvalidDataException or FormatException => IndexLoadFailure.Corrupt,
+                FileNotFoundException or DirectoryNotFoundException => IndexLoadFailure.Transient, // vanished mid-open
+                IOException or UnauthorizedAccessException => IndexLoadFailure.Transient,
+                _ => IndexLoadFailure.Corrupt,
+            };
+            if (why != IndexLoadFailure.Corrupt) Log.For(root).Warn($"index load failed ({why}): {ex.Message}");
             return false;
         }
+    }
+
+    // The update paths rebuild from scratch only when there is no usable index; a transient read failure or a
+    // newer-format index is an error to report, never a reason to discard and rebuild the whole thing.
+    private static void ThrowIfMustNotRebuild(string root, IndexLoadFailure why)
+    {
+        if (why == IndexLoadFailure.Transient)
+            throw new IOException($"the index for {root} could not be read right now (transient I/O); not rebuilding - retry shortly");
+        if (why == IndexLoadFailure.NewerFormat)
+            throw new InvalidOperationException($"the index for {root} was written by a newer CodeCompass - upgrade this install " +
+                                                "(not rebuilding over it; run `codecompass index` to rebuild it deliberately)");
     }
 
     /// <summary>Open the change-detection snapshot for a repo (empty if none exists). Caller owns it.</summary>

@@ -101,5 +101,9 @@ public sealed class SegmentBuilder
         w.Write(acc); // final sentinel offset
         foreach (var b in pathBytes) w.Write(b);
         w.Flush();
+        // Durable BEFORE any manifest names this segment: the manifest is fsync'd + atomically replaced, so without
+        // this a power loss could leave a durable manifest pointing at a segment whose pages were never written -
+        // zero-filled postings that pass the structural checks and silently match nothing.
+        fs.Flush(flushToDisk: true);
     }
 }

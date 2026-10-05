@@ -89,5 +89,6 @@ public sealed class SymbolSegmentBuilder
         for (int i = 0; i < paths.Length; i++) w.Write(pathBytes[i]);
 
         w.Flush();
+        fs.Flush(flushToDisk: true); // durable before a manifest names it (see SegmentBuilder.WriteTo)
     }
 }

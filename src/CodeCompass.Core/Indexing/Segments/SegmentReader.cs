@@ -1,3 +1,4 @@
+using CodeCompass.Core.Storage;
 using System.IO.MemoryMappedFiles;
 using System.Text;
 
@@ -25,7 +26,9 @@ public sealed class SegmentReader : IDisposable
         _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
 
         if (_view.ReadUInt32(0) != SegmentBuilder.Magic) throw new InvalidDataException("not a CodeCompass segment");
-        if (_view.ReadInt32(4) != SegmentBuilder.Version) throw new InvalidDataException("unsupported segment version");
+        int version = _view.ReadInt32(4);
+        if (version > SegmentBuilder.Version) throw new IndexFormatTooNewException("segment", version, SegmentBuilder.Version);
+        if (version != SegmentBuilder.Version) throw new InvalidDataException("unsupported segment version");
         DocCount = _view.ReadInt32(8);
         TermCount = _view.ReadInt32(12);
         _termKeysOff = _view.ReadInt64(16);

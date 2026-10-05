@@ -74,6 +74,23 @@ public static class AtomicFile
         }
     }
 
+    /// <summary>Read side of the atomic-replace contract: a reader that races a replace (or an AV scanner / backup
+    /// agent holding the file a moment) gets a sharing violation, not corrupt data - retry it with backoff rather
+    /// than treat a transient IOException as "no index" (which makes callers rebuild a whole repo).
+    /// FileNotFoundException is NOT retried: absent means absent.</summary>
+    public static T ReadWithRetry<T>(string path, Func<string, T> read)
+    {
+        for (int i = 0; ; i++)
+        {
+            try { return read(path); }
+            catch (Exception ex) when ((ex is IOException && ex is not FileNotFoundException && ex is not DirectoryNotFoundException
+                                        || ex is UnauthorizedAccessException) && i < ReplaceAttempts - 1)
+            {
+                Thread.Sleep(ReplaceBackoffMs * (i + 1));
+            }
+        }
+    }
+
     // Per-process temp name: two processes replacing the same target (the status file is written by the CLI and the
     // MCP server alike) must not share one temp, or one could rename the other's half-finished bytes into place.
     private static string TempName(string path) => $"{path}.{Environment.ProcessId}.tmp";
