@@ -46,6 +46,10 @@ public static class LargeFileIndexer
     private const int ChunkBytes = 1 << 20;                 // 1 MB read granularity
     private const int BlockTargetBytes = 1 << 20;           // ~1 MB per positional block (line-aligned)
     private const int BlockHardCapBytes = 16 << 20;         // force a cut if a single line is this long
+    /// <summary>Bytes on each side of a FORCED (mid-line) block cut whose trigrams also go into the following block's
+    /// Bloom, and which the reader prepends when scanning that block - so a match up to this long that straddles
+    /// the cut is admitted and found (see <see cref="DrainFullBlocks"/> and PositionalSidecar.TryScan).</summary>
+    public const int SeamBytes = 1024;
     public const int BloomBytes = 16 * 1024;                // per-block Bloom (128k bits)
     public const int BloomK = 4;
 
@@ -86,9 +90,10 @@ public static class LargeFileIndexer
                 using var blockBuf = new MemoryStream(BlockTargetBytes + ChunkBytes);
                 long blockStartByte = 0;
                 int blockStartLine = 0;
+                byte[]? seamTail = null;
 
                 blockBuf.Write(buf, 0, fn);
-                DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, bomLen, force: false);
+                DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: false);
 
                 int n;
                 while ((n = ReadChunk(fs, buf)) > 0)
@@ -96,9 +101,9 @@ public static class LargeFileIndexer
                     hasher.Append(buf.AsSpan(0, n));
                     byteLength += n;
                     blockBuf.Write(buf, 0, n);
-                    DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, bomLen, force: false);
+                    DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: false);
                 }
-                DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, bomLen, force: true);
+                DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: true);
 
                 blocks = new LargeFileBlocks(BloomBytes, BloomK, bomLen, blockList);
             }
@@ -148,13 +153,14 @@ public static class LargeFileIndexer
             using var blockBuf = new MemoryStream(BlockTargetBytes + ChunkBytes);
             long blockStartByte = 0;
             int blockStartLine = 0;
+            byte[]? seamTail = null;
             for (int off = 0; off < bytes.Length; off += ChunkBytes)
             {
                 int n = Math.Min(ChunkBytes, bytes.Length - off);
                 blockBuf.Write(bytes, off, n);
-                DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, bomLen, force: false);
+                DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: false);
             }
-            DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, bomLen, force: true);
+            DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: true);
             return blockList.Count > 0 ? new LargeFileBlocks(BloomBytes, BloomK, bomLen, blockList) : null;
         }
         catch { return null; }
@@ -164,7 +170,7 @@ public static class LargeFileIndexer
     // remains. Each closed block feeds the whole-doc trigram accumulator (persistent carry, so cross-
     // block trigrams are kept) and gets its own Bloom over its own trigrams.
     private static void DrainFullBlocks(MemoryStream blockBuf, TrigramAccumulator whole, List<BlockEntry> blocks,
-                                        ref long blockStartByte, ref int blockStartLine, int bomLen, bool force)
+                                        ref long blockStartByte, ref int blockStartLine, ref byte[]? seamTail, int bomLen, bool force)
     {
         while (true)
         {
@@ -191,7 +197,27 @@ public static class LargeFileIndexer
             var bloom = BloomFilter.Create(BloomBytes, BloomK);
             AddTrigramsToBloom(chars, bloom);
 
+            // This block continues a line the previous (forced) cut split: a token straddling that cut has trigrams on
+            // BOTH sides, so neither block's own Bloom would admit it. Add the trigrams of the seam window (previous
+            // tail + this block's head) to THIS block's Bloom; the reader scans this block from SeamBytes before its
+            // start, so the straddling match is both admitted and found.
+            if (seamTail is not null)
+            {
+                int head = Math.Min(cut - skip, SeamBytes);
+                var seam = new byte[seamTail.Length + head];
+                seamTail.CopyTo(seam, 0);
+                Array.Copy(data, skip, seam, seamTail.Length, head);
+                AddTrigramsToBloom(DecodeBlock(seam, 0, seam.Length), bloom);
+                seamTail = null;
+            }
+
             int newlines = Count(data, cut, (byte)'\n');
+            // A cut that isn't after a newline splits a line: remember its tail for the next block's seam.
+            if (cut > skip && data[cut - 1] != (byte)'\n' && (!force || len - cut > 0))
+            {
+                int tailLen = Math.Min(cut - skip, SeamBytes);
+                seamTail = data.AsSpan(cut - tailLen, tailLen).ToArray();
+            }
             blocks.Add(new BlockEntry(blockStartLine + 1, blockStartByte, blockStartByte + cut, bloom.Bits));
             blockStartByte += cut;
             blockStartLine += newlines;

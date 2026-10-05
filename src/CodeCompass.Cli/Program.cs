@@ -1132,7 +1132,7 @@ static int CmdRefs(string[] args)
     bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0;
     // Classifies comment/string spans in covered-language candidate files so the backfill below skips hits that
     // live in them (an <see cref> doc-comment or a "name" in a string literal is not a reference). One per query.
-    var spanFilter = new LexicalSpanFilter();
+    var spanFilter = new LexicalSpanFilter(name);
     var semKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     foreach (var s in cs) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
     foreach (var s in cpp) semKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");

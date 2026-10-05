@@ -214,7 +214,8 @@ public static class RepositoryIndexer
                             Interlocked.Add(ref progressBytes, len);
                             if (worker.Text.ApproxBytes >= textBudget) FlushText(worker, dir, ref textSegCounter, textSegFiles);
                         }
-                        else if (!bin)
+                        else if (bin) worker.Snapshot[file.RelativePath] = new FileState(file.Size, mtime, FileState.BinaryHash);
+                        else
                             // WARN, not Debug: a large file that fails to read (vs a deliberate binary skip)
                             // is silently absent from the index otherwise - the exact "N fewer files, no log"
                             // symptom seen over SMB. Visible at the default log level so it's diagnosable.
@@ -254,7 +255,11 @@ public static class RepositoryIndexer
                     // WARN, not Debug: a read failure silently drops the file from the index (the "N fewer
                     // files, no log" symptom over SMB); surface it at the default level so it's diagnosable.
                     catch (Exception ex) { Log.For(root).Warn($"NOT INDEXED - file unreadable (transient I/O over a share?): {file.RelativePath}: {ex.Message}"); return worker; }
-                    if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return worker;
+                    if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
+                    {
+                        worker.Snapshot[file.RelativePath] = new FileState(bytes.Length, mtime, FileState.BinaryHash);
+                        return worker;
+                    }
 
                     var content = TextDecoder.FromBytes(bytes);
                     var hash = ContentHasher.Hash(bytes);
@@ -381,6 +386,7 @@ public static class RepositoryIndexer
         var symOrdered = symSegFiles.OrderBy(x => x.Num).Select(x => x.Name).ToList();
         var text = SegmentedIndex.FromSegmentFiles(root, dir, textOrdered, textSegCounter, textBudget);
         var symbols = SegmentedSymbolIndex.FromSegmentFiles(dir, symOrdered, symSegCounter, symBudget);
+        symbols.QueryIgnore = IgnoreRules.ForRoot(root);
         PositionalSidecar.CleanupOrphans(dir, new HashSet<string>(posSidecars, StringComparer.OrdinalIgnoreCase)); // drop sidecars for files no longer large/present
         SaveSnapshot(root, snapshot);
 
@@ -393,7 +399,7 @@ public static class RepositoryIndexer
         // but with no symbols extracted) so the search tools can be honest about a zero result and
         // doctor/cache can report by real path.
         IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, totalSymbolSkipped, walker.DroppedDirs,
-                            sidecarThreshold, landscape.Summary());
+                            sidecarThreshold, landscape.Summary(), walker.AmbiguousDirsSkipped);
         return (text, symbols, stats);
     }
 
@@ -547,6 +553,13 @@ public static class RepositoryIndexer
             // orphaned sidecar, and the next update would keep drifting.
             var priorMeta = IndexMetaFile.Read(root);
             long sidecarThreshold = priorMeta?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold;
+            // "Racily clean" (git's rule): on a filesystem with coarse timestamps (FAT/exFAT 2 s, some NAS 1 s) an edit
+            // landing in the same tick right after the last update hashed a file - same size - leaves size+mtime equal,
+            // and the prefilter would skip that file forever. Files modified within this window of the ledger's own
+            // write time are re-hashed instead (an identical file just re-confirms; it's cheap and self-limiting: the
+            // next ledger write moves the window past them). Wider over a share, whose clock may be skewed from ours.
+            long racyFrom = old.LedgerWrittenUtcTicks <= 0 ? long.MaxValue
+                : old.LedgerWrittenUtcTicks - TimeSpan.FromSeconds(Storage.NetworkPath.IsNetwork(root) ? 10 : 2).Ticks;
 
             using (var extractor = new TreeSitterSymbolExtractor())
             {
@@ -567,8 +580,8 @@ public static class RepositoryIndexer
                                                  // extra round-trip per file over SMB; this is the no-op-update cost)
                     FileState? oldState = old.TryGetValue(rel, out var os) ? os : (FileState?)null;
 
-                    // Cheap size+mtime pre-filter: unchanged -> keep the old state, no read.
-                    if (oldState is { } u && u.Size == file.Size && u.MTimeTicks == mtime)
+                    // Cheap size+mtime pre-filter: unchanged -> keep the old state, no read (unless racily clean, above).
+                    if (oldState is { } u && u.Size == file.Size && u.MTimeTicks == mtime && mtime < racyFrom)
                     {
                         newSnapshot[rel] = u;
                         continue;
@@ -625,7 +638,7 @@ public static class RepositoryIndexer
             // the flag (the gap is closed); if they dropped again it stays flagged. Carry the build's adaptive
             // sidecar threshold + landscape forward unchanged (a full reindex is what re-measures the shape).
             IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, carriedSymbolSkipped, walker.DroppedDirs,
-                                sidecarThreshold, priorMeta?.Landscape);
+                                sidecarThreshold, priorMeta?.Landscape, walker.AmbiguousDirsSkipped);
             return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false));
         }
     }
@@ -662,7 +675,8 @@ public static class RepositoryIndexer
         // re-measure size caps / symbol skips / landscape).
         var pm = IndexMetaFile.Read(root);
         IndexMetaFile.Write(root, text.DocumentCount, pm?.FilesOverCap ?? 0, pm?.FilesSymbolSkipped ?? 0,
-                            pm?.DroppedDirs ?? 0, pm?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold, pm?.Landscape);
+                            pm?.DroppedDirs ?? 0, pm?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold, pm?.Landscape,
+                            pm?.AmbiguousDirsSkipped ?? 0);
         return (text, symbols, prune.Count);
     }
 
@@ -848,16 +862,19 @@ public static class RepositoryIndexer
         TreeSitterSymbolExtractor extractor,
         Action<string, FileState> upsert, Action<string> drop)
     {
-        bool wasPresent = oldState is not null;
+        // A binary-sentinel entry is in the ledger but was never a document.
+        bool wasPresent = oldState is { IsBinary: false };
 
         // Large files: stream (bounded memory), trigrams only, no symbols.
         if (size >= LargeFileIndexer.StreamThresholdBytes)
         {
-            if (!LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out _, out var blocks))
+            if (!LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out var isBinary, out var blocks))
             {
-                // Binary/unreadable: drop it if it was indexed, so we never leave stale content behind.
-                if (wasPresent) { RemoveFromIndex(text, symbols, dir, rel); drop(rel); return ChangeKind.Removed; }
-                return ChangeKind.None;
+                // Binary/unreadable: drop it if it was indexed, so we never leave stale content behind. A binary file is
+                // recorded as such so later updates skip it while it's unchanged.
+                if (wasPresent) RemoveFromIndex(text, symbols, dir, rel);
+                if (isBinary) upsert(rel, new FileState(size, mtime, FileState.BinaryHash)); else drop(rel);
+                return wasPresent ? ChangeKind.Removed : ChangeKind.None;
             }
             if (oldState?.ContentHash == bigHash) { upsert(rel, new FileState(len, mtime, bigHash)); return ChangeKind.None; } // touched, identical
             text.RemovePath(rel);
@@ -873,8 +890,9 @@ public static class RepositoryIndexer
         catch { if (oldState is { } keep) upsert(rel, keep); return ChangeKind.None; } // transient read error: keep as-was
         if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
         {
-            if (wasPresent) { RemoveFromIndex(text, symbols, dir, rel); drop(rel); return ChangeKind.Removed; }
-            return ChangeKind.None;
+            if (wasPresent) RemoveFromIndex(text, symbols, dir, rel);
+            upsert(rel, new FileState(bytes.Length, mtime, FileState.BinaryHash));
+            return wasPresent ? ChangeKind.Removed : ChangeKind.None;
         }
 
         var hash = ContentHasher.Hash(bytes);
@@ -971,6 +989,7 @@ public static class RepositoryIndexer
             if (!SegmentedIndex.Exists(dir) || !SegmentedSymbolIndex.Exists(dir)) { why = IndexLoadFailure.Missing; return false; }
             text = SegmentedIndex.Open(root, dir);
             symbols = SegmentedSymbolIndex.Open(dir);
+            symbols.QueryIgnore = IgnoreRules.ForRoot(root);
             return true;
         }
         catch (Exception ex)

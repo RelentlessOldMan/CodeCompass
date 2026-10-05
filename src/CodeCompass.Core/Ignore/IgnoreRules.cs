@@ -49,17 +49,43 @@ public sealed class IgnoreRules
     /// without editing source.
     /// </summary>
     public IgnoreRules(long? maxFileSizeBytes = null, IEnumerable<string>? extraIgnoredDirs = null)
+        : this(CodeCompassConfig.Current, maxFileSizeBytes, extraIgnoredDirs) { }
+
+    /// <summary>Rules for an EXPLICIT repo config (rather than the ambient one) - e.g. a specific root's own
+    /// <c>.codecompass.json</c>, for query-time filtering of that root's index (see <see cref="ForRoot"/>).</summary>
+    public IgnoreRules(RepoConfig cfg, long? maxFileSizeBytes = null, IEnumerable<string>? extraIgnoredDirs = null)
     {
         _ignoredDirs = new HashSet<string>(DefaultIgnoredDirs, StringComparer.OrdinalIgnoreCase);
-        foreach (var d in CodeCompassConfig.IgnoredDirs()) _ignoredDirs.Add(d); // env + .codecompass.json
+        foreach (var d in CodeCompassConfig.IgnoredDirs(cfg)) _ignoredDirs.Add(d); // env + .codecompass.json
         if (extraIgnoredDirs is not null)
             foreach (var d in extraIgnoredDirs)
                 _ignoredDirs.Add(d);
+        // keepDirs wins: a monorepo with real sources under packages/ (or a repo with build/ scripts) opts back in.
+        foreach (var d in CodeCompassConfig.KeptDirs(cfg)) _ignoredDirs.Remove(d);
         _ignoredExtensions = DefaultIgnoredExtensions;
-        MaxFileSizeBytes = maxFileSizeBytes ?? CodeCompassConfig.MaxFileBytes();
+        MaxFileSizeBytes = maxFileSizeBytes ?? CodeCompassConfig.MaxFileBytes(cfg);
+    }
+
+    /// <summary>The rules a walk of <paramref name="root"/> applies - from THAT root's config, not whatever config is
+    /// ambient in this process. Query-time filtering of a root's index must agree with the walk that built it (a
+    /// repo's own ignore/keepDirs, a linked root's own config).</summary>
+    public static IgnoreRules ForRoot(string root)
+    {
+        try { return new IgnoreRules(CodeCompassConfig.ReadFrom(root) ?? new RepoConfig()); }
+        catch { return new IgnoreRules(new RepoConfig()); }
     }
 
     public bool IsIgnoredDirectory(string directoryName) => _ignoredDirs.Contains(directoryName);
+
+    // Default-skipped names that are usually build output but can hold real SOURCE (a pnpm/yarn monorepo's packages/,
+    // checked-in build/ scripts, a Go/Rust out/ or target/). A walk counts how many it skipped so a zero result can say
+    // "a match might be under one of these" instead of being silently, confidently empty.
+    private static readonly HashSet<string> AmbiguousDirNames = new(StringComparer.OrdinalIgnoreCase)
+    { "packages", "build", "out", "target", "dist" };
+
+    /// <summary>Is this a skipped directory whose name is ambiguous (often source, not just output)?</summary>
+    public bool IsAmbiguousIgnoredDirectory(string directoryName) =>
+        _ignoredDirs.Contains(directoryName) && AmbiguousDirNames.Contains(directoryName);
 
     // Process-shared rules for QUERY-TIME result filtering (defaults + env + config), built once and lazily
     // so a config read can't fault type init. Query paths (text search, symbols) use this to drop stale-index

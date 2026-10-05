@@ -26,6 +26,18 @@ public sealed class LexicalSpanFilter
     // never nests a comment inside a string or vice-versa), so a point lands in at most one span.
     private readonly Dictionary<string, (int sl, int sc, int el, int ec)[]> _cache = new(StringComparer.OrdinalIgnoreCase);
 
+    // The symbol this query is about, and where it occurs in each file's CURRENT text (0-based line, col). The hits being
+    // classified carry the INDEX's coordinates; if the file changed since, those coordinates may now land inside a
+    // comment/string that wasn't there - suppressing a real reference. A position where the token no longer sits is
+    // stale: keep the hit (fail open).
+    private readonly string? _token;
+    private readonly Dictionary<string, HashSet<(int, int)>> _occurrences = new(StringComparer.OrdinalIgnoreCase);
+
+    public LexicalSpanFilter() { }
+
+    /// <param name="token">The queried name; enables the stale-coordinate check.</param>
+    public LexicalSpanFilter(string token) => _token = string.IsNullOrEmpty(token) ? null : token;
+
     /// <summary>True if the match at (1-based line, 1-based column) in <paramref name="path"/> falls inside a
     /// comment or string/char literal - i.e. it is NOT a real code reference and the lexical backfill should skip
     /// it. Non-covered languages (no semantic promise about comments) and any file we can't classify return
@@ -37,6 +49,8 @@ public sealed class LexicalSpanFilter
         if (spans.Length == 0) return false;
 
         int l = line1Based - 1, c = column1Based - 1;
+        if (_token is not null && (!_occurrences.TryGetValue(path, out var occ) || !occ.Contains((l, c))))
+            return false; // the index's position no longer holds the token (file changed): don't trust the classification
         // Binary-search the last span whose start <= (l,c); since spans are disjoint and sorted, only it can
         // contain the point.
         int lo = 0, hi = spans.Length - 1, found = -1;
@@ -60,6 +74,7 @@ public sealed class LexicalSpanFilter
         {
             string text = File.ReadAllText(path);
             spans = SemanticCoverage.IsCSharp(path) ? CSharpSpans(text) : CFamilySpans(text);
+            if (_token is not null) _occurrences[path] = Occurrences(text, _token);
         }
         catch
         {
@@ -67,6 +82,19 @@ public sealed class LexicalSpanFilter
         }
         _cache[path] = spans;
         return spans;
+    }
+
+    private static HashSet<(int, int)> Occurrences(string text, string token)
+    {
+        var set = new HashSet<(int, int)>();
+        int line = 0, lineStart = 0, scanned = 0, idx;
+        while ((idx = text.IndexOf(token, scanned, StringComparison.Ordinal)) >= 0)
+        {
+            for (int k = scanned; k < idx; k++) if (text[k] == '\n') { line++; lineStart = k + 1; }
+            set.Add((line, idx - lineStart));
+            scanned = idx + 1;
+        }
+        return set;
     }
 
     // --- C#: exact, via Roslyn's lexer -------------------------------------------------------------------------

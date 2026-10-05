@@ -178,7 +178,7 @@ public sealed class TrigramIndex
             }
             else
             {
-                long rep = TriKey(char.ToLowerInvariant(a), char.ToLowerInvariant(b), char.ToLowerInvariant(c));
+                long rep = TriKey(char.ToUpperInvariant(a), char.ToUpperInvariant(b), char.ToUpperInvariant(c));
                 if (seen.Add(rep)) groups.Add(CaseVariants(a, b, c));
             }
         }
@@ -197,11 +197,27 @@ public sealed class TrigramIndex
         return arr;
     }
 
-    private static char[] CharVariants(char ch)
+    // Every char the VERIFY step (StringComparison.OrdinalIgnoreCase) treats as equal to `ch`: OrdinalIgnoreCase
+    // compares invariant UPPERCASE forms, so the class is { x : ToUpperInvariant(x) == ToUpperInvariant(ch) }. A plain
+    // {lower, upper} pair misses members like Greek mu for the micro sign (both uppercase to U+039C), so the index
+    // step rejected files the verify would have matched. Built once over the BMP (a few ms); only multi-member classes kept.
+    private static char[] CharVariants(char ch) => FoldClasses.Value.TryGetValue(char.ToUpperInvariant(ch), out var cls) ? cls : new[] { ch };
+
+    private static readonly Lazy<Dictionary<char, char[]>> FoldClasses = new(() =>
     {
-        char lo = char.ToLowerInvariant(ch), up = char.ToUpperInvariant(ch);
-        return lo == up ? new[] { lo } : new[] { lo, up };
-    }
+        var groups = new Dictionary<char, List<char>>();
+        for (int i = 0; i <= char.MaxValue; i++)
+        {
+            char c = (char)i;
+            if (char.IsSurrogate(c)) continue;
+            char key = char.ToUpperInvariant(c);
+            if (!groups.TryGetValue(key, out var list)) groups[key] = list = new List<char>(2);
+            list.Add(c);
+        }
+        var map = new Dictionary<char, char[]>(groups.Count);
+        foreach (var (k, v) in groups) if (v.Count > 1) map[k] = v.ToArray(); // caseless chars: their own class
+        return map;
+    });
 
     private static IEnumerable<long> DistinctTrigrams(string text)
     {

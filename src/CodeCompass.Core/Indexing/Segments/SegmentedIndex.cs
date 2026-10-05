@@ -28,6 +28,7 @@ public sealed class SegmentedIndex : IDisposable
 
     private readonly string _root;
     private readonly bool _rootIsNetwork; // fixed for the life of the index; computed once, not per query
+    private readonly CodeCompass.Core.Ignore.IgnoreRules _queryIgnore; // THIS root's rules (its own .codecompass.json)
     private readonly string _dir;
     private readonly long _budget;
     private readonly List<SegmentReader> _segments = new();
@@ -45,6 +46,7 @@ public sealed class SegmentedIndex : IDisposable
     {
         _root = Path.GetFullPath(root);
         _rootIsNetwork = NetworkPath.IsNetwork(_root);
+        _queryIgnore = CodeCompass.Core.Ignore.IgnoreRules.ForRoot(_root);
         _dir = dir;
         _budget = budget;
         System.IO.Directory.CreateDirectory(dir);
@@ -188,9 +190,17 @@ public sealed class SegmentedIndex : IDisposable
     /// different orders, which (combined with a cap) made find_references disagree local-vs-UNC. References
     /// want a build-order-independent answer; search_code leaves this off (its ordering is already stable
     /// within a build and canonical sorting would add cost for no correctness gain).</param>
+    /// <summary>Whether a <see cref="Search"/> stopped at a limit - so a caller filtering the raw hits further (the
+    /// reference backfill) can tell "that's all there is" from "the scan budget ran out first".</summary>
+    public sealed class SearchLimits
+    {
+        public bool HitTotalCap;   // the global result budget was reached (more candidates were not scanned)
+        public bool HitPerFileCap; // at least one file was cut off at maxPerFile
+    }
+
     public IReadOnlyList<SearchMatch> Search(string query, int maxResults = 200, bool caseSensitive = true,
                                              List<CandidateTrace>? trace = null, int maxPerFile = 0,
-                                             bool orderByPath = false)
+                                             bool orderByPath = false, SearchLimits? limits = null)
     {
         // Whitespace-only queries have no meaningful trigrams: under 3 chars they produce no trigram groups,
         // so every file becomes a candidate and the verify step matches almost every line that contains a
@@ -228,9 +238,11 @@ public sealed class SegmentedIndex : IDisposable
         // round-trip latency; reading candidates one at a time stacks that latency linearly. Overlap it
         // with a bounded-parallel verify (SMB2 credits let many reads share one connection). Locally,
         // reads are fast and the serial early-exit is already optimal, so keep the simple path.
-        return _rootIsNetwork
-            ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile)
-            : VerifySerial(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile);
+        var found = _rootIsNetwork
+            ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile, limits)
+            : VerifySerial(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile, limits);
+        if (limits is not null && found.Count >= maxResults) limits.HitTotalCap = true;
+        return found;
     }
 
     /// <summary>
@@ -306,7 +318,7 @@ public sealed class SegmentedIndex : IDisposable
                 // hold paths the current walker would skip - a rival tool's .claude/ cache dump, or a dir
                 // added to CODECOMPASS_IGNORE since the last build. Drop them here so they never reach
                 // search/refs/symbol results without needing a rebuild. See IgnoreRules.IsIgnoredPath.
-                if (CodeCompass.Core.Ignore.IgnoreRules.QueryDefault.IsIgnoredPath(rel)) continue;
+                if (_queryIgnore.IsIgnoredPath(rel)) continue;
                 candidates.Add(rel);
             }
         }
@@ -319,13 +331,15 @@ public sealed class SegmentedIndex : IDisposable
         => maxPerFile > 0 ? Math.Min(maxResults, maxPerFile) : maxResults;
 
     // Serial verify (local repos): read candidates in order, stopping the instant we have enough.
-    private List<SearchMatch> VerifySerial(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile)
+    private List<SearchMatch> VerifySerial(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile, SearchLimits? limits)
     {
         var results = new List<SearchMatch>();
         int perFile = PerFileCap(maxResults, maxPerFile);
         foreach (var rel in candidates)
         {
-            results.AddRange(ScanCandidate(rel, query, comparison, caseSensitive, perFile, network: false, trace));
+            var hits = ScanCandidate(rel, query, comparison, caseSensitive, perFile, network: false, trace);
+            if (limits is not null && maxPerFile > 0 && hits.Count >= perFile) limits.HitPerFileCap = true;
+            results.AddRange(hits);
             if (results.Count >= maxResults) return Cap(results, maxResults);
         }
         return Cap(results, maxResults);
@@ -335,7 +349,7 @@ public sealed class SegmentedIndex : IDisposable
     // without speculatively reading the whole candidate set. Results are merged in candidate order, so
     // the output is byte-identical to the serial path; we just reach it faster. A window's worth of
     // reads may be wasted once we have enough matches - a good trade when latency dwarfs a few reads.
-    private List<SearchMatch> VerifyParallel(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile)
+    private List<SearchMatch> VerifyParallel(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile, SearchLimits? limits)
     {
         var results = new List<SearchMatch>();
         int perFile = PerFileCap(maxResults, maxPerFile);
@@ -352,12 +366,16 @@ public sealed class SegmentedIndex : IDisposable
 
             foreach (var list in perFileHits)
             {
+                if (limits is not null && maxPerFile > 0 && list.Count >= perFile) limits.HitPerFileCap = true;
                 results.AddRange(list);
                 if (results.Count >= maxResults) break;
             }
         }
         return Cap(results, maxResults);
     }
+
+    // Process-wide bound on query-time whole-file read memory (see ScanCandidate). Shared by every query and root.
+    private static readonly ByteBudget QueryReadBudget = new(512L * 1024 * 1024);
 
     private static List<SearchMatch> Cap(List<SearchMatch> results, int maxResults)
     {
@@ -379,7 +397,9 @@ public sealed class SegmentedIndex : IDisposable
         // trigrams, but a case-INSENSITIVE query still uses them by probing every case variant per position
         // (TryScan handles this) - so -i no longer degrades to reading the whole multi-GB file. No network
         // stat needed to know a file is large.
-        if (PositionalSidecar.HasSidecar(_dir, rel))
+        // A query spanning lines can't match across the line-aligned blocks (every trigram crossing a block boundary
+        // contains '\n' and lives in neither block's Bloom), so it takes the whole-file path below instead.
+        if (query.IndexOf('\n') < 0 && PositionalSidecar.HasSidecar(_dir, rel))
         {
             bool handled = PositionalSidecar.TryScan(_dir, _root, rel, query, results, maxResults, caseSensitive, out long srcBytes, out long scBytesRead);
             if (!handled)
@@ -405,8 +425,16 @@ public sealed class SegmentedIndex : IDisposable
             long size; try { size = fs.Length; } catch { size = 0; }
             if (size < LargeFileIndexer.StreamThresholdBytes)
             {
-                var text = Storage.SourceFile.ReadAllText(fs);
-                FileScanner.ScanText(rel, text, query, results, maxResults, 0, comparison);
+                // The parallel (network) verify reads a window of candidates at once; whole-file reads of mid-size files
+                // with no block index (non-UTF-8, up to 128 MB each) must not stack into GBs. Budget the bytes + chars.
+                long footprint = network ? size * 3 : 0;
+                if (footprint > 0) QueryReadBudget.Acquire(footprint);
+                try
+                {
+                    var text = Storage.SourceFile.ReadAllText(fs);
+                    FileScanner.ScanText(rel, text, query, results, maxResults, 0, comparison);
+                }
+                finally { if (footprint > 0) QueryReadBudget.Release(footprint); }
                 if (trace != null) AddTrace(trace, rel, false, size, 0, results.Count);
                 return results;
             }

@@ -107,7 +107,7 @@ public static class CodeCompassTools
     // (Index-staleness is disclosed on EVERY result by ServerContext.QueryAll, not only on zeros.)
     private static string CoverageCaveat(IReadOnlyList<ServerContext.IndexHandle> handles, bool includeSymbolSkipped = false)
     {
-        int overCap = 0, symbolSkipped = 0;
+        int overCap = 0, symbolSkipped = 0, ambiguousDirs = 0;
         foreach (var h in handles)
         {
             try
@@ -116,10 +116,14 @@ public static class CodeCompassTools
                 if (meta is null) continue;
                 overCap += meta.FilesOverCap;
                 symbolSkipped += meta.FilesSymbolSkipped;
+                ambiguousDirs += meta.AmbiguousDirsSkipped;
             }
             catch { /* meta is best-effort; a missing caveat just omits the note */ }
         }
         var sb = new StringBuilder();
+        if (ambiguousDirs > 0)
+            sb.Append($" (Note: {ambiguousDirs:N0} director(ies) named packages/build/out/target/dist were skipped as build " +
+                      "output - if one holds source, list its name under \"keepDirs\" in .codecompass.json (or CODECOMPASS_KEEP) and reindex.)");
         if (overCap > 0)
             sb.Append($" (Note: {overCap:N0} file(s) exceed the size cap and are NOT indexed - " +
                       "a match could be in one; run `codecompass survey` to see them.)");
@@ -172,7 +176,9 @@ public static class CodeCompassTools
                    "search_code if it may be a macro/#define, a language without symbol support, or spelled differently." + CoverageCaveat(handles, includeSymbolSkipped: true);
 
         var sb = new StringBuilder();
-        foreach (var (h, s) in matches)
+        // Bounded like every other tool: a common name (Dispose, Main, Run) across a federated workspace can have
+        // thousands of definitions - the token flood this tool exists to prevent.
+        foreach (var (h, s) in matches.Take(MaxDefinitionsShown))
         {
             var path = DisplayPath(h, s.RelativePath);
             string loc = s.EndLine > s.Line ? $"{path}:{s.Line}-{s.EndLine}" : $"{path}:{s.Line}";
@@ -187,11 +193,12 @@ public static class CodeCompassTools
             var snippet = TryReadSnippet(h.Root, s.RelativePath, s.Line, s.EndLine > s.Line ? s.EndLine : s.Line);
             if (snippet is not null) { sb.AppendLine(); sb.Append(snippet); }
         }
-        else sb.Append($"({matches.Count} definitions)");
+        else sb.Append(Footer(Math.Min(matches.Count, MaxDefinitionsShown), matches.Count > MaxDefinitionsShown, "definition", "definitions"));
         return sb.ToString();
     }, cancellationToken);
 
     private const int SnippetMaxLines = 40;
+    private const int MaxDefinitionsShown = 50;
 
     // Read lines [startLine..endLine] (1-based, inclusive) of a repo file for inline display, but only
     // for a small span. Returns null if too big, unreadable, or the file is huge (never materialize a
@@ -315,18 +322,19 @@ public static class CodeCompassTools
         bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0;
         // Per-query comment/string classifier so the lexical backfill skips <see cref> doc-comment / string-literal
         // hits in covered-language files (the v1.0.212 precision regression); reads + caches each file once.
-        var spanFilter = new LexicalSpanFilter();
+        var spanFilter = new LexicalSpanFilter(name);
         var semKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.OrdinalIgnoreCase);
 
+        var lexLimits = new CodeCompass.Core.Indexing.Segments.SegmentedIndex.SearchLimits();
         if (hits.Count <= maxResults && indexable)
             foreach (var h in handles)
             {
                 // Reference mode: canonical candidate order (build-order-independent: a local and a UNC index
                 // built in separate runs return the same set) + a per-file cap so one high-hit noise file
                 // can't consume the whole budget and starve the real references (the UNC refs-count gap).
-                foreach (var m in h.Text.Search(name, probe * 5, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true))
+                foreach (var m in h.Text.Search(name, probe * 5, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true, limits: lexLimits))
                 {
                     // Shared filter (same as the CLI): skip semantic-covered files unless that language's pass was
                     // incomplete, skip build noise, require a whole-word match, and skip comment/string spans. The
@@ -376,6 +384,11 @@ public static class CodeCompassTools
             : "";
         if (csUnreadable.Count > 0)
             csNote += " (Note: " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(System.IO.Path.GetFileName).ToList()!) + ")";
+        // The backfill's raw scan budget (or a file's per-file cap) ran out before the filtered list did: the count may
+        // be incomplete, so say so rather than presenting it (or a zero) as exact.
+        if (hits.Count <= maxResults && (lexLimits.HitTotalCap || lexLimits.HitPerFileCap))
+            csNote += " (Note: the lexical scan reached its budget" + (lexLimits.HitPerFileCap ? $" - files with more than {ReferenceMerge.MaxLexicalHitsPerFile} matches were cut off" : "") +
+                      ", so some text references may not be listed; narrow the query or check those files directly.)";
         if (!indexable)
             csNote += $" (Note: \"{name}\" is under {MinIndexedQuery} characters, too short for the text index - only C# " +
                       "semantic references were searched; C/C++ and other languages were NOT. search_code with " +

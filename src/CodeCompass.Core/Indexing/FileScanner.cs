@@ -31,6 +31,10 @@ public static class FileScanner
             results.Add(new SearchMatch(rel, line + lineOffset, idx - lineStart + 1, lineText, offset));
             if (results.Count >= maxResults) return;
             scanned = idx + Math.Max(1, query.Length);
+            // A multi-line query's match contains newlines the counting loop above would skip (it resumes at
+            // `scanned`) - count them here, or every later match reports a line number too small.
+            for (int k = idx; k < scanned && k < text.Length; k++)
+                if (text[k] == '\n') { line++; lineStart = k + 1; }
         }
     }
 

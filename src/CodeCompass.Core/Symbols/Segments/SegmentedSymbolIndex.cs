@@ -143,7 +143,7 @@ public sealed class SegmentedSymbolIndex : IDisposable
             {
                 if (tomb is not null && tomb.Contains(seg.GetSymbolPath(i))) continue;
                 // Query-time ignore consistency: drop symbols a stale index still holds for now-ignored paths.
-                if (CodeCompass.Core.Ignore.IgnoreRules.QueryDefault.IsIgnoredPath(seg.GetSymbolPath(i))) continue;
+                if (QueryIgnore.IsIgnoredPath(seg.GetSymbolPath(i))) continue;
                 result.Add(seg.GetSymbol(i));
             }
         }
@@ -162,7 +162,7 @@ public sealed class SegmentedSymbolIndex : IDisposable
             {
                 if (!seg.GetName(i).Contains(queryText, StringComparison.OrdinalIgnoreCase)) continue;
                 if (tomb is not null && tomb.Contains(seg.GetSymbolPath(i))) continue;
-                if (CodeCompass.Core.Ignore.IgnoreRules.QueryDefault.IsIgnoredPath(seg.GetSymbolPath(i))) continue;
+                if (QueryIgnore.IsIgnoredPath(seg.GetSymbolPath(i))) continue;
                 result.Add(seg.GetSymbol(i));
                 if (result.Count >= max) return result;
             }
@@ -353,6 +353,10 @@ public sealed class SegmentedSymbolIndex : IDisposable
         if (File.Exists(tombPath))
             ReadTombstones(new MemoryStream(AtomicFile.ReadWithRetry(tombPath, File.ReadAllBytes)));
     }
+
+    /// <summary>Query-time ignore rules (stale-index pollution filter). The symbol index doesn't know its repo root, so
+    /// the opener sets this to that root's rules (<see cref="IgnoreRules.ForRoot"/>); the process default otherwise.</summary>
+    public CodeCompass.Core.Ignore.IgnoreRules QueryIgnore { get; set; } = CodeCompass.Core.Ignore.IgnoreRules.QueryDefault;
 
     public void Dispose()
     {

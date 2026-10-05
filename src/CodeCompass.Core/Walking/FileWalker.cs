@@ -56,6 +56,11 @@ public sealed class FileWalker
     public int DroppedDirs => _droppedDirs;
     private int _droppedDirs;
 
+    /// <summary>Directories skipped by a default name rule whose name often holds source (packages/, build/, ...) -
+    /// see IgnoreRules.IsAmbiguousIgnoredDirectory. Valid after enumeration completes.</summary>
+    public int AmbiguousDirsSkipped => _ambiguousDirsSkipped;
+    private int _ambiguousDirsSkipped;
+
     private const int RetryDelayMs = 75; // brief pause before a single network re-read of a failed directory
 
     // Test-only fault-injection seam: invoked with each directory path just before it is enumerated, so a
@@ -80,6 +85,7 @@ public sealed class FileWalker
         root = Path.GetFullPath(root);
         _overCapSkipped = 0;
         _droppedDirs = 0;
+        _ambiguousDirsSkipped = 0;
         LargestOverCapBytes = 0;
         LargestOverCapPath = null;
         _overCapFiles = CollectOverCapFiles ? new List<(string, long)>() : null;
@@ -95,7 +101,11 @@ public sealed class FileWalker
     // Keep a subdirectory (not ignored, not a reparse point). Attributes are cached from the enumeration.
     private bool KeepSubdir(DirectoryInfo sub)
     {
-        if (_ignore.IsIgnoredDirectory(sub.Name)) return false;
+        if (_ignore.IsIgnoredDirectory(sub.Name))
+        {
+            if (_ignore.IsAmbiguousIgnoredDirectory(sub.Name)) System.Threading.Interlocked.Increment(ref _ambiguousDirsSkipped);
+            return false;
+        }
         try { if ((sub.Attributes & FileAttributes.ReparsePoint) != 0) return false; }
         catch { return false; }
         return true;

@@ -102,6 +102,7 @@ public static class PositionalSidecar
 
         var full = Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar));
         FileStream? src = null;
+        int startCount = results.Count;
         try
         {
             for (int i = 0; i < sc.Count && results.Count < maxResults; i++)
@@ -117,20 +118,61 @@ public static class PositionalSidecar
                 if (!all) continue;
 
                 long blockLen = sc.EndByte[i] - sc.StartByte[i];
-                if (blockLen <= 0 || blockLen > int.MaxValue) continue;
+                if (blockLen <= 0 || blockLen > int.MaxValue - LargeFileIndexer.SeamBytes) continue;
+                // Read a little BEFORE the block too: if this block continues a line a forced cut split (no newline just
+                // before it), a match straddling that cut is scanned here - its trigrams are in this block's Bloom.
+                int tail = (int)Math.Min(LargeFileIndexer.SeamBytes, sc.StartByte[i]);
                 src ??= new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read);
-                var bytes = new byte[(int)blockLen];
-                src.Seek(sc.StartByte[i], SeekOrigin.Begin);
-                if (!ReadFull(src, bytes)) break;
-                bytesRead += blockLen; // bytes pulled from the (possibly networked) source
-                int skip = sc.StartByte[i] == 0 ? sc.BomLen : 0;
-                var text = Encoding.UTF8.GetString(bytes, skip, bytes.Length - skip);
-                FileScanner.ScanText(rel, text, query, results, maxResults, lineOffset: sc.StartLine[i] - 1, comparison);
+                var bytes = new byte[(int)blockLen + tail];
+                src.Seek(sc.StartByte[i] - tail, SeekOrigin.Begin);
+                // A short read means the file changed since it was indexed: not "handled" - the caller whole-file scans.
+                if (!ReadFull(src, bytes)) return Abandon(results, startCount, rel, "file is shorter than when indexed");
+                bytesRead += blockLen + tail; // bytes pulled from the (possibly networked) source
+                if (tail == 0 || bytes[tail - 1] == (byte)'\n')
+                {
+                    int skip = sc.StartByte[i] == 0 ? sc.BomLen : 0;
+                    var text = Encoding.UTF8.GetString(bytes, tail + skip, bytes.Length - tail - skip);
+                    FileScanner.ScanText(rel, text, query, results, maxResults, lineOffset: sc.StartLine[i] - 1, comparison);
+                }
+                else ScanSeamBlock(rel, bytes, tail, query, results, maxResults, sc.StartLine[i], comparison);
             }
         }
-        catch { /* partial results are acceptable; we still "handled" the file */ }
+        catch (Exception ex) { return Abandon(results, startCount, rel, ex.Message); }
         finally { src?.Dispose(); }
         return true;
+    }
+
+    // A read failed partway (a share hiccup, the file changed under us): discard this file's partial hits and report it
+    // NOT handled, so the caller falls back to a whole-file scan. Returning "handled" with partial or zero hits was a
+    // silent, nondeterministic refs/search gap.
+    private static bool Abandon(List<SearchMatch> results, int startCount, string rel, string why)
+    {
+        if (results.Count > startCount) results.RemoveRange(startCount, results.Count - startCount);
+        try { Diagnostics.Log.Global.Warn($"block-indexed scan of {rel} fell back to a whole-file scan: {why}"); } catch { }
+        return false;
+    }
+
+    // Scan a block that continues a line split by a forced cut, from `tail` bytes before its start. Matches lying wholly
+    // in the tail belong to the previous block (skipped); a match crossing into this block is the one only this scan can
+    // find. Columns in a >16 MB line are reported relative to this block's start, as for any continuation block; a
+    // straddling match reports column 1 (its LineTextOffset is shifted to match, so whole-word checks stay exact).
+    private static void ScanSeamBlock(string rel, byte[] bytes, int tail, string query, List<SearchMatch> results,
+                                      int maxResults, int startLine, StringComparison comparison)
+    {
+        var tailText = Encoding.UTF8.GetString(bytes, 0, tail);
+        var combined = tailText + Encoding.UTF8.GetString(bytes, tail, bytes.Length - tail);
+        int tailChars = tailText.Length;
+        var found = new List<SearchMatch>();
+        FileScanner.ScanText(rel, combined, query, found, int.MaxValue, lineOffset: startLine - 1, comparison);
+        foreach (var m in found)
+        {
+            if (results.Count >= maxResults) return;
+            if (m.Line != startLine) { results.Add(m); continue; }        // past a newline: an ordinary in-block hit
+            int start = m.Column - 1;                                    // the first line starts at the tail's start
+            if (start + query.Length <= tailChars) continue;             // wholly in the previous block
+            int column = Math.Max(1, m.Column - tailChars);
+            results.Add(m with { Column = column, LineTextOffset = m.LineTextOffset - (m.Column - column) });
+        }
     }
 
     private static bool ReadFull(FileStream fs, byte[] buf)

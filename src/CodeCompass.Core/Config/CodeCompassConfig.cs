@@ -22,6 +22,8 @@ public sealed class RepoConfig
     [JsonPropertyName("statusLine")] public bool? StatusLine { get; set; }
     [JsonPropertyName("semanticIdleMinutes")] public int? SemanticIdleMinutes { get; set; }
     [JsonPropertyName("ignore")] public string[]? Ignore { get; set; }
+    // Directory names to index even though they're skipped by default as build output (packages, build, out, ...).
+    [JsonPropertyName("keepDirs")] public string[]? KeepDirs { get; set; }
     // Extra places to find a C/C++ compile_commands.json (for precise find_references). Each entry is a
     // file OR a directory (searched for compile_commands.json and build/compile_commands.json), relative
     // to the repo root or absolute. Several are merged (per-file union), so a multi-target build that emits
@@ -54,6 +56,9 @@ public static class CodeCompassConfig
                               //   blobs above 1 MB are auto-skipped regardless. Still text-searchable.
   // "maxFileMb": 2000,       // don't index a file larger than this at all (default 2000 = 2 GB).
   // "ignore": ["generated", "thirdparty"],  // extra directory names to exclude from indexing.
+  // "keepDirs": ["packages"], // directory names to index even though they're skipped by default as build
+                              //   output (packages, build, out, target, dist, ...) - e.g. a monorepo whose
+                              //   sources live under packages/. (env: CODECOMPASS_KEEP, comma-separated.)
   // "maxAutoMb": 100,        // repos bigger than this wait for a one-time `codecompass index` instead
                               //   of auto-indexing inside a tool call (default 100).
   // "autoReconcile": true,   // on startup, pick up changes made outside the session (e.g. a source-
@@ -284,6 +289,19 @@ public static class CodeCompassConfig
                 yield return d;
         if (cfg.Ignore is not null)
             foreach (var d in cfg.Ignore)
+                if (!string.IsNullOrWhiteSpace(d)) yield return d.Trim();
+    }
+
+    /// <summary>Directory names to index even though a default rule skips them: CODECOMPASS_KEEP + config keepDirs.</summary>
+    public static IEnumerable<string> KeptDirs() => KeptDirs(_current);
+    public static IEnumerable<string> KeptDirs(RepoConfig cfg)
+    {
+        var env = Environment.GetEnvironmentVariable("CODECOMPASS_KEEP");
+        if (!string.IsNullOrWhiteSpace(env))
+            foreach (var d in env.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                yield return d;
+        if (cfg.KeepDirs is not null)
+            foreach (var d in cfg.KeepDirs)
                 if (!string.IsNullOrWhiteSpace(d)) yield return d.Trim();
     }
 
