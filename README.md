@@ -88,8 +88,9 @@ claude --plugin-dir "<repo>\plugin"                                  # one sessi
 > dependencies included, runs emulated). Searches stay effectively instant; only the initial index
 > build runs somewhat slower than on native x64.
 
-> **Maintainer:** cut a release with `pwsh ./make-release.ps1 -Publish` (builds the zip and uploads it
-> to a GitHub Release tagged `v<version>` via the `gh` CLI). Without `-Publish` it just builds the zip.
+> **Maintainer:** every push to `main` is a release - `.github/workflows/release.yml` runs
+> `make-release.ps1 -Publish` on a GitHub Windows runner (full test gate, then the zip is uploaded to a GitHub
+> Release tagged `v<version>`; a failed gate publishes nothing). Locally, `pwsh ./make-release.ps1` just builds the zip.
 
 In a session, run `/mcp` to confirm the **codecompass** server is connected. A `PreToolUse` hook
 redirects `Grep` to CodeCompass so the agent uses the index instead of scanning files (set

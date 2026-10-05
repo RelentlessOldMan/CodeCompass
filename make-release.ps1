@@ -6,8 +6,9 @@
 
 .DESCRIPTION
   Runs build-plugin.ps1 (publishes plugin/bin), zips the whole plugin/ folder to
-  codecompass-plugin-<version>-win-x64.zip (gitignored), and prints install steps. There is deliberately
-  NO CI - you cut releases from this machine with this script.
+  codecompass-plugin-<version>-win-x64.zip (gitignored), and prints install steps. Every push to main runs this
+  automatically (.github/workflows/release.yml, `-Publish` on a GitHub Windows runner); run it by hand for a local
+  zip, or to publish without pushing new commits.
 
   -Publish uploads the zip to a GitHub Release tagged v<version> via the `gh` CLI (must be installed and
   authenticated: `gh auth status`). Without -Publish it only builds the local zip.

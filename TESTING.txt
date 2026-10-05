@@ -11,7 +11,8 @@ The suite that actually gates a push or a release is:
                          network-simulated, pathological and C/C++ refs scenarios;
                          -Network <share> runs the same over real SMB.
   - make-release.ps1     runs check.ps1 -Big, then smoke-tests the published MCP
-                         server (initialize + tools/list) before tagging.
+                         server (initialize + tools/list) before tagging. It runs
+                         on every push to main (.github/workflows/release.yml).
   - scripts/coverage.ps1 coverlet + ReportGenerator (machine-saturating).
   - Warnings are errors; bug fixes come with a regression test that fails without
     the fix. See README "Testing" for details.

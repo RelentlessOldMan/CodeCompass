@@ -1,0 +1,41 @@
+name: Release
+
+# Every push to main is a release: the same make-release.ps1 that used to be run by hand, on a GitHub Windows runner.
+# It runs the full gate (check.ps1 -Big: Release build with warnings-as-errors, the xUnit suite, the big-file /
+# network-sim / pathological scenarios), publishes the self-contained plugin, smoke-tests the shipped MCP server,
+# zips it, and creates the GitHub Release v<version> tagged at the pushed commit. A failed gate means no release.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # re-run a release by hand (e.g. after a flaky runner) from the Actions tab
+
+# One release at a time, in push order. A push that lands while another release is running waits; if several pile up,
+# GitHub keeps only the newest pending run - its release contains every commit of the skipped ones.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write      # create the tag + GitHub Release and upload the zip
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the version is `git rev-list --count HEAD` (Directory.Build.props) - needs full history
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # Windows PowerShell 5.1, like the machine these scripts were written on. HEAD is already origin/main, so
+      # make-release's "push main first" step is a no-op here; it never pushes from CI.
+      - name: Test gate + build + publish
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./make-release.ps1 -Publish
