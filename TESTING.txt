@@ -52,8 +52,8 @@ assert exact results:
 
 - find_definition points at the right line.
 - find_references returns the complete, correct set of locations. This is where
-  the Roslyn (C#) and clang (C/C++) semantic layers get validated - the fixture
-  encodes the ground-truth answer key.
+  the Roslyn (C#) semantic layer and the C/C++ name search get validated - the
+  fixture encodes the ground-truth answer key.
 - search_code returns the expected matches with correct line ranges.
 
 These are deterministic and version-controlled, so they can gate every commit.
@@ -151,10 +151,10 @@ against a slow-but-obviously-correct reference (an oracle):
   engine against a trivially-correct baseline and catches indexing bugs that
   fixtures would miss.
 
-- Semantic oracle: for C#, invoking Roslyn directly is ground truth; for C/C++,
-  invoking clangd/clang directly is ground truth. Our index caches and serves
-  their answers, so the test confirms our indexing and caching layer preserves
-  what the compiler would have said, rather than reinventing it.
+- Semantic oracle: for C#, invoking Roslyn directly is ground truth. Our index
+  caches and serves its answers, so the test confirms our indexing and caching
+  layer preserves what the compiler would have said, rather than reinventing it.
+  (C/C++ references are a name search, checked against the text oracle above.)
 
 
 Easy-to-get-wrong cases to cover explicitly

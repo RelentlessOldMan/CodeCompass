@@ -28,18 +28,17 @@ public class CSharpConditionalRefsTests
     public void HasCSharpConditionalCompilation_DetectsConditionals(string src, bool expected)
         => Assert.Equal(expected, SemanticCoverage.HasCSharpConditionalCompilation(src));
 
-    // The per-language backfill gate: a .cs file backfills lexical ONLY when the C# pass was incomplete; a
-    // .c/.cpp/.h ONLY when the C/C++ pass was - so incompleteness in one language never over-fires lexical on
-    // the other (which resolved cleanly). A language without a semantic analyzer is always eligible.
+    // The per-language gate: a .cs name match counts ONLY when the C# semantic pass was incomplete (otherwise Roslyn
+    // already answered for .cs); C/C++ and every other language are always answered by name.
     [Fact]
     public void IsLexicalReference_IsPerLanguage()
     {
-        Assert.True(ReferenceMerge.IsLexicalReference("a/b.cs", "Foo();", 1, 3, cppIncomplete: false, csharpIncomplete: true));
-        Assert.False(ReferenceMerge.IsLexicalReference("a/b.cs", "Foo();", 1, 3, cppIncomplete: false, csharpIncomplete: false));
-        Assert.False(ReferenceMerge.IsLexicalReference("a/b.cs", "Foo();", 1, 3, cppIncomplete: true, csharpIncomplete: false)); // cpp-incomplete must not backfill .cs
-        Assert.True(ReferenceMerge.IsLexicalReference("a/b.cpp", "Foo();", 1, 3, cppIncomplete: true, csharpIncomplete: false));
-        Assert.False(ReferenceMerge.IsLexicalReference("a/b.cpp", "Foo();", 1, 3, cppIncomplete: false, csharpIncomplete: true)); // cs-incomplete must not backfill .cpp
-        Assert.True(ReferenceMerge.IsLexicalReference("a/b.py", "Foo()", 1, 3, cppIncomplete: false, csharpIncomplete: false)); // no analyzer -> always lexical
+        Assert.True(ReferenceMerge.IsLexicalReference("a/b.cs", "Foo();", 1, 3, csharpIncomplete: true));
+        Assert.False(ReferenceMerge.IsLexicalReference("a/b.cs", "Foo();", 1, 3, csharpIncomplete: false));
+        Assert.True(ReferenceMerge.IsLexicalReference("a/b.cpp", "Foo();", 1, 3, csharpIncomplete: false));
+        Assert.True(ReferenceMerge.IsLexicalReference("a/b.h", "Foo();", 1, 3, csharpIncomplete: true));
+        Assert.True(ReferenceMerge.IsLexicalReference("a/b.py", "Foo()", 1, 3, csharpIncomplete: false));
+        Assert.False(ReferenceMerge.IsLexicalReference("a/b.log", "Foo()", 1, 3, csharpIncomplete: false)); // not code
     }
 
     // End-to-end: a reference that exists ONLY inside an #if-guarded branch must not be a silent zero - refs
@@ -63,7 +62,7 @@ public class CSharpConditionalRefsTests
 
         Assert.Contains("caller.cs", all);                         // the #if-guarded use is recovered
         Assert.Contains("C# coverage INCOMPLETE", all);            // ...and the incompleteness is disclosed
-        var m = System.Text.RegularExpressions.Regex.Match(all, @"(\d+)\s+lexical reference");
+        var m = System.Text.RegularExpressions.Regex.Match(all, @"(\d+)\s+name-matched reference");
         Assert.True(m.Success && int.Parse(m.Groups[1].Value) > 0, $"expected a lexical backfill for the guarded ref:\n{all}");
     }
 
@@ -84,7 +83,7 @@ public class CSharpConditionalRefsTests
         var all = stdout + "\n" + stderr;
 
         Assert.DoesNotContain("C# coverage INCOMPLETE", all);       // nothing to disclose
-        var m = System.Text.RegularExpressions.Regex.Match(all, @"(\d+)\s+C#\s+\+.*?(\d+)\s+lexical");
+        var m = System.Text.RegularExpressions.Regex.Match(all, @"(\d+)\s+C# semantic\s+\+\s+(\d+)\s+name-matched");
         Assert.True(m.Success, $"expected the refs summary; got:\n{all}");
         Assert.True(int.Parse(m.Groups[1].Value) > 0, $"the Use()->Pong() call should resolve semantically:\n{all}");
         Assert.Equal(0, int.Parse(m.Groups[2].Value));             // no lexical backfill on a clean C# repo

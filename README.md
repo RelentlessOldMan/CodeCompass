@@ -16,8 +16,9 @@ Three complementary layers, cheapest first:
 
 - **Lexical** — a trigram index for instant literal/substring search across the whole repo.
 - **Symbolic** — tree-sitter parses every file into symbols (classes, methods, functions…) for go-to-definition.
-- **Semantic** — real find-references for **C#** (Roslyn) and **C/C++** (clang): it resolves the actual
-  symbol and ignores matches in comments and strings, which a text search can't.
+- **Semantic** — real find-references for **C#** (Roslyn): it resolves the actual symbol. Every other
+  language, **C and C++ included**, gets a fast **name search** for references: whole-word uses in code
+  files, never in comments or strings, never the definition itself (see *C/C++ references* below).
 
 Everything is **memory-mapped on disk** — the trigram index, the symbol index, and the
 change-detection ledger — so searching a dozens-of-GB repo uses only a few hundred MB of RAM and
@@ -32,12 +33,12 @@ editing it keeps just the changed files in memory. This is what lets an 87 GB re
 | Go-to-definition & symbol search | ✅ C#, C, C++, Python, JS, TS/TSX, Go, Rust, TRACE32 PRACTICE (.cmm) |
 | Semantic find-references (excludes comments/strings) | ✅ C# & C/C++; lexical whole-word elsewhere |
 | Auto re-index on file changes | ✅ debounced, content-hash verified, ignores build output |
-| Federate external directories (linked roots) | ✅ shared-once index, live-watched, cross-root C#/C++ references |
+| Federate external directories (linked roots) | ✅ shared-once index, live-watched, cross-root references |
 | Runs fully local, no GPU, no cloud | ✅ Yes |
 | Dozens-of-GB repos without exhausting RAM | ✅ indexes are memory-mapped on disk |
 | MATLAB / other unlisted languages | Lexical only (text search works; no symbols) |
 | Very large files | Indexed up to **2 GB** (streamed above ~128 MB, bounded memory); symbols skipped above 1 MB but still text-searchable (both tunable) |
-| C/C++ find-references precision | Best-effort without a `compile_commands.json` (find_references says so, and `doctor` warns) |
+| C/C++ find-references | By name, not compiled: fast and complete on any repo, but symbols that share a name are listed together |
 | Semantic "meaning" / embedding search | ❌ No (deliberately — needs a model; weaker for real code nav) |
 
 ## Minimal token footprint
@@ -129,7 +130,7 @@ codecompass link    <add|remove|list> <path>   federate an external directory in
 codecompass watch   <path>            auto-reindex on file changes
 codecompass search  <path> <query> [-i]  literal text search (-i = case-insensitive)
 codecompass def     <path> <name>     go-to-definition (file:startLine-endLine)
-codecompass refs    <path> <name>     references (semantic C#/C++, lexical elsewhere)
+codecompass refs    <path> <name>     references (semantic C#; by name elsewhere)
 codecompass callees <path> <name>     in-repo methods a C# method calls (C# only)
 codecompass symbols <path> <substr>   symbol-name search
 codecompass survey  <path>            report what the size caps skip + suggest config
@@ -185,7 +186,7 @@ editing source:
 | `CODECOMPASS_KEEP` | Comma/semicolon-separated directory names to index **even though they're skipped by default** as build output — e.g. `packages` for a pnpm/yarn monorepo whose sources live under `packages/`. (Config: `keepDirs`.) A zero result says when directories named `packages`/`build`/`out`/`target`/`dist` were skipped, so this is never a silent gap. |
 | `CODECOMPASS_CACHE_DIR` | Where indexes and logs live (default `%LOCALAPPDATA%\CodeCompass`). Keep it on a **local** disk: the cross-process write lock relies on local file-handle semantics. |
 | `CODECOMPASS_COMPACT_SEGMENTS` | Merge on-disk segments after this many accumulate from incremental edits (default 64). |
-| `CODECOMPASS_SEMANTIC_IDLE_MIN` | Minutes the server keeps the C#/C++ semantic model resident with no `find_references` before freeing it (default 10; 0 = keep). |
+| `CODECOMPASS_SEMANTIC_IDLE_MIN` | Minutes the server keeps the C# semantic model resident with no `find_references` before freeing it (default 10; 0 = keep). |
 | `CODECOMPASS_MAX_AUTO_MB` | Workspaces larger than this (default 100 MB) are left for a one-time CLI `codecompass index` instead of auto-indexing inside a tool call. |
 | `CODECOMPASS_STALL_WARN_SEC` | Warn in the log if a build stalls or a single file is held longer than this (default 60, min 5). The warning names the exact file(s) each worker is stuck on, so a pathologically slow file is identified rather than guessed. |
 | `CODECOMPASS_THREADS` / `CODECOMPASS_SEGMENT_MB` | Indexing parallelism / per-worker segment budget. |
@@ -213,8 +214,8 @@ your own choice and are not clamped.
   whole-file line scan.)
 - `#define`/macro definitions are **not** captured as symbols (they'd explode the symbol index on
   register-map code); the names are still findable via `search_code`.
-- Precise C/C++ semantics need a compile database (`compile_commands.json`); without one it degrades
-  to syntactic. No embeddings / semantic-meaning search. Single machine, single user.
+- C/C++ references are matched by name, not compiled, so different symbols that share a name are listed
+  together. No embeddings / semantic-meaning search. Single machine, single user.
 - Symbolic links and junctions are **not followed** (a link in a clone could otherwise pull a file from
   outside the repo into search results). The files they point to are indexed where they really live,
   if that's inside an indexed root.
@@ -265,8 +266,7 @@ travel with the repo instead of being set on every run. Precedence is **env var 
 default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names), `keepDirs`
 (array of default-skipped directory names to index anyway),
 `threads`, `walkThreads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`, `autoReconcile`,
-`statusLine`, `semanticIdleMinutes`, `compileCommands` (array — extra places to find a C/C++
-`compile_commands.json`; see below).
+`statusLine`, `semanticIdleMinutes`.
 
 Don't hand-write it — run **`codecompass init <path>`** to drop a documented starter (every setting
 commented out, so it's all defaults until you edit; `//` comments and trailing commas are allowed).
@@ -284,54 +284,23 @@ raising a cap is a judgement only the repo owner can make. Raising the symbol ca
 data-blob crawl — above 1 MB, overwhelmingly numeric/hex files are auto-skipped for symbols by
 content (see *Tuning* above).
 
-### Precise C/C++ references (`compile_commands.json`)
+### C/C++ references
 
-`find_references` for C/C++ is precise only with a **compile database** — a `compile_commands.json` that
-tells clang each file's real include paths and defines. Without one it falls back to best-effort flags
-and may resolve little (common in vendor-toolchain firmware). CodeCompass tells you when this happens,
-keyed on what the query actually did — not merely on whether a DB file exists. If a lookup's candidate
-files fail to parse or reference headers that aren't in the tree, `find_references` says so and **names the
-missing headers** (e.g. `C/C++ coverage INCOMPLETE: 5 unresolved #include(s): VENDOR_a.h, …`) — because a
-missing header can't be fixed by any `-I` or compile DB, only by adding it to the tree. `codecompass doctor`
-scans proactively too: it reports both when C/C++ sources exist with no compile DB **and** when translation
-units reference unresolvable includes (`N of M … reference at least one #include not found in the tree`). So
-a thin result reads as "couldn't fully run," not "no references."
+`find_references` answers C and C++ by **name**: every whole-word use of the name in C/C++ code, skipping
+comments, string literals and the symbol's own definition (functions, methods, types). It reads the same
+text index `search_code` uses, so it answers in about a second on any repo, of any size, with or without
+the headers, and gives the same answer every time.
 
-To fix it, generate a compile DB (CMake `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, or **Bear**/`compiledb` for
-Make-based builds) and — if it's not in the repo root or `build/` — point at it:
+What it doesn't do is compile the code, so it can't tell apart different symbols that share a name: asking
+for `getNumOperands` lists the calls on every class that has one, together, and the answer says so. Each
+line carries its text, which is usually enough to tell them apart; `find_definition` lists where each
+same-named symbol is defined. Prototypes (declarations without a body) are listed like uses.
 
-```json
-{ "compileCommands": ["out", "build/appB/compile_commands.json"] }
-```
-
-Each entry is a **directory** (searched for `compile_commands.json` and `build/compile_commands.json`) or
-a **file**, relative to the repo root or absolute; `root` and `root/build` are always checked too. A
-project that builds **multiple targets** can list several — they're **merged per source file** (their
-union), so each translation unit gets its own flags. If the same file appears in more than one DB, the
-first-listed wins (any valid parse resolves the symbol; we don't reproduce a specific target's object
-code). One thing it does *not* do: parse the same file multiple times under different configs to capture
-references inside both `#ifdef` branches. (Env: `CODECOMPASS_COMPILE_COMMANDS`, `;`-separated.)
-
-### Tuning C/C++ find-references (speed vs. coverage)
-
-`find_references` for C/C++ parses candidate translation units with clang, so a few knobs trade coverage
-for speed and memory. CodeCompass names the relevant one in its output when a query is affected, so you
-rarely set these blind.
-
-| Env var | Effect |
-|---|---|
-| `CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES` | Above this many candidate C/C++ files (default **400**) the semantic parse is skipped and the fast lexical layer answers instead (disclosed as lexical). A *latency* guard for pathologically-broad symbols in generated code — parsing hundreds-to-thousands of translation units would grind for minutes and fall back to lexical anyway. Set to **0** to always attempt a full semantic parse. |
-| `CODECOMPASS_CPP_SESSION_MEM_MB` | Working-set ceiling for the semantic pass across a session (default scales with RAM). Raise it to let broad queries parse more candidates before falling back to lexical. |
-| `CODECOMPASS_CPP_QUERY_MEM_MB` | How much a *single* query may grow the working set before it stops parsing further candidates and discloses partial coverage. |
-| `CODECOMPASS_CPP_MAX_TU_MB` | Largest C/C++ source handed to clang (default **2**). Larger candidates are searched **lexically instead** — and the answer says so, naming this knob. |
-| `CODECOMPASS_CPP_PARSE_THREADS` | Translation units parsed concurrently (default: sized by free memory, at most 3). |
-| `CODECOMPASS_CPP_SUBPROCESS` | `0` parses in-process instead of in a short-lived worker (the worker returns clang's native memory to the OS after each query; keep it on). |
-| `CODECOMPASS_CPP_WORKER_STALL_SEC` | Hang protection for the worker (default **600**): how long it may go with **no progress** (no file finished parsing) before it's stopped. There is no total time limit - a slow but progressing parse always completes with its real answer. A stalled query reports that no C/C++ references were found by analysis; text matches are never substituted. (The old `CODECOMPASS_CPP_WORKER_TIMEOUT_SEC` is still read as a fallback.) |
-
-`compile_commands.json` comes from the repo, so its arguments reach clang through an **allowlist**: defines,
-include paths, forced includes, language/standard, target and dialect flags pass; anything that would load
-code (`-Xclang -load`, `-fplugin`), remap files (`-ivfsoverlay`) or write files (`-MF`, module caches, …) is
-dropped. MSVC-style `/I /D /U /FI /std:` from a `cl`/`clang-cl` database are translated.
+Why not a compiler? CodeCompass used to resolve C/C++ references with clang. Compared side by side on
+fmt, llvm and firmware-style C, clang found far fewer real references (it missed calls into templates and
+code in headers no parsed file included), needed minutes to hours on header-heavy code, and needed a
+compile database to resolve much at all. The name search found every use clang found, plus the ones it
+missed.
 
 ## Staying fresh (out-of-session changes)
 
@@ -361,6 +330,10 @@ index`/`update` can all work on the same repo safely:
   exits, another takes over.
 - `reindex` won't park a tool call behind another process's long build — it says another process is writing
   and that the session will pick up the result when it finishes.
+
+Other local tools may **read** CodeCompass's per-file hash ledger (size, modified time, content hash) to avoid
+re-hashing files it already hashed; CodeDiffer does. The format and the rules for reading it safely are in
+[docs/hash-ledger-format.md](docs/hash-ledger-format.md). Only CodeCompass writes it.
 
 ## Linked roots (federating external directories)
 
@@ -400,7 +373,8 @@ focuses several. `action=focus` with no `path` clears it.
   owner's fresh index. Out-of-session changes are reconciled on load (gated for network/huge roots).
 - **Cross-root code intelligence.** `find_references` and `find_callees` resolve **across** the
   boundary: a call in your project to a type defined in a linked root binds correctly (C# via Roslyn,
-  C/C++ via clang — one compilation spanning all roots, not a per-root union that misses the seam).
+  one model spanning all roots, not a per-root union that misses the seam). Name-matched references
+  (C/C++ and other languages) search every root.
 - **Result addressing.** Hits in the project stay **repo-relative** (compact); hits in a linked root
   are shown as **absolute** paths, so they're unambiguous and directly readable.
 - **Sensible guards.** You can't link a directory that's inside your project (or inside/around an
@@ -431,7 +405,7 @@ running an always-on background CodeCompass service, which the tool intentionall
 |---|---|---|
 | Query scope | project **+ all its linked roots**, merged into one result | the **single root** you point it at |
 | `search_code` / `find_definition` / `find_references` / `find_callees` / `search_symbols` | federated across roots | one root only |
-| Live watching, write-ownership, cross-root C#/C++ semantics | ✅ | — (one-shot, cold) |
+| Live watching, write-ownership, cross-root C# semantics | ✅ | — (one-shot, cold) |
 | Manage links | ✅ `manage_links` tool | ✅ `link add`/`remove`/`list` |
 | Build/refresh an index (`index` / `update`) | auto (per root) | ✅ per root |
 
@@ -536,13 +510,9 @@ behaviour at extreme scale and across a network.
 - **`find_references` on C#** warms up dramatically — Roslyn's workspace is built once (the 13–31 s
   *refs 1st-call*), then resident, so subsequent calls drop from tens of seconds cold to
   **sub-second–few-seconds** warm (EF Core 900 ms, Roslyn 1.7 s).
-- **`find_references` on C/C++** shows little warm speedup: each call runs a **fresh clang subprocess**
-  so the long-lived server never accumulates libclang's native memory (the deliberate v1.0.176
-  memory-safety trade-off). So a broad C/C++ reference query costs seconds *every* time — worst on
-  template-heavy trees (fmt, LLVM). The flip side is visible on the 66 k-file corpus: its broadest
-  symbols trip the v1.0.210 short-circuit to lexical, so warm refs land at **251 ms (local) /
-  344 ms (SMB)** — *faster than 207-file fmt*. Tune this cutoff with
-  `CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES` (see above).
+- **`find_references` on C/C++** is a name search over the index (see *C/C++ references*), so it costs
+  about what `search_code` does plus reading the matched files to skip comments and strings: around a
+  second, on any repo.
 
 **Scale check:** an aggregated **10.4 GB / ~1.1 million file** corpus indexed in **7m48s** (22 MB/s)
 using **792 MB heap / 2.2 GB peak working set**, with queries still ~1 ms (p95 7.9 ms). Memory stays

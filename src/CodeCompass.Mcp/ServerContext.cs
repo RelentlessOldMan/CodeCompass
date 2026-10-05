@@ -37,7 +37,6 @@ public static class ServerContext
     private static SegmentedSymbolIndex? _symbols;
     private static DiskSnapshot? _snapshot;
     private static RoslynCSharpAnalyzer? _csharp;
-    private static ClangCppAnalyzer? _cpp;
     private static RepositoryWatcher? _watcher;
 
     // Teardown signal. A long rebuild (RepositoryIndexer.Build) and the semantic queries observe this token;
@@ -164,13 +163,12 @@ public static class ServerContext
         CancelInFlight();
         RepositoryWatcher? oldWatcher;
         RoslynCSharpAnalyzer? oldCs;
-        ClangCppAnalyzer? oldCpp;
         Rw.EnterWriteLock();
         try
         {
             oldWatcher = _watcher; // dispose after releasing the lock (see StopLiveIndex)
             _watcher = null;
-            oldCs = _csharp; oldCpp = _cpp; // ditto - dispose off-lock
+            oldCs = _csharp; // ditto - dispose off-lock
             Root = Path.GetFullPath(root);
             CodeCompassConfig.Load(Root); // per-repo .codecompass.json in effect for the size gate + build
             _text?.Dispose();
@@ -180,7 +178,6 @@ public static class ServerContext
             _symbols = null;
             _snapshot = null;
             _csharp = null;
-            _cpp = null;
             _state = IndexState.NotStarted;
             _pendingPaths.Clear();
             _pendingReconcile = false;
@@ -193,7 +190,7 @@ public static class ServerContext
         }
         finally { Rw.ExitWriteLock(); }
         oldWatcher?.Dispose();
-        oldCs?.Dispose(); oldCpp?.Dispose();
+        oldCs?.Dispose();
         // Off-lock: tearing down linked roots disposes their watchers, which must never happen under Rw
         // (a watcher.Dispose drains an in-flight OnLinkedChanges -> SwapLinked that itself takes Rw).
         DisposeLinkedRoots();
@@ -224,8 +221,8 @@ public static class ServerContext
     }
 
     /// <summary>Release everything this session holds: cancel in-flight work, stop watchers, drop linked roots and
-    /// the live-watch role. Called when the MCP host stops, so an in-flight clang worker is killed with the session
-    /// instead of being orphaned, and another session can take over live indexing immediately.</summary>
+    /// the live-watch role. Called when the MCP host stops, so in-flight work is cancelled with the session
+    /// and another session can take over live indexing immediately.</summary>
     public static void Shutdown()
     {
         StopLiveIndex();
@@ -348,7 +345,6 @@ public static class ServerContext
         _text?.Dispose(); _symbols?.Dispose(); _snapshot?.Dispose();
         _text = t; _symbols = s; _snapshot = null;
         _csharp?.Dispose(); _csharp = null;
-        _cpp?.Dispose(); _cpp = null;
         _loadedGen = gen;
         Log.For(Root).Info("reloaded the index before applying edits (another CodeCompass process had updated it)");
     }
@@ -605,7 +601,7 @@ public static class ServerContext
     /// <para>The op receives ONE cancellation token for its whole run: the teardown token captured once here (a
     /// re-point re-arms <see cref="ShutdownToken"/>, so re-reading it mid-query would hand later stages a fresh,
     /// uncancelled token and let a stale query run to completion while Init waits on the write lock), linked with the
-    /// MCP request's own token (the client cancelled or timed out the call - stop burning the clang/Roslyn pass).</para>
+    /// MCP request's own token (the client cancelled or timed out the call - stop burning the Roslyn pass).</para>
     internal static string QueryAll(Func<IReadOnlyList<IndexHandle>, CancellationToken, string> op, CancellationToken requestCt = default)
     {
         var teardown = ShutdownToken;
@@ -633,7 +629,7 @@ public static class ServerContext
                        "manage_links action=focus (no path), or build the focused root's index.";
             string focusNote = FocusDisclosure(all.Count, handles) + EventsLostNote() + StalenessNote(handles);
 
-            // Every tool funnels through here. An unexpected throw inside op (a clang edge case, a corrupt
+            // Every tool funnels through here. An unexpected throw inside op (an analyzer edge case, a corrupt
             // segment surfacing mid-read, an OOM in a semantic pass) would otherwise escape to the MCP framework
             // and serialize a raw stack trace - leaking internal cache/repo paths and giving the agent an
             // unactionable error. Contain it to a short, path-free message and log the detail for diagnosis.
@@ -755,15 +751,6 @@ public static class ServerContext
         get { lock (AnalyzerGate) { TouchSemantic(); return _csharp ??= new RoslynCSharpAnalyzer(AllRootsSnapshot()); } }
     }
 
-    public static ClangCppAnalyzer Cpp
-    {
-        get { lock (AnalyzerGate) { TouchSemantic(); return _cpp ??= new ClangCppAnalyzer(AllRootsSnapshot()); } }
-    }
-
-    /// <summary>Every root (primary first), regardless of focus - what the semantic layers RESOLVE against. Call from
-    /// inside a query op (read lock held).</summary>
-    internal static IReadOnlyList<string> AllRootsForQuery() => AllRootsSnapshot();
-
     // The project root first (primary, for path display) then every linked root. Call under an Rw read/write
     // lock (the getters hold the query read lock) so _linked isn't swapped mid-read.
     private static IReadOnlyList<string> AllRootsSnapshot()
@@ -779,11 +766,10 @@ public static class ServerContext
     private static void InvalidateSemanticAnalyzers()
     {
         RoslynCSharpAnalyzer? cs;
-        ClangCppAnalyzer? cpp;
         Rw.EnterWriteLock();
-        try { cs = _csharp; cpp = _cpp; _csharp = null; _cpp = null; }
+        try { cs = _csharp; _csharp = null; }
         finally { Rw.ExitWriteLock(); }
-        cs?.Dispose(); cpp?.Dispose();
+        cs?.Dispose();
     }
 
     // Stamp semantic use and make sure the eviction timer is running (armed once, on first semantic use).
@@ -806,38 +792,36 @@ public static class ServerContext
         if (idleMin <= 0) return;
         long idleMs = idleMin * 60_000L;
         if (Environment.TickCount64 - Volatile.Read(ref _lastSemanticUseMs) < idleMs) return;
-        if (_csharp is null && _cpp is null) return;
+        if (_csharp is null) return;
 
         RoslynCSharpAnalyzer? cs;
-        ClangCppAnalyzer? cpp;
         Rw.EnterWriteLock();
         try
         {
             if (Environment.TickCount64 - Volatile.Read(ref _lastSemanticUseMs) < idleMs) return; // used just now
-            cs = _csharp; cpp = _cpp;
-            if (cs is null && cpp is null) return;
-            _csharp = null; _cpp = null;
+            cs = _csharp;
+            if (cs is null) return;
+            _csharp = null;
         }
         finally { Rw.ExitWriteLock(); }
-        cs?.Dispose(); cpp?.Dispose(); // outside the lock; they're detached and unreachable now
+        cs?.Dispose(); // outside the lock; they're detached and unreachable now
         Log.For(Root).Info($"evicted idle semantic analyzer(s) after ~{idleMin} min unused to free memory");
     }
 
     /// <summary>Test seam: are the semantic analyzers currently resident?</summary>
     internal static bool HasResidentSemanticAnalyzers()
     {
-        lock (AnalyzerGate) return _csharp is not null || _cpp is not null;
+        lock (AnalyzerGate) return _csharp is not null;
     }
 
     /// <summary>Test seam: force the idle-eviction path now, regardless of the idle window.</summary>
     internal static void EvictSemanticAnalyzersNow()
     {
         RoslynCSharpAnalyzer? cs;
-        ClangCppAnalyzer? cpp;
         Rw.EnterWriteLock();
-        try { cs = _csharp; cpp = _cpp; _csharp = null; _cpp = null; }
+        try { cs = _csharp; _csharp = null; }
         finally { Rw.ExitWriteLock(); }
-        cs?.Dispose(); cpp?.Dispose();
+        cs?.Dispose();
     }
 
     /// <summary>Force a full rebuild (the reindex tool). Builds off-lock so searches keep
@@ -904,7 +888,6 @@ public static class ServerContext
     private static bool Swap(SegmentedIndex text, SegmentedSymbolIndex symbols, int epoch, string? gen)
     {
         RoslynCSharpAnalyzer? oldCs = null;
-        ClangCppAnalyzer? oldCpp = null;
         bool installed = false;
         Rw.EnterWriteLock();
         try
@@ -914,12 +897,11 @@ public static class ServerContext
                 _text?.Dispose();
                 _symbols?.Dispose();
                 _snapshot?.Dispose();
-                oldCs = _csharp; oldCpp = _cpp; // stale after a rebuild; dispose off-lock to free their model
+                oldCs = _csharp; // stale after a rebuild; dispose off-lock to free their model
                 _text = text;
                 _symbols = symbols;
                 _snapshot = null;
                 _csharp = null;
-                _cpp = null;
                 _state = IndexState.Ready;
                 _loadedGen = gen;
                 _statusOverride = null;
@@ -935,7 +917,7 @@ public static class ServerContext
             Log.For(Root).Info("discarded a rebuild whose workspace was re-pointed mid-flight (stale epoch)");
             return false;
         }
-        oldCs?.Dispose(); oldCpp?.Dispose();
+        oldCs?.Dispose();
         // meta.json (path/version/coverage) is written by RepositoryIndexer.Build/Update, which have the
         // walker's over-cap count; Swap must not overwrite it here (it has no coverage data).
         PublishStatus(); // now Ready (or reconciling, if a startup reconcile is still in flight)
@@ -1360,7 +1342,6 @@ public static class ServerContext
             var c = RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, changedFullPaths);
             RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
             _csharp?.Dispose(); _csharp = null; // stale after an edit; free the model, rebuilds lazily
-            _cpp?.Dispose(); _cpp = null;
             if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
                 Log.For(Root).Info($"incremental reindex: +{c.Added} ~{c.Modified} -{c.Removed} " +
                                    $"({changedCount} path(s) changed)");

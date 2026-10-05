@@ -4,55 +4,52 @@ namespace CodeCompass.Semantics;
 
 /// <summary>
 /// The shared DECISIONS of find_references, used by BOTH the CLI (<c>CmdRefs</c>) and the MCP tool handler so
-/// the two can't drift. They drifted before: the b5 lexical-fallback fix and the unresolved-include case each
-/// reached one path releases before the other, because this logic was copy-pasted. Host-specific concerns -
-/// how candidates/analyzers are sourced (warm server + subprocess vs fresh in-process), how paths are
+/// the two can't drift (they did, back when this logic was copy-pasted). Host-specific concerns - how paths are
 /// displayed (multi-root DisplayPath vs RelativePath), how results are emitted (tool text vs stdout), and the
 /// scan cap - stay in each caller; only the decisions live here.
+///
+/// <para>Two kinds of answer: C# is SEMANTIC (Roslyn), with a name-match backfill only where Roslyn can't see
+/// (#if-guarded code, unreadable files). Everything else is matched by NAME from the text index - whole word, in a
+/// code file, and for C and C++ never inside a comment or string literal.</para>
 /// </summary>
 public static class ReferenceMerge
 {
-    /// <summary>Max lexical hits any ONE file may contribute to the reference backfill. A common macro-like
-    /// name can appear hundreds of times in a single giant build-log / disassembly-echo file; without a
-    /// per-file bound those crowd out the whole result cap and starve the real references in ordinary source
-    /// files (the UNC refs-gap). Deliberately a small fraction of typical result budgets (MCP find_references
-    /// defaults to 100, the CLI backfill to 1000): with a handful of noisy files each bounded to this, the
-    /// budget still reaches the real references. Also generous enough that a normal source file - which rarely
-    /// holds more than a handful of references to one symbol - is never truncated; it only reins in
-    /// pathological high-hit files. Passed to <c>SegmentedIndex.Search(..., maxPerFile:)</c> by both paths.</summary>
-    public const int MaxLexicalHitsPerFile = 16;
+    /// <summary>Max name matches any ONE file may contribute. Reference searches only consider code files (see
+    /// <see cref="ReferenceFileFilter.IsCodeReference"/>, applied before the scan), so this no longer has to fend off
+    /// build logs; it keeps one huge generated file (a register map naming a symbol thousands of times) from filling
+    /// the whole answer, while leaving ordinary files - which hold a handful to a few dozen uses - untruncated. When
+    /// it does cut a file, the answer says so. Passed to <c>SegmentedIndex.Search(..., maxPerFile:)</c> by both paths.</summary>
+    public const int MaxLexicalHitsPerFile = 64;
 
-    /// <summary>Dedup keys (<c>display:line:col</c>) for the C# DECLARATIONS of the queried name, from the symbol
-    /// index. Callers seed their already-seen set with these so the lexical backfill skips them: Roslyn never reports
-    /// a declaration as a reference, so when #if makes the C# pass "incomplete" the backfill must not re-admit
-    /// `public class X` / its ctor as references (field report v4). Exact name-token position, so a real use that
-    /// merely shares the declaration's line is still counted.</summary>
-    public static IEnumerable<string> CSharpDeclarationKeys(IEnumerable<CodeCompass.Core.Symbols.Symbol> definitions, Func<string, string> display) =>
-        definitions.Where(s => SemanticCoverage.IsCSharp(s.RelativePath))
+    /// <summary>Dedup keys (<c>display:line:col</c>) for the DEFINITIONS of the queried name, from the symbol index
+    /// (C# declarations, and C/C++ functions, methods and types). Callers seed their already-seen set with these so a
+    /// name match never lists where a symbol is defined as a use of it (Roslyn never reports a declaration as a
+    /// reference either - field report v4). Exact name-token position, so a real use that merely shares the
+    /// definition's line is still counted.</summary>
+    public static IEnumerable<string> DefinitionKeys(IEnumerable<CodeCompass.Core.Symbols.Symbol> definitions, Func<string, string> display) =>
+        definitions.Where(s => SemanticCoverage.IsCommentAware(s.RelativePath))
                    .Select(s => $"{display(s.RelativePath)}:{s.Line}:{s.Column}");
 
-    /// <summary>A trigram hit qualifies as a LEXICAL reference to a symbol of length <paramref name="nameLength"/>
-    /// when: it is NOT in a semantically-covered file whose language pass was COMPLETE, it is a code file (not
-    /// build noise like .lst/.bak/.o), and it is a whole-word match (not a substring). Incompleteness is
-    /// resolved PER LANGUAGE: a .cs file backfills when the C# pass was incomplete (<paramref
-    /// name="csharpIncomplete"/> - e.g. #if-guarded code Roslyn couldn't see), a .c/.cpp/.h when the C/C++
-    /// pass was (<paramref name="cppIncomplete"/> - memory-stop / unparsed TU / unresolved include). This is
-    /// what stops a symbol whose semantic resolution silently missed part of the tree from being reported as a
-    /// bare zero, without over-firing lexical on the OTHER language that resolved cleanly. Callers dedup by
-    /// their own display key and emit.</summary>
-    public static bool IsLexicalReference(string path, string lineText, int column1Based, int nameLength, bool cppIncomplete, bool csharpIncomplete,
+    /// <summary>What C/C++ reference lines are, said once per answer that has any.</summary>
+    public const string CppByNameNote =
+        "C/C++ references are matched by NAME in code (comments and strings excluded; C/C++ is not compiled), " +
+        "so uses of different symbols that share this name are listed together";
+
+    /// <summary>A text-index hit counts as a reference to a symbol of length <paramref name="nameLength"/> when: it is
+    /// NOT in a .cs file whose semantic pass was complete (that file's references came from Roslyn), it is a code file
+    /// (not build noise like .lst/.bak/.o or data like .json/.csv), it is a whole-word match, and - for C# and C/C++ -
+    /// it is not inside a comment or string literal. <paramref name="csharpIncomplete"/>: the C# pass couldn't see
+    /// everything (#if-guarded code, unreadable files), so .cs name matches backfill it. Callers dedup by their own
+    /// display key and emit.</summary>
+    public static bool IsLexicalReference(string path, string lineText, int column1Based, int nameLength, bool csharpIncomplete,
         LexicalSpanFilter? spanFilter = null, int line1Based = 0, int lineTextOffset = 0)
     {
-        bool languageIncomplete = SemanticCoverage.IsCSharp(path) ? csharpIncomplete : cppIncomplete;
-        return !(SemanticCoverage.IsCovered(path) && !languageIncomplete)
+        return !(SemanticCoverage.IsCSharp(path) && !csharpIncomplete)
            && ReferenceFileFilter.IsCodeReference(path)
            // lineText may be a window of a very long line (SearchMatch.LineTextOffset): index the match within it.
            && WordBoundary.IsWholeWord(lineText, column1Based - 1 - lineTextOffset, nameLength)
-           // On the covered languages (where this fires only because the semantic pass was incomplete) a whole-word
-           // hit inside a comment or string is NOT a reference - the semantic pass excludes exactly those, and the
-           // tool's description promises the same. Skip them so the backfill recovers #if-guarded USES without
-           // re-admitting <see cref> doc-comment / string-literal noise. No filter (or a position we can't map) ->
-           // keep the hit, never drop a real reference.
+           // A whole-word hit inside a comment or string is NOT a reference (an <see cref> doc comment, a "name" in a
+           // log message). No filter (or a position we can't map) -> keep the hit, never drop a real reference.
            && (spanFilter is null || line1Based <= 0 || !spanFilter.IsInCommentOrString(path, line1Based, column1Based));
     }
 
@@ -100,43 +97,5 @@ public static class ReferenceMerge
         var shown = string.Join(", ", files.Take(5));
         if (files.Count > 5) shown += $", +{files.Count - 5} more";
         return shown;
-    }
-
-    /// <summary>The honest C/C++ coverage caveats for a query as a list of bit strings (empty if fully
-    /// covered): how many candidate TUs parsed, whether the memory budget stopped it, and which #includes were
-    /// unresolved. Each host wraps these bits in its own surface prose (CLI stderr line vs MCP note); sharing
-    /// the bits keeps the substance (wording, thresholds, header list) identical across both.</summary>
-    public static List<string> CppCoverageBits(int cppParsed, int cppCandidates, bool memoryStopped, IReadOnlyList<string> unresolvedIncludes, bool tooManyCandidates = false,
-        int skippedTooBig = 0, bool workerFailed = false, bool workerStalled = false)
-    {
-        var bits = new List<string>();
-        // A stalled worker (no progress for the stall window) was stopped. Nothing stands in for its answer.
-        if (workerStalled)
-        {
-            bits.Add($"the C/C++ semantic analysis made no progress for {ClangSubprocess.StallSeconds():N0}s and was stopped, so NO " +
-                     $"C/C++ references are reported for this query (text matches are never substituted for references) - rerun it; " +
-                     "if a single file genuinely takes that long to parse, raise CODECOMPASS_CPP_WORKER_STALL_SEC");
-            return bits;
-        }
-        // A deliberate broad-symbol short-circuit: the semantic pass was skipped UP FRONT because the candidate
-        // set exceeded the limit (parsing it would grind for minutes and fall back to lexical anyway). Say so
-        // distinctly - and DON'T also emit the generic "0/N parsed"/memory-stop lines, which would misread the
-        // intentional skip as a failure. Name the knob so a caller who wants precision can override it.
-        if (tooManyCandidates)
-        {
-            bits.Add($"{cppCandidates:N0} candidate C/C++ file(s) exceeded the semantic-parse limit, so references are shown lexically (raise CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES, or set it to 0, to force a semantic parse)");
-            return bits;
-        }
-        if (workerFailed) bits.Add("the C/C++ parse worker crashed (not a memory stop), so these references are shown lexically (see the log)");
-        if (skippedTooBig > 0) bits.Add($"{skippedTooBig:N0} candidate C/C++ file(s) over the {ClangCppAnalyzer.MaxTuBytes() / 1048576:N0} MB semantic-parse size cap were searched lexically instead (raise CODECOMPASS_CPP_MAX_TU_MB)");
-        if (cppParsed < cppCandidates && !workerFailed) bits.Add($"{cppParsed:N0}/{cppCandidates:N0} candidate C/C++ file(s) parsed");
-        if (memoryStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_SESSION_MEM_MB for the per-session ceiling or CODECOMPASS_CPP_QUERY_MEM_MB for a single query)");
-        if (unresolvedIncludes.Count > 0)
-        {
-            var shown = string.Join(", ", unresolvedIncludes.Take(5));
-            if (unresolvedIncludes.Count > 5) shown += $", +{unresolvedIncludes.Count - 5} more";
-            bits.Add($"{unresolvedIncludes.Count} unresolved #include(s): {shown}");
-        }
-        return bits;
     }
 }

@@ -134,94 +134,16 @@ public class DiagnosticsTests
         Assert.Contains(checks, c => c.Name == "index built" && !c.Ok);
     }
 
+    // C/C++ references are a name search (no compiler), so doctor no longer warns about compile databases or missing
+    // headers: neither affects any answer. A C/C++ repo with a missing header gets no C/C++ check at all.
     [Fact]
-    public void HealthChecks_Warn_When_CppSources_ButNoCompileDb()
-    {
-        using var repo = new TempRepo();
-        repo.Write("main.c", "int main(void){return 0;}");
-
-        var checks = RepoDiagnostics.HealthChecks(repo.Root);
-        Assert.Contains(checks, c => c.Name == "C/C++ compile database" && !c.Ok);
-    }
-
-    [Fact]
-    public void HealthChecks_Ok_When_CompileDbPresent()
-    {
-        using var repo = new TempRepo();
-        repo.Write("main.c", "int main(void){return 0;}");
-        repo.Write("compile_commands.json", "[]");
-
-        var checks = RepoDiagnostics.HealthChecks(repo.Root);
-        Assert.Contains(checks, c => c.Name == "C/C++ compile database" && c.Ok);
-    }
-
-    [Fact]
-    public void HealthChecks_Ok_When_ConfiguredCompileDbPresent()
-    {
-        using var repo = new TempRepo();
-        repo.Write("main.c", "int main(void){return 0;}");
-        repo.Write("out/compile_commands.json", "[]");                 // nonstandard location
-        repo.Write(".codecompass.json", """{ "compileCommands": ["out"] }""");
-
-        var checks = RepoDiagnostics.HealthChecks(repo.Root);
-        // No warning: the configured location is honored, so doctor sees a compile DB.
-        Assert.Contains(checks, c => c.Name == "C/C++ compile database" && c.Ok);
-    }
-
-    [Fact]
-    public void HealthChecks_NoCppCheck_ForPureCSharpRepo()
-    {
-        using var repo = new TempRepo();
-        repo.Write("A.cs", "class A {}");
-
-        var checks = RepoDiagnostics.HealthChecks(repo.Root);
-        Assert.DoesNotContain(checks, c => c.Name == "C/C++ compile database"); // not relevant -> not shown
-    }
-
-    [Fact]
-    public void HealthChecks_Flag_UnresolvableInclude_AndNameIt()
-    {
-        using var repo = new TempRepo();
-        // Two TUs: one includes a header that lives nowhere in the tree (a vendor/system header), one is clean.
-        repo.Write("dev.c", "#include \"VENDOR_missing.h\"\nint dev(void){return 0;}");
-        repo.Write("ok.c", "#include \"local.h\"\nint ok(void){return 1;}");
-        repo.Write("local.h", "int ok(void);");
-
-        var checks = RepoDiagnostics.HealthChecks(repo.Root);
-        var scan = checks.Single(c => c.Name == "C/C++ includes resolvable");
-        Assert.False(scan.Ok);
-        Assert.Contains("1 of 2", scan.Detail);
-        Assert.Contains("VENDOR_missing.h", scan.Detail);
-    }
-
-    [Fact]
-    public void HealthChecks_SkipsIncludeScan_OverNetworkPath()
+    public void HealthChecks_NoCompilerChecks_ForCppRepo()
     {
         using var repo = new TempRepo();
         repo.Write("dev.c", "#include \"VENDOR_missing.h\"\nint dev(void){return 0;}");
-        var old = System.Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
-        try
-        {
-            System.Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1"); // fake a share
-            var checks = RepoDiagnostics.HealthChecks(repo.Root);
-            var scan = checks.Single(c => c.Name == "C/C++ includes resolvable");
-            Assert.True(scan.Ok, scan.Detail);                       // not a warning over the wire
-            Assert.Contains("skipped over a network path", scan.Detail);
-        }
-        finally { System.Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", old); }
-    }
-
-    [Fact]
-    public void HealthChecks_StdAndTreeIncludes_DoNotFalseFlag()
-    {
-        using var repo = new TempRepo();
-        // Angle stdlib (stdio.h), extensionless C++ header (<vector>), and a quote include resolved in-tree.
-        repo.Write("main.c", "#include <stdio.h>\n#include <vector>\n#include \"util.h\"\nint main(void){return 0;}");
-        repo.Write("util.h", "void util(void);");
 
         var checks = RepoDiagnostics.HealthChecks(repo.Root);
-        var scan = checks.Single(c => c.Name == "C/C++ includes resolvable");
-        Assert.True(scan.Ok, scan.Detail);
+        Assert.DoesNotContain(checks, c => c.Name.StartsWith("C/C++"));
     }
 
     [Fact]

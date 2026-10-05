@@ -176,20 +176,6 @@ finally {
     try { $mcpProc.Dispose() } catch {}
 }
 
-# 1b) Both shipped exes MUST disable Tiered PGO (System.Runtime.TieredPGO:false) - on net10 it makes the
-# C/C++ find_references hot path ~2.5x slower (1.0.153 field regression). The csproj <TieredPGO>false</TieredPGO>
-# bakes it into runtimeconfig.json; guard the SHIPPED artifact so the fix can never silently fall out of a
-# release (an allocation/-Big timing check can't see a JIT/PGO effect - this structural check can).
-foreach ($rc in @("CodeCompass.Cli.runtimeconfig.json", "CodeCompass.Mcp.runtimeconfig.json")) {
-    $rcPath = Join-Path $root "plugin/bin/$rc"
-    if (-not (Test-Path $rcPath)) { throw "runtimeconfig missing: $rcPath" }
-    $props = (Get-Content $rcPath -Raw | ConvertFrom-Json).runtimeOptions.configProperties
-    if ($props.'System.Runtime.TieredPGO' -ne $false) {
-        throw "$rc does NOT set System.Runtime.TieredPGO=false - the net10 C/C++ refs perf regression would ship. Add <TieredPGO>false</TieredPGO> to the csproj."
-    }
-}
-Write-Host "  PASS  shipped exes disable Tiered PGO (net10 C/C++ refs perf guard)."
-
 # 2) Version = the numeric version build-plugin stamped into the manifest (matches `codecompass version`).
 $pjPath = Join-Path $root "plugin/.claude-plugin/plugin.json"
 $version = (Get-Content $pjPath -Raw | ConvertFrom-Json).version

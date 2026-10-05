@@ -66,9 +66,8 @@ internal static class SidecarCache
 
     // Below this much free commit the cache is not worth its bytes: it's a read accelerator, not a
     // correctness requirement, so under pressure it hands the resident set back (up to the full ~2 GB
-    // budget) and stops admitting until pressure clears. Kept under the clang query budget's 1.5 GB
-    // free-commit floor so the two don't fight for the same headroom - the cache releases FIRST, leaving
-    // that floor for the semantic pass rather than competing with it.
+    // budget) and stops admitting until pressure clears, leaving the headroom for whatever else needs it
+    // (a concurrent build, the C# semantic model).
     private const long PressureFloorBytes = 1024L * 1024 * 1024; // 1 GB free commit
 
     // Test seam: force the pressure verdict deterministically without allocating gigabytes.
@@ -145,7 +144,7 @@ internal static class SidecarCache
             // Pressure-release: when the machine is tight, give the resident bytes back (callers already
             // hold references to anything in flight, so dropping the map is safe) and serve this parse
             // uncached. Stops the RAM-scaled cache from being dead weight - up to ~2 GB - while something
-            // else (a concurrent build, a clang semantic pass) needs the headroom. Checked on the miss path
+            // else (a concurrent build, the C# semantic model) needs the headroom. Checked on the miss path
             // so the probe cost hides behind the sidecar read we just did.
             if (UnderMemoryPressure())
             {

@@ -75,7 +75,7 @@ public class HostileRepoTests
         FileScanner.ScanText("a.py", line, "Foo", results, 10);
         Assert.Equal(2, results.Count);
         bool Ref(SearchMatch m) => CodeCompass.Semantics.ReferenceMerge.IsLexicalReference(
-            "a.py", m.LineText, m.Column, 3, false, false, lineTextOffset: m.LineTextOffset);
+            "a.py", m.LineText, m.Column, 3, false, lineTextOffset: m.LineTextOffset);
         Assert.True(Ref(results[0]));   // " Foo(" - a whole word
         Assert.False(Ref(results[1]));  // " Foobar" - a substring, even though it was windowed
     }

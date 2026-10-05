@@ -85,7 +85,7 @@ $rows = foreach ($repo in $Repos) {
     $searchMs = $null
     if ($sym) {
         $refs = Invoke-Sampled @('refs', $repo, $sym)
-        if ($refs.Stderr -match '(\d+)\s+C#\s+\+\s+(\d+)\s+C/C\+\+ semantic\s+\+\s+(\d+)\s+lexical') { $refCs = [int]$Matches[1]; $refCpp = [int]$Matches[2]; $refLex = [int]$Matches[3] }
+        if ($refs.Stderr -match '(\d+)\s+C# semantic\s+\+\s+()(\d+)\s+name-matched') { $refCs = [int]$Matches[1]; $refCpp = [int]$Matches[2]; $refLex = [int]$Matches[3] }
         if ($refs.Stdout -match '(\d+)/(\d+)\s+candidate C/C\+\+ file\(s\) parsed') { $parsed = [int]$Matches[1]; $cand = [int]$Matches[2] }
         $refMs = $refs.Ms; $refPeak = $refs.PeakMB; $refKilled = $refs.Killed
         $sr = Invoke-Sampled @('search', $repo, $sym); $searchMs = $sr.Ms

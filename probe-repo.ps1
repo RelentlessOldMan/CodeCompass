@@ -223,9 +223,10 @@ $rows = foreach ($sym in $symbolSet) {
     $id = if ($KeepNames) { $sym } else { Get-Hash4 $sym }
 
     $refs = Invoke-Sampled @('refs', $Repo, $sym)
-    # refs stderr: "-- {cs} C# + {cpp} C/C++ semantic + {lex} lexical reference(s)"
+    # refs stderr: "-- {cs} C# semantic + {named} name-matched reference(s)" (C/C++ is a name search: the
+    # empty middle group keeps RefCpp = 0 and RefLex = the name matches, so the report columns stay stable)
     $cs = 0; $cpp = 0; $lex = 0
-    if ($refs.Stderr -match '(\d+)\s+C#\s+\+\s+(\d+)\s+C/C\+\+ semantic\s+\+\s+(\d+)\s+lexical') {
+    if ($refs.Stderr -match '(\d+)\s+C# semantic\s+\+\s+()(\d+)\s+name-matched') {
         $cs = [int]$Matches[1]; $cpp = [int]$Matches[2]; $lex = [int]$Matches[3]
     }
     $refTotal = $cs + $cpp + $lex
@@ -238,7 +239,7 @@ $rows = foreach ($sym in $symbolSet) {
     # determinism: a second refs run should return the same total.
     $refs2 = Invoke-Sampled @('refs', $Repo, $sym)
     $cs2 = 0; $cpp2 = 0; $lex2 = 0
-    if ($refs2.Stderr -match '(\d+)\s+C#\s+\+\s+(\d+)\s+C/C\+\+ semantic\s+\+\s+(\d+)\s+lexical') {
+    if ($refs2.Stderr -match '(\d+)\s+C# semantic\s+\+\s+()(\d+)\s+name-matched') {
         $cs2 = [int]$Matches[1]; $cpp2 = [int]$Matches[2]; $lex2 = [int]$Matches[3]
     }
     $deterministic = (($cs2 + $cpp2 + $lex2) -eq $refTotal)

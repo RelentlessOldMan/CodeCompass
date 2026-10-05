@@ -49,8 +49,9 @@ context on thinking, not on scrolling files it didn't need.</p>
 <ul>
   <li><b>Lexical</b> &mdash; a trigram index for instant literal/substring search across the whole repo.</li>
   <li><b>Symbolic</b> &mdash; tree-sitter parses every file into symbols (classes, methods, functions&hellip;) for go-to-definition.</li>
-  <li><b>Semantic</b> &mdash; real find-references for <b>C#</b> (Roslyn) and <b>C/C++</b> (clang): it resolves the actual symbol and
-      ignores matches in comments and strings, which a text search can't.</li>
+  <li><b>Semantic</b> &mdash; real find-references for <b>C#</b> (Roslyn): it resolves the actual symbol. Every other language,
+      <b>C and C++ included</b>, gets a fast <b>name search</b> for references: whole-word uses in code, never in comments or
+      strings, never the definition itself.</li>
 </ul>
 
 <h3>Minimal token footprint</h3>
@@ -70,7 +71,7 @@ CodeCompass exposes a deliberately small <b>7 tools</b> with terse descriptions 
 <tr><td>Dozens-of-GB repos without exhausting RAM</td><td style="text-align:left"><span class="yes">Yes</span> &mdash; indexes are memory-mapped on disk</td></tr>
 <tr><td>MATLAB / other unlisted languages</td><td style="text-align:left"><span class="no">Lexical only</span> (text search works; no symbols)</td></tr>
 <tr><td>Very large files</td><td style="text-align:left"><span class="no">Capped</span> &mdash; &gt;5&nbsp;MB skipped from the index; &gt;1&nbsp;MB skipped from symbols but still text-searchable (both tunable)</td></tr>
-<tr><td>C/C++ find-references precision</td><td style="text-align:left"><span class="no">Best-effort</span> without a <code>compile_commands.json</code></td></tr>
+<tr><td>C/C++ find-references</td><td style="text-align:left"><span class="no">By name</span>, not compiled: fast and complete on any repo, but same-named symbols are listed together</td></tr>
 <tr><td>Semantic "meaning" / embedding search</td><td style="text-align:left"><span class="no">No</span> (deliberately &mdash; needs a model; weaker for real code nav)</td></tr>
 </tbody>
 </table>
@@ -118,7 +119,7 @@ repo, or a third-party drop on another drive that can't be nested under your pro
 project index and search those external directories alongside its own, as one federated result set. Each linked root
 keeps its <b>own</b> index (keyed by its absolute path, so a root two projects both link is indexed once and reused),
 is live-watched for edits like the main repo, and <code>find_references</code>/<code>find_callees</code> resolve
-<b>across</b> the boundary (C# via Roslyn, C/C++ via clang). Links are stored machine-local (absolute paths), not in
+<b>across</b> the boundary (C# via Roslyn; name matches search every root). Links are stored machine-local (absolute paths), not in
 the committed <code>.codecompass.json</code>.</p>
 <p>Manage them from <b>either</b> side &mdash; they share one implementation:</p>
 <pre>From the agent (MCP tool):   manage_links  action: list | add | remove | focus   (path: for add/remove/focus)
@@ -203,7 +204,7 @@ paths-free bundle). Safe to run on someone else's proprietary code.</p>
 <li>Files over <code>MAX_SYMBOL_MB</code> (default 1&nbsp;MB), classified as numeric/hex data above 1&nbsp;MB when the cap is raised, or streamed (&ge;128&nbsp;MB), have no go-to-definition (still text-searchable).</li>
 <li>Files <b>&ge;128&nbsp;MB are indexed by streaming</b> (bounded memory &mdash; a 2&nbsp;GB file indexes even on 16&nbsp;GB), removing the old ~1&nbsp;GB single-string ceiling. A search into one uses a per-file <b>block/positional index</b> (a trigram Bloom filter per ~1&nbsp;MB block) to read only the candidate blocks &mdash; a few MB, not the whole file &mdash; so a register lookup in a huge generated header stays cheap even over a <b>network share</b>. UTF-8 files; others fall back to a whole-file line scan.</li>
 <li><code>#define</code>/macro definitions are <b>not</b> captured as symbols (they'd explode the symbol index on register-map code); the names remain findable via <code>search_code</code>.</li>
-<li>Precise C/C++ semantics need a compile database; without one, quality degrades to syntactic. No embeddings / semantic-meaning search. Single machine, single user.</li>
+<li>C/C++ references are matched by name, not compiled, so different symbols that share a name are listed together. No embeddings / semantic-meaning search. Single machine, single user.</li>
 </ul>
 
 <h2>Performance</h2>
@@ -245,11 +246,8 @@ analyzer build paid on the session's first <code>find_references</code>.</p>
 &mdash; exactly what the persistent MCP server amortizes away.</li>
 <li><code>find_references</code> on <b>C#</b> warms up dramatically: Roslyn's workspace is built once (the 13&ndash;31 s
 <i>refs 1st-call</i>), then resident, so calls drop from tens of seconds cold to <b>sub-second&ndash;few-seconds</b> warm.</li>
-<li><code>find_references</code> on <b>C/C++</b> shows little warm speedup: each call runs a <b>fresh clang subprocess</b> so the
-long-lived server never accumulates libclang's native memory (the deliberate memory-safety trade-off). A broad C/C++ query
-costs seconds <i>every</i> time &mdash; worst on template-heavy trees (fmt, LLVM). The flip side shows on the 66 k-file corpus:
-its broadest symbols trip the short-circuit to lexical, so warm refs land at <b>251 ms (local) / 344 ms (SMB)</b> &mdash;
-faster than 207-file fmt. Tune the cutoff with <code>CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES</code>.</li>
+<li><code>find_references</code> on <b>C/C++</b> is a name search over the index, so it costs about what <code>search_code</code>
+does plus reading the matched files to skip comments and strings: around a second, on any repo.</li>
 </ul>
 <p>At ~25 MB/s a first index of a <b>dozens-of-GB</b> repo is on the order of minutes-to-tens-of-minutes (less on a many-core
 machine), and searching it afterward uses only a few hundred MB of RAM &mdash; comfortably within a 16 GB laptop.</p>
@@ -277,15 +275,9 @@ share</b> &mdash; the SMB/UNC row above, broken out per operation (cold CLI; war
 <tr><td><code>find_references</code></td><td class="num">~5.9 s</td><td style="text-align:left">Broad symbol &mdash; short-circuited to lexical (~0.3 s warm); see below.</td></tr>
 </tbody>
 </table>
-<p><b>Why <code>find_references</code> is the outlier:</b> it is the only <i>parse-based</i> tool &mdash; for C/C++ it runs
-clang over the candidate translation units (Roslyn for C#), where the others just read memory-mapped indexes. On an
-ordinary symbol that is a handful of TUs and still ~1&ndash;2&nbsp;s. On a <i>pathologically-broad</i> symbol &mdash;
-hundreds to thousands of candidate files, typical of generated code &mdash; a full semantic parse would grind for minutes
-and, over a share, hit its memory budget partway and fall back to lexical anyway. So above
-<code>CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES</code> (default 400) the semantic pass is skipped up front and the fast
-lexical layer answers (~6.5&nbsp;s here, down from ~131&nbsp;s), with the result <b>disclosed as lexical</b>. Raise that
-knob (or set it to 0) to force a full semantic parse when you want precision over speed. The text and symbol lookups stay
-~1&ndash;2&nbsp;s regardless of repo size or the network.</p>
+<p><b>Why <code>find_references</code> takes longer than the others:</b> for C# it builds Roslyn's model of the code
+on first use (then keeps it warm); for C/C++ and other languages it reads each matched file to skip comments and strings.
+The text and symbol lookups only read memory-mapped indexes.</p>
 
 <h2>Logs &amp; troubleshooting</h2>
 <p>CodeCompass keeps a self-limiting log on disk so problems can be diagnosed after the fact

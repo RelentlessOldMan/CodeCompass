@@ -24,10 +24,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <!-- Disable Dynamic PGO: on net10 it makes the clang C/C++ find_references hot loop ~2.5x slower (CPU)
-         than net8, isolated to Tiered PGO by A/B (see CodeCompass.Cli.csproj). Bakes
-         System.Runtime.TieredPGO:false into runtimeconfig.json so the published server needs no env var. -->
-    <TieredPGO>false</TieredPGO>
   </PropertyGroup>
 
 </Project>

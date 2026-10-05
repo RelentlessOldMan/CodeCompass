@@ -6,12 +6,10 @@ namespace CodeCompass.Semantics;
 
 /// <summary>
 /// Classifies, per file, the character ranges that are COMMENTS or STRING/CHAR literals, so the lexical
-/// reference backfill can skip whole-word hits that fall inside them. Without this the backfill re-admits the
-/// exact noise the semantic pass excludes - an XML-doc <c>&lt;see cref="X"/&gt;</c> mention or an <c>"X"</c> in a
-/// string literal - which breaks the precision guarantee find_references advertises ("resolves the actual symbol
-/// and ignores matches in comments ... and strings"). It is applied ONLY to the covered languages (C#, C/C++),
-/// and the backfill itself only fires when their semantic pass was incomplete, so this runs exactly where the
-/// re-admission happens. For C# it uses Roslyn's own lexer (exact: single-/multi-line comments, <c>///</c> doc
+/// reference name matching can skip whole-word hits that fall inside them - an XML-doc <c>&lt;see cref="X"/&gt;</c>
+/// mention or an <c>"X"</c> in a string literal is not a use of X, and find_references promises to ignore comments and
+/// strings. Applied to C# (where it guards the backfill of what Roslyn couldn't see) and to C/C++ (whose references
+/// are matched by name). For C# it uses Roslyn's own lexer (exact: single-/multi-line comments, <c>///</c> doc
 /// comments, verbatim/interpolated/raw/utf8 strings, char literals - and it leaves interpolation holes
 /// <c>{expr}</c> as code, so a reference inside one is kept); for C/C++ a conservative C-family scanner.
 ///
@@ -44,7 +42,7 @@ public sealed class LexicalSpanFilter
     /// false, so their behaviour is unchanged.</summary>
     public bool IsInCommentOrString(string path, int line1Based, int column1Based)
     {
-        if (!SemanticCoverage.IsCovered(path)) return false;
+        if (!SemanticCoverage.IsCommentAware(path)) return false;
         var spans = SpansFor(path);
         if (spans.Length == 0) return false;
 

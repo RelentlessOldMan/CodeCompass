@@ -52,8 +52,7 @@ catch (Exception ex)
 }
 finally
 {
-    // Host stopped (the client closed stdin / the session ended): cancel in-flight work - which kills a running
-    // clang worker child instead of orphaning it - stop watchers, and release the live-watch role so another
-    // session on this repo takes over at once.
+    // Host stopped (the client closed stdin / the session ended): cancel in-flight work, stop watchers, and release
+    // the live-watch role so another session on this repo takes over at once.
     try { ServerContext.Shutdown(); } catch (Exception ex) { Log.Global.Warn($"shutdown cleanup failed: {ex.Message}"); }
 }

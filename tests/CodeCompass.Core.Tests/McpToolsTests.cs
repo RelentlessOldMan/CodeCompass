@@ -369,7 +369,7 @@ public class McpToolsTests
         // Semantic C#: the real call site is found...
         Assert.Contains("src/Caller.cs", result);
         Assert.Contains("w.Run()", result);
-        Assert.Contains("1 C# +", result);
+        Assert.Contains("1 C# semantic +", result);
         // ...but the comment and the "Run" string in the .cs file are NOT counted.
         Assert.DoesNotContain("remember to Run", result);
         Assert.DoesNotContain("var label", result);
@@ -657,7 +657,7 @@ public class McpToolsTests
     }
 
     [Fact]
-    public void FindReferences_DisclosesMissingCompileDb_ForCppRepo()
+    public void FindReferences_CppRepo_SaysMatchedByName_AndSkipsTheDefinition()
     {
         using var repo = new TempRepo();
         repo.Write("main.c", "int helper(void){return 1;}\nint main(void){return helper();}");
@@ -665,10 +665,11 @@ public class McpToolsTests
         try
         {
             CodeCompassTools.Reindex();
-            // Whatever the C/C++ layer resolves without a compile DB, the footer must DISCLOSE that it ran
-            // best-effort - so a thin/empty C/C++ result reads as "couldn't fully run," not "none exist."
+            // C/C++ references are a name search: the answer says so plainly, lists the call, and not the definition.
             var result = CodeCompassTools.FindReferences("helper");
-            Assert.Contains("no compile_commands.json", result);
+            Assert.Contains("matched by NAME", result);
+            Assert.Contains("main.c:2:", result);
+            Assert.DoesNotContain("main.c:1:", result);
         }
         finally { ServerContext.Init(repo.Root); }
     }

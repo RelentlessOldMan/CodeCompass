@@ -200,7 +200,8 @@ public sealed class SegmentedIndex : IDisposable
 
     public IReadOnlyList<SearchMatch> Search(string query, int maxResults = 200, bool caseSensitive = true,
                                              List<CandidateTrace>? trace = null, int maxPerFile = 0,
-                                             bool orderByPath = false, SearchLimits? limits = null)
+                                             bool orderByPath = false, SearchLimits? limits = null,
+                                             Func<string, bool>? pathFilter = null)
     {
         // Whitespace-only queries have no meaningful trigrams: under 3 chars they produce no trigram groups,
         // so every file becomes a candidate and the verify step matches almost every line that contains a
@@ -220,6 +221,9 @@ public sealed class SegmentedIndex : IDisposable
         // confirms. Ordering here (segment order, then in-segment doc order) fixes the result order for
         // both the serial and parallel verify paths, so output is identical regardless of how we read.
         var candidates = CollectCandidates(groups);
+        // Callers that only want some files (a reference search wants code, not build logs) drop the rest BEFORE the
+        // verify reads, so excluded files neither cost a read nor use up the result budget.
+        if (pathFilter is not null) candidates = candidates.Where(pathFilter).ToList();
         if (candidates.Count == 0) return new List<SearchMatch>();
 
         // Reference mode: canonicalize the candidate order so the answer doesn't depend on build/crawl

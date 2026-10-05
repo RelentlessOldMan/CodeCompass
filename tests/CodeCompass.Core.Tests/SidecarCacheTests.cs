@@ -105,7 +105,7 @@ public class SidecarCacheTests
         finally { Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prev); }
     }
 
-    // The RAM-scaled cache can hold up to ~2 GB. When the machine goes tight (a concurrent build, a clang
+    // The RAM-scaled cache can hold up to ~2 GB. When the machine goes tight (a concurrent build, a big
     // semantic pass) that resident set becomes dead weight. Under pressure the cache must give those bytes
     // back and stop admitting - it's a read accelerator, not a correctness requirement. The pressure verdict
     // is forced deterministically here so no gigabytes are allocated to trip a real threshold.

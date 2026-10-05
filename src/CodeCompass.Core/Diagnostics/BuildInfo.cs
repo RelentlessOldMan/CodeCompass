@@ -33,6 +33,8 @@ public static class BuildInfo
     ///   2 - C# records (and positional record properties) are now extracted as symbols; v1.0.232 also changed
     ///       output (seam window in forced-cut block Blooms, symlinked files no longer indexed). A rebuild picks up
     ///       records find_definition/search_symbols otherwise miss until each file is next touched.
+    ///   3 - C++ member functions defined inside a class body, and out-of-class definitions (Value::method), are now
+    ///       symbols: find_definition finds them, and find_references (a C/C++ name search) stops listing them as uses.
     /// </summary>
-    public const int IndexerContentVersion = 2;
+    public const int IndexerContentVersion = 3;
 }

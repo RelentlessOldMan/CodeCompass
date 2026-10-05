@@ -92,6 +92,27 @@ public class SymbolExtractionTests
         Assert.Contains(("compute", SymbolKind.Function), syms);
     }
 
+    // Methods defined INSIDE a class body (field_identifier declarator) and out-of-class definitions (Value::method,
+    // a qualified_identifier) are definitions too: find_definition must find them, and find_references - a C/C++ name
+    // search - must not list them as uses. (Found comparing against clang on llvm: `bool isMustAlias() const {...}`
+    // and `bool Value::hasNUsesOrMore(...) const {...}` were reported as references.)
+    [Fact]
+    public void Cpp_MemberDefinitions_InClassAndQualified()
+    {
+        const string src = """
+        class Value {
+        public:
+            bool isMustAlias() const { return true; }
+            bool hasNUsesOrMore(unsigned N) const;
+        };
+        bool Value::hasNUsesOrMore(unsigned N) const { return N > 0; }
+        """;
+        var syms = Extract("a.cpp", src);
+
+        Assert.Contains(("isMustAlias", SymbolKind.Method), syms);
+        Assert.Contains(("hasNUsesOrMore", SymbolKind.Method), syms);
+    }
+
     [Fact]
     public void UnknownExtension_YieldsNothing()
     {

@@ -17,7 +17,7 @@ namespace CodeCompass.Core.Tests;
 public class McpFindReferencesTests
 {
     [Fact]
-    public void Mcp_FindReferences_UnresolvedInclude_BackfillsLexical()
+    public void Mcp_FindReferences_MissingHeader_CallsStillFound()
     {
         var mcp = FindExe("CodeCompass.Mcp");
         if (mcp is null) return;
@@ -32,11 +32,10 @@ public class McpFindReferencesTests
 
         var text = McpFindReferences(mcp, repo.Root, "widget_reset");
 
-        // The false-zero fix on the MCP surface: NOT a bare zero - the real call sites come back (lexical),
-        // and the incomplete-coverage caveat is disclosed.
-        Assert.Contains("widget_reset", text);
-        Assert.True(text.Contains("mod0.c") || text.Contains("mod1.c"), $"expected call sites in the result; got:\n{text}");
-        Assert.Contains("unresolved #include", text);
+        // Over the real stdio server: every call site comes back even though the header doesn't exist (C/C++ is a
+        // name search), and the answer says what C/C++ matches are.
+        for (int i = 0; i < 4; i++) Assert.Contains($"mod{i}.c:2:", text);
+        Assert.Contains("matched by NAME", text);
     }
 
     // The new manage_links MCP tool, end-to-end: add a linked root over stdio, then a federated search_code

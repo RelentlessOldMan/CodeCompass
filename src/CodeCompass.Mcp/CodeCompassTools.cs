@@ -134,9 +134,6 @@ public static class CodeCompassTools
         return sb.ToString();
     }
 
-    // The C/C++ translation units clang parses (headers come in via #include) - the candidates worth handing it.
-    private static bool IsCppSourceFile(string path) => ClangCppAnalyzer.IsCppSource(path);
-
     // Result footer that distinguishes an exact count from a truncated one, so the agent knows
     // whether it has seen everything or must refine the query. `shown` is how many we actually list.
     // `limitParam`: the tool takes maxResults, so raising it is an option - up to its hard ceiling (asking for more than
@@ -226,11 +223,10 @@ public static class CodeCompassTools
     }
 
     [McpServerTool(Name = "find_references")]
-    [Description("Find where a symbol is used across the codebase. For C# (Roslyn) and C/C++ (clang) " +
-                 "this is SEMANTIC - it resolves the actual symbol and ignores matches in comments " +
-                 "(including XML-doc <see cref>) and strings. For other languages it falls back to " +
-                 "whole-word lexical matches in source files (data/doc files like .json/.csv/.md are " +
-                 "not treated as references). Returns ranked 'file:line:col: line'.")]
+    [Description("Find where a symbol is used across the codebase. C# is SEMANTIC (Roslyn): it resolves the actual " +
+                 "symbol. Other languages, including C/C++, are matched by NAME: whole-word uses in code files, never " +
+                 "in comments or strings (C#, C/C++) and never the definition itself; same-named symbols are listed " +
+                 "together. Returns 'file:line:col: line'.")]
     public static string FindReferences(
         [Description("Symbol/identifier to find references to (case-sensitive).")] string name,
         [Description("Maximum number of results.")] int maxResults = 100,
@@ -239,11 +235,10 @@ public static class CodeCompassTools
     {
         if (string.IsNullOrWhiteSpace(name)) return "Provide a symbol/identifier to find references to.";
         maxResults = Math.Clamp(maxResults, 1, MaxResultsCeiling); // agent-supplied; guard against 0/negative/absurd
-        // Collect one past the cap across all sources (C# semantic, C/C++ semantic, then lexical in
-        // other files) so truncation is detected by the same overflow probe the other tools use -
-        // exact, not a fuzzy threshold. Kind tags let the footer report the shown breakdown. The
-        // semantic analyzers span the project + every linked root, so a cross-root reference resolves;
-        // the lexical fallback iterates each root's text index (linked hits shown as absolute paths).
+        // Collect one past the cap across both sources (C# semantic, then name matches) so truncation is detected by
+        // the same overflow probe the other tools use - exact, not a fuzzy threshold. Kind tags let the footer report
+        // the shown breakdown. The C# analyzer spans the project + every linked root, so a cross-root reference
+        // resolves; the name search iterates each root's text index (linked hits shown as absolute paths).
         int probe = maxResults + 1;
         var hits = new List<(string Line, char Kind)>();
         // The analyzer spans every root (so cross-root references resolve); under a focus only in-scope hits count -
@@ -252,158 +247,100 @@ public static class CodeCompassTools
         foreach (var s in csharp.FindReferences(name, probe, ct, s => InScope(handles, s.Root)))
             hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
 
-        // C/C++ semantic is TARGETED: a reference to `name` can only be in a file whose text contains it,
-        // and the trigram index lists exactly those files. So gather the candidate C/C++ sources across all
-        // roots (absolute paths) and clang-parses ONLY those - complete, and proportional to the symbol's
-        // real footprint, never a whole-tree parse. Empty candidate set => no C/C++ work at all.
-        var cppCandidates = new List<string>();
+        // A name shorter than one trigram makes EVERY file a candidate: the name search would read the whole corpus.
+        // Only the C# semantic pass (which doesn't use the index) runs; the result says so.
+        bool indexable = name.Length >= MinIndexedQuery;
         var csCandidates = new List<string>();
         var csDisplay = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
-        // A name shorter than one trigram makes EVERY file a candidate: the C/C++ pass and the lexical backfill would
-        // read the whole corpus. Only the C# semantic pass (which doesn't use the index) runs; the result says so.
-        bool indexable = name.Length >= MinIndexedQuery;
+        bool anyCFamily = false;
         foreach (var h in indexable ? handles : Array.Empty<ServerContext.IndexHandle>())
             foreach (var rel in h.Text.CandidateFiles(name))
             {
+                if (SemanticCoverage.IsCFamily(rel)) { anyCFamily = true; continue; }
+                if (!SemanticCoverage.IsCSharp(rel)) continue;
                 var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
-                if (IsCppSourceFile(rel)) cppCandidates.Add(full);
-                else if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase)) { csCandidates.Add(full); csDisplay[full] = DisplayPath(h, rel); }
+                csCandidates.Add(full); csDisplay[full] = DisplayPath(h, rel);
             }
-        int cppCand = 0, cppParsed = 0, cppSkipped = 0;
-        bool cppMemStopped = false, cppTooBroad = false, cppWorkerFailed = false, cppWorkerStalled = false;
-        IReadOnlyList<string> cppUnresolved = System.Array.Empty<string>();
-        if (cppCandidates.Count > 0)
-        {
-            // Parse the C/C++ candidates in a SHORT-LIVED CHILD PROCESS so libclang's native memory is
-            // reclaimed by the OS when the child exits - this long-lived server otherwise ratchets upward
-            // across broad C/C++ queries (native LLVM allocator never returns pages in-process). Falls back
-            // to the in-process analyzer on any subprocess failure, so correctness never regresses.
-            ClangCppAnalyzer.CppRefResult r;
-            // Resolution spans ALL roots (primary first - the worker labels root [0]'s hits as the primary's), exactly
-            // like the in-process analyzer; a focus filters the DISPLAYED hits below, never what clang can resolve.
-            var cppRoots = ServerContext.AllRootsForQuery();
-            var worker = ClangSubprocess.Enabled ? ClangSubprocess.WorkerExePath() : null;
-            if (ClangSubprocess.Enabled && worker is null)
-                CodeCompass.Core.Diagnostics.Log.Global.Warn("clang subprocess enabled but worker exe (CodeCompass.Cli) not found next to the server; using in-process (memory may grow across broad C/C++ queries)");
-            if (worker is not null &&
-                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, ClangSubprocess.StallSeconds(), out var sub, ct))
-                r = sub;
-            else
-                r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe, ct);
-            // A shutdown/re-point may have killed the subprocess (or cancelled the in-process parse) mid-query;
-            // surface that as a cancellation so the query abandons cleanly rather than returning a partial result.
-            ct.ThrowIfCancellationRequested();
-            foreach (var s in r.Locations)
-                if (InScope(handles, s.Root))
-                    hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
-            cppCand = r.CandidateTus; cppParsed = r.ParsedTus; cppUnresolved = r.UnresolvedIncludes;
-            cppMemStopped = r.MemoryStopped; cppTooBroad = r.TooManyCandidates;
-            cppSkipped = r.SkippedTooBig; cppWorkerFailed = r.WorkerFailed; cppWorkerStalled = r.WorkerStalled;
-        }
-        // The C/C++ semantic pass is INCOMPLETE when it stopped for memory, some TUs didn't parse, OR there
-        // were unresolved #includes (a TU can PARSE with errors yet resolve nothing, so cppParsed==cppCand
-        // does NOT mean "fully resolved"). In any of those cases the lexical layer would otherwise drop every
-        // C/C++ file (SemanticCoverage treats them as "covered"), yielding a bare "0" on a symbol with real
-        // hits. So when incomplete, let lexical cover C/C++ files too, deduped against the semantic hits.
-        bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppMemStopped, cppParsed, cppCand, cppUnresolved.Count, cppSkipped, cppWorkerFailed, cppWorkerStalled);
         // Roslyn parses with an empty preprocessor set, so it silently misses references in inactive #if/#elif
-        // branches. When any candidate .cs uses conditional compilation, treat the C# pass as incomplete so
-        // the lexical backfill covers .cs too (deduped) and we disclose it - the C# twin of cppIncomplete.
+        // branches. When any candidate .cs uses conditional compilation, treat the C# pass as incomplete so .cs name
+        // matches backfill it (deduped) and we disclose it.
         var csConditional = SemanticCoverage.CSharpConditionalFiles(csCandidates);
         // .cs files the semantic model couldn't read are absent from it - incomplete, so backfill + name them.
         var csUnreadable = csharp.UnreadableFiles;
         bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0;
-        // Per-query comment/string classifier so the lexical backfill skips <see cref> doc-comment / string-literal
-        // hits in covered-language files (the v1.0.212 precision regression); reads + caches each file once.
+        // Per-query comment/string classifier for C#/C/C++ name matches; reads + caches each file once.
         var spanFilter = new LexicalSpanFilter(name);
-        var semKeys = new System.Collections.Generic.HashSet<string>(
+        var seenKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.OrdinalIgnoreCase);
         foreach (var h in handles)
-            semKeys.UnionWith(ReferenceMerge.CSharpDeclarationKeys(h.Symbols.FindByName(name), rel => DisplayPath(h, rel)));
+            seenKeys.UnionWith(ReferenceMerge.DefinitionKeys(h.Symbols.FindByName(name), rel => DisplayPath(h, rel)));
 
         var lexLimits = new CodeCompass.Core.Indexing.Segments.SegmentedIndex.SearchLimits();
+        int namedCFamily = 0;
         if (hits.Count <= maxResults && indexable)
             foreach (var h in handles)
             {
-                // Reference mode: canonical candidate order (build-order-independent: a local and a UNC index
-                // built in separate runs return the same set) + a per-file cap so one high-hit noise file
-                // can't consume the whole budget and starve the real references (the UNC refs-count gap).
-                foreach (var m in h.Text.Search(name, probe * 5, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true, limits: lexLimits))
+                // Reference mode: canonical candidate order (build-order-independent: a local and a UNC index built in
+                // separate runs return the same set), code files only, and a per-file cap so one huge generated file
+                // can't fill the whole answer.
+                foreach (var m in h.Text.Search(name, probe * 5, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
+                                                limits: lexLimits, pathFilter: CodeCompass.Core.Text.ReferenceFileFilter.IsCodeReference))
                 {
-                    // Shared filter (same as the CLI): skip semantic-covered files unless that language's pass was
-                    // incomplete, skip build noise, require a whole-word match, and skip comment/string spans. The
-                    // span filter reads the file, so give it the absolute path; display/dedup keep the relative one.
+                    // Shared filter (same as the CLI). The span filter reads the file, so give it the absolute path;
+                    // display/dedup keep the relative one.
                     var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, m.Path.Replace('/', System.IO.Path.DirectorySeparatorChar)));
-                    if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, cppIncomplete, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset)) continue;
+                    if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset)) continue;
                     var key = $"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}";
-                    if (!semKeys.Add(key)) continue;                             // already found semantically - don't double-count
+                    if (!seenKeys.Add(key)) continue;                            // already listed (semantic hit / definition)
                     hits.Add(($"{key}: {m.LineText}", 'l'));
+                    if (SemanticCoverage.IsCFamily(m.Path)) namedCFamily++;
                     if (hits.Count > maxResults) break;                          // got the overflow row
                 }
                 if (hits.Count > maxResults) break;
             }
 
-        // Field diagnostic (opt-in, CODECOMPASS_DEBUG_REFS): the semantic-vs-lexical breakdown that made up
-        // this answer, so a UNC refs-count gap can be split into "semantic came back short" vs "lexical
-        // dropped hits" against the same query on the real share. No-op unless the flag is set.
+        // Field diagnostic (opt-in, CODECOMPASS_DEBUG_REFS): the semantic-vs-name breakdown that made up this answer,
+        // so a UNC refs-count gap can be split into "semantic came back short" vs "name search dropped hits" against the
+        // same query on the real share. No-op unless the flag is set.
         if (CodeCompass.Core.Diagnostics.RefsDebug.On)
             CodeCompass.Core.Diagnostics.RefsDebug.Log(
-                $"MCP name='{name}' cppCand={cppCand} cppParsed={cppParsed} memStopped={cppMemStopped} tooBroad={cppTooBroad} " +
-                $"unresolvedIncludes={cppUnresolved.Count} cppIncomplete={cppIncomplete} csharpIncomplete={csharpIncomplete} => " +
-                $"semC#={hits.Count(h => h.Kind == 'c')} semC/C++={hits.Count(h => h.Kind == 'p')} " +
-                $"lexical={hits.Count(h => h.Kind == 'l')} total={hits.Count}");
+                $"MCP name='{name}' csharpIncomplete={csharpIncomplete} => semC#={hits.Count(h => h.Kind == 'c')} " +
+                $"named={hits.Count(h => h.Kind == 'l')} (C/C++ {namedCFamily}) total={hits.Count}");
 
-        // Honest disclosure keyed on what THIS QUERY actually did (not merely whether a compile DB file
-        // exists): if some candidate C/C++ TUs failed to parse or had unresolved #includes, a low/zero C/C++
-        // count means "couldn't look," not "no references." Names the missing headers - those can't be fixed
-        // by any -I/compile DB, only by adding them to the tree. Fires WITH or WITHOUT a compile DB (a present
-        // DB must never silence a caveat a failed parse earned).
-        string cppNote = "";
-        if (cppCandidates.Count > 0)
-        {
-            var bits = ReferenceMerge.CppCoverageBits(cppParsed, cppCand, cppMemStopped, cppUnresolved, cppTooBroad, cppSkipped, cppWorkerFailed, cppWorkerStalled);
-            if (bits.Count > 0)
-                cppNote = " (Note: C/C++ coverage INCOMPLETE - " + string.Join("; ", bits) +
-                          ". Missing headers aren't in the tree (no -I/compile DB can fix that), so a low or zero " +
-                          "C/C++ count may mean 'couldn't parse', not 'no references' - add the headers for full coverage.)";
-            else if (!ClangCppAnalyzer.ProbeCompileDb(ServerContext.AllRootsForQuery()))
-                cppNote = " (Note: no compile_commands.json found - C/C++ references resolved with best-effort " +
-                          "flags and may be imprecise; add one for precise results.)";
-        }
-        // C# conditional-compilation disclosure: Roslyn can't see inactive #if/#elif branches, so a semantic
-        // count may miss #if-guarded references (shown lexically where the backfill found them).
-        string csNote = csConditional.Count > 0
-            ? " (Note: " + ReferenceMerge.CSharpConditionalNote(
-                  csConditional.Select(f => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f)).ToList()) + ")"
-            : "";
+        var notes = new StringBuilder();
+        if (anyCFamily || namedCFamily > 0) notes.Append(" (Note: " + ReferenceMerge.CppByNameNote + ".)");
+        // C# conditional-compilation disclosure: Roslyn can't see inactive #if/#elif branches, so a semantic count may
+        // miss #if-guarded references (shown by name where the backfill found them).
+        if (csConditional.Count > 0)
+            notes.Append(" (Note: " + ReferenceMerge.CSharpConditionalNote(
+                csConditional.Select(f => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f)).ToList()) + ")");
         if (csUnreadable.Count > 0)
-            csNote += " (Note: " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(System.IO.Path.GetFileName).ToList()!) + ")";
-        // The backfill's raw scan budget (or a file's per-file cap) ran out before the filtered list did: the count may
-        // be incomplete, so say so rather than presenting it (or a zero) as exact.
+            notes.Append(" (Note: " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(System.IO.Path.GetFileName).ToList()!) + ")");
+        // The name search's raw scan budget (or a file's per-file cap) ran out before the filtered list did: the count
+        // may be incomplete, so say so rather than presenting it (or a zero) as exact.
         if (hits.Count <= maxResults && (lexLimits.HitTotalCap || lexLimits.HitPerFileCap))
-            csNote += " (Note: the lexical scan reached its budget" + (lexLimits.HitPerFileCap ? $" - files with more than {ReferenceMerge.MaxLexicalHitsPerFile} matches were cut off" : "") +
-                      ", so some text references may not be listed; narrow the query or check those files directly.)";
+            notes.Append(" (Note: the name search reached its budget" + (lexLimits.HitPerFileCap ? $" - files with more than {ReferenceMerge.MaxLexicalHitsPerFile} matches were cut off" : "") +
+                         ", so some references may not be listed; narrow the query or check those files directly.)");
         if (!indexable)
-            csNote += $" (Note: \"{name}\" is under {MinIndexedQuery} characters, too short for the text index - only C# " +
-                      "semantic references were searched; C/C++ and other languages were NOT. search_code with " +
-                      "surrounding text (e.g. \"" + name + "(\") can find those.)";
+            notes.Append($" (Note: \"{name}\" is under {MinIndexedQuery} characters, too short for the text index - only C# " +
+                         "semantic references were searched; C/C++ and other languages were NOT. search_code with " +
+                         "surrounding text (e.g. \"" + name + "(\") can find those.)");
 
         if (hits.Count == 0)
             return $"No references found for \"{name}\". Tip: try search_code for a raw text search " +
-                   "(it may not resolve as a symbol here), or check the exact spelling/case." + cppNote + csNote + CoverageCaveat(handles);
+                   "(it may not resolve as a symbol here), or check the exact spelling/case." + notes + CoverageCaveat(handles);
 
         bool truncated = hits.Count > maxResults;
         var shown = hits.Take(maxResults).ToList();
         var sb = new StringBuilder();
         foreach (var (line, _) in shown) sb.AppendLine(line);
-        int cs = shown.Count(h => h.Kind == 'c'), cpp = shown.Count(h => h.Kind == 'p'), lex = shown.Count(h => h.Kind == 'l');
-        sb.Append($"({cs} C# + {cpp} C/C++ semantic reference(s); {lex} lexical in other files)");
+        int cs = shown.Count(h => h.Kind == 'c'), named = shown.Count(h => h.Kind == 'l');
+        sb.Append($"({cs} C# semantic + {named} name-matched reference(s))");
         if (truncated) sb.Append(shown.Count < MaxResultsCeiling
             ? $" - MORE EXIST: narrow the query or raise maxResults (max {MaxResultsCeiling})"
             : " - MORE EXIST: narrow the query");
-        sb.Append(cppNote);
-        sb.Append(csNote);
+        sb.Append(notes);
         return sb.ToString();
     }, cancellationToken);
 

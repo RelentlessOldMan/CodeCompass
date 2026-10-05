@@ -188,6 +188,26 @@ public class RecallTests
     public void LexicalBudgetExhaustion_IsDisclosed_EvenOnAZero()
     {
         using var repo = new TempRepo();
+        // Code-file hits that are NOT references (a longer identifier containing the name) still use the raw scan
+        // budget; the real use sorts after them.
+        for (int i = 0; i < 20; i++) repo.Write($"a{i:D2}.py", "zork_fnx()\n");
+        repo.Write("z.py", "zork_fn()\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            var r = CodeCompassTools.FindReferences("zork_fn", maxResults: 1);
+            Assert.Contains("name search reached its budget", r);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    // ...and non-code files (docs, logs) no longer use that budget at all: they're dropped before the scan, so twenty
+    // Markdown mentions can't crowd out the one real use.
+    [Fact]
+    public void NonCodeMentions_DoNotStarveTheBudget()
+    {
+        using var repo = new TempRepo();
         for (int i = 0; i < 20; i++) repo.Write($"a{i:D2}.md", "zork_fn is documented here\n");
         repo.Write("z.py", "zork_fn()\n");
         ServerContext.Init(repo.Root);
@@ -195,7 +215,8 @@ public class RecallTests
         {
             CodeCompassTools.Reindex();
             var r = CodeCompassTools.FindReferences("zork_fn", maxResults: 1);
-            Assert.Contains("lexical scan reached its budget", r);
+            Assert.Contains("z.py:1:1", r);
+            Assert.DoesNotContain("reached its budget", r);
         }
         finally { ServerContext.Init(repo.Root); }
     }

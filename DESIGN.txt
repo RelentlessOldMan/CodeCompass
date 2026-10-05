@@ -165,26 +165,32 @@ The intelligence layers, cheapest first:
 - Semantic layer for C# (Roslyn). Precise, cross-file understanding for C#:
   real find-all-references, go-to-definition, call hierarchy across a solution.
 
-- Semantic layer for C/C++ (clang). Precise understanding when a compile
-  database (compile_commands.json) is available. When it isn't, we degrade
-  gracefully to the syntactic layer plus trigram heuristics rather than
-  pretending to be exact. C++ is honestly the hardest language here and we treat
-  it with the respect it deserves.
+- C/C++ references by NAME (2026-10, replacing a clang semantic layer). Every
+  whole-word use in C/C++ code from the trigram index, with comments and string
+  literals skipped (a C-family lexer) and definition sites dropped (the symbol
+  index, which records functions, in-class and qualified member definitions and
+  types). The answer says plainly that same-named symbols are listed together.
+  Why clang went: it unions every declaration with the queried spelling anyway
+  (so it never told same-named symbols apart), it missed calls into templates and
+  code in headers no parsed file included, it needed a compile database to resolve
+  much at all, and on header-heavy C++ it cost ~12 CPU-seconds per file (minutes to
+  hours for a broad symbol on llvm). Side by side on fmt, llvm and firmware-style C,
+  the name search found every use clang found plus the ones it missed, in about a
+  second, with no memory or time limits to tune. True per-symbol C/C++ precision
+  would need an index-time cross-reference table (compile every file once), which
+  is a separate, explicit decision.
 
 - Semantic analyzers are the one part NOT memory-mapped: Roslyn holds a whole
   in-memory solution (every .cs file's text, plus a cached compilation once
-  find_references runs) and clang holds its keyed declaration/reference model -
-  hundreds of MB to GB on a large repo. They are built LAZILY (only when
+  find_references runs) - hundreds of MB to GB on a large repo. They are built LAZILY (only when
   find_references is first called) and, on a long-lived server, EVICTED after a
   stretch with no semantic query (default 10 min; CODECOMPASS_SEMANTIC_IDLE_MIN /
-  semanticIdleMinutes, 0 = keep resident). Eviction disposes the Roslyn workspace
-  and clears clang's maps, then they rebuild lazily on the next use - so a session
+  semanticIdleMinutes, 0 = keep resident). Eviction disposes the Roslyn workspace,
+  which rebuilds lazily on the next use - so a session
   that greps and reads but stops resolving symbols doesn't pin memory it isn't
   using. Eviction takes the same write lock a rebuild does, so it can never dispose
   an analyzer mid-query (a find_references holds the read lock for its whole
-  duration). The clang line-context cache is now per-query (freed when the query
-  returns) rather than a resident field that grew with every file ever returned.
-  This is the counterpart to the mmap'd trigram/symbol indexes: everything that
+  duration). This is the counterpart to the mmap'd trigram/symbol indexes: everything that
   scales with repo size is either mmap'd or reclaimable.
 
 
@@ -327,21 +333,6 @@ contract"):
   file is read), so it costs nothing on the per-symbol hot path; an incremental
   update carries the last full build's value forward (a full reindex refreshes it).
 
-- The C/C++ semantic layer discloses when it ran degraded. Precise C/C++ references
-  need a compile_commands.json; without one, clang runs on best-effort flags with
-  unresolved includes/defines and may resolve little or nothing. A bare "0 C/C++
-  semantic" would read as "no references exist," so find_references appends a note
-  ("no compile_commands.json found - ran best-effort over N translation units, may be
-  incomplete; add one for precise results"), and `doctor` warns when C/C++ sources are
-  present with no compile DB. The dialect is chosen by extension (gnu11 for .c, not
-  c++17) so valid C isn't rejected on the very repos that lack a compile DB. A compile
-  DB outside the two default probe spots (root, root/build) is found via the
-  `compileCommands` config (or CODECOMPASS_COMPILE_COMMANDS) - a list of files or dirs,
-  merged per source file so a multi-target build (one DB per target) is covered; the
-  first DB to describe a file wins a collision (any valid parse binds the symbol - we
-  don't reproduce a target's object code). This is the same honesty contract as the
-  size-cap disclosure, applied to semantic availability.
-
 - Empty results also point at the next tool (case-insensitive retry, search_code
   for a macro/unsupported language, etc.) instead of dead-ending.
 
@@ -398,7 +389,8 @@ Build phases
    search_symbols, and reindex. Wire it into Claude Code manually and feel the
    difference.
 
-4. Semantic layers: Roslyn for C#, then clang/ClangSharp for C/C++.
+4. Semantic layers: Roslyn for C#, then clang/ClangSharp for C/C++ (the clang layer
+   was later replaced by a C/C++ name search - see the C/C++ references section).
 
 5. Filesystem watcher with debounced, hash-verified incremental re-indexing.
 
@@ -511,8 +503,8 @@ them as one federated result set. The design choices, and their whys:
   is always gate-then-RW, never the reverse, so there is no AB-BA hazard with reads.
 
 - Cross-root code intelligence. find_references and find_callees resolve ACROSS the
-  boundary: the Roslyn (C#) and clang (C/C++) analyzers span the project root AND
-  every linked root in ONE compilation / USR model, so a call in the project to a
+  boundary: the Roslyn (C#) analyzer spans the project root AND every linked root in
+  ONE compilation, so a call in the project to a
   type defined in a linked root binds. A per-root union would MISS this - the
   project compilation alone has no source for the linked type - which is why one
   spanning compilation is worth the cost. Each semantic result carries the absolute
@@ -768,8 +760,8 @@ the features:
 - The native tree-sitter parse cannot be cancelled through the binding, so slow
   parses are prevented by not starting them (size cap + content skip), never by
   interrupting them mid-parse.
-- Precise C/C++ semantics need a compile database; without one, quality degrades
-  to syntactic.
+- C/C++ references are matched by name, not compiled: same-named symbols are
+  listed together.
 - Cross-process safety of deleting memory-mapped segment/base files while a reader
   holds them relies on Windows file-locking semantics.
 - Linked roots: a link add/remove run in a terminal is picked up live (a signature
@@ -791,10 +783,6 @@ Open questions and risks
 - Real indexing throughput on a genuine dozens-of-GB polyglot repo on Windows
   hardware is unmeasured. This is the number that validates the whole premise
   and should be measured early, in phase 1.
-
-- C/C++ semantic coverage depends on a compile database being present and
-  correct. Where it isn't, quality drops to syntactic. We need to decide how
-  hard to push on obtaining or generating compile_commands.json.
 
 - The hard-block enforcement hook must be careful not to strand the agent when
   CodeCompass legitimately has no answer; the fallback path has to be reliable.

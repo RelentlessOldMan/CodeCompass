@@ -24,7 +24,7 @@ public class ToolSurfaceTests
             })
             .ToArray();
 
-    // Review P1-7: tools take the per-request CancellationToken so an abandoned call stops its clang/Roslyn work. The
+    // Review P1-7: tools take the per-request CancellationToken so an abandoned call stops its Roslyn/name-search work. The
     // SDK must bind it invisibly - if it leaked into the input schema, every session would pay for a useless param.
     [Fact]
     public void CancellationToken_IsNotPartOfAnyToolSchema()

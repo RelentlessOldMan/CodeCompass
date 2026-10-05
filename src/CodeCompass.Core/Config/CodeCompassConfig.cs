@@ -24,11 +24,6 @@ public sealed class RepoConfig
     [JsonPropertyName("ignore")] public string[]? Ignore { get; set; }
     // Directory names to index even though they're skipped by default as build output (packages, build, out, ...).
     [JsonPropertyName("keepDirs")] public string[]? KeepDirs { get; set; }
-    // Extra places to find a C/C++ compile_commands.json (for precise find_references). Each entry is a
-    // file OR a directory (searched for compile_commands.json and build/compile_commands.json), relative
-    // to the repo root or absolute. Several are merged (per-file union), so a multi-target build that emits
-    // one DB per target is supported. Beyond the two default probe locations (root, root/build).
-    [JsonPropertyName("compileCommands")] public string[]? CompileCommands { get; set; }
 }
 
 /// <summary>
@@ -67,16 +62,9 @@ public static class CodeCompassConfig
                               //   always, false = never.
   // "statusLine": true,      // publish index state for the `codecompass statusline` command (shown in
                               //   Claude Code's status area). Default true; harmless if unused.
-  // "semanticIdleMinutes": 10, // evict the resident C#/C++ semantic analyzer after this many minutes
+  // "semanticIdleMinutes": 10, // evict the resident C# semantic analyzer after this many minutes
                               //   with no find_references, to free memory (rebuilds on next use).
                               //   Default 10; 0 = keep resident.
-  // "compileCommands": ["build/appA", "build/appB/compile_commands.json"],
-                              //   extra place(s) to find a C/C++ compile_commands.json for precise
-                              //   find_references. Each entry is a directory (searched for
-                              //   compile_commands.json + build/compile_commands.json) or a file, relative
-                              //   to the repo root or absolute. Several are merged per-file, so a multi-
-                              //   target build (one DB per target) is covered. root and root/build are
-                              //   always checked. (env: CODECOMPASS_COMPILE_COMMANDS, ';'-separated.)
   // "threads": 0,            // indexing parallelism; 0 / omitted = all CPU cores.
   // "walkThreads": 0,        // concurrent directory reads during the walk; 0 / omitted = min(cores, 8),
                               //   1 = serial. Raise for a high-latency network share (overlaps SMB
@@ -158,7 +146,7 @@ public static class CodeCompassConfig
     public static bool StatusLinePublish() => StatusLinePublish(_current);
     public static bool StatusLinePublish(RepoConfig cfg) => EnvBool("CODECOMPASS_STATUS_LINE") ?? cfg.StatusLine ?? true;
 
-    /// <summary>Minutes the long-lived server keeps a built semantic analyzer (Roslyn C# / clang C++)
+    /// <summary>Minutes the long-lived server keeps a built semantic analyzer (Roslyn, C#)
     /// resident with no semantic query before evicting it to free memory (it rebuilds lazily on the next
     /// use). These hold the whole language model in RAM - hundreds of MB to GB on a large repo - so on a
     /// long session that stops using find_references, eviction reclaims the largest resident chunk.
@@ -292,42 +280,6 @@ public static class CodeCompassConfig
                 if (!string.IsNullOrWhiteSpace(d)) yield return d.Trim();
     }
 
-    // ---- C/C++ semantic-pass knobs (environment only; see README "Tuning C/C++ find-references") ----------------
-
-    /// <summary>Largest C/C++ source handed to clang (default 2 MB); larger candidates are searched lexically and
-    /// disclosed. CODECOMPASS_CPP_MAX_TU_MB.</summary>
-    public static long CppMaxTuBytes() => (EnvLong("CODECOMPASS_CPP_MAX_TU_MB") is > 0 and var mb ? mb : 2) * 1024 * 1024;
-
-    /// <summary>Candidate-TU count above which the semantic pass is skipped up front (latency guard; default 400,
-    /// 0 = never skip). CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES.</summary>
-    public static int CppMaxSemanticCandidates() => EnvInt("CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES") is >= 0 and var n ? n : 400;
-
-    /// <summary>Explicit concurrent TU parses, or null to size by available memory. CODECOMPASS_CPP_PARSE_THREADS.</summary>
-    public static int? CppParseThreads() => EnvInt("CODECOMPASS_CPP_PARSE_THREADS") is > 0 and var n ? n : null;
-
-    /// <summary>Explicit per-session clang memory ceiling in MB, or null to scale with RAM. CODECOMPASS_CPP_SESSION_MEM_MB.</summary>
-    public static long? CppSessionMemMb() => EnvLong("CODECOMPASS_CPP_SESSION_MEM_MB") is > 0 and var mb ? mb : null;
-
-    /// <summary>Explicit per-query clang growth budget in MB, or null to scale with free memory. CODECOMPASS_CPP_QUERY_MEM_MB.</summary>
-    public static long? CppQueryMemMb() => EnvLong("CODECOMPASS_CPP_QUERY_MEM_MB") is > 0 and var mb ? mb : null;
-
-    /// <summary>Parse C/C++ in a short-lived worker process (default on). CODECOMPASS_CPP_SUBPROCESS=0/false/off.</summary>
-    public static bool CppSubprocessEnabled()
-    {
-        var v = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_SUBPROCESS");
-        return !(v is "0" || string.Equals(v, "false", StringComparison.OrdinalIgnoreCase) || string.Equals(v, "off", StringComparison.OrdinalIgnoreCase));
-    }
-
-    /// <summary>How long the C/C++ worker may go WITHOUT PROGRESS (no TU finished) before it's considered stalled and
-    /// stopped - not a total time limit: a slow but progressing parse always runs to completion. Default 600 s, clamped
-    /// 1-86400. CODECOMPASS_CPP_WORKER_STALL_SEC (the old CODECOMPASS_CPP_WORKER_TIMEOUT_SEC is honored as a fallback).</summary>
-    public static int CppWorkerStallSec()
-    {
-        if (EnvInt("CODECOMPASS_CPP_WORKER_STALL_SEC") is > 0 and var s) return Math.Clamp(s, 1, 86400);
-        if (EnvInt("CODECOMPASS_CPP_WORKER_TIMEOUT_SEC") is > 0 and var t) return Math.Clamp(t, 1, 86400);
-        return 600;
-    }
-
     /// <summary>Directory names to index even though a default rule skips them: CODECOMPASS_KEEP + config keepDirs.</summary>
     public static IEnumerable<string> KeptDirs() => KeptDirs(_current);
     public static IEnumerable<string> KeptDirs(RepoConfig cfg)
@@ -339,50 +291,5 @@ public static class CodeCompassConfig
         if (cfg.KeepDirs is not null)
             foreach (var d in cfg.KeepDirs)
                 if (!string.IsNullOrWhiteSpace(d)) yield return d.Trim();
-    }
-
-    /// <summary>
-    /// The compile_commands.json file(s) to feed clang for a root, in priority order: the configured
-    /// locations (CODECOMPASS_COMPILE_COMMANDS + the config's <c>compileCommands</c>) first so an explicit
-    /// choice wins a per-file collision, then the two conventional auto locations (root, root/build). Each
-    /// configured entry may be a FILE or a DIRECTORY (searched for compile_commands.json and
-    /// build/compile_commands.json), relative to <paramref name="root"/> or absolute. Only existing files
-    /// are returned, de-duplicated. Never throws.
-    /// </summary>
-    public static IReadOnlyList<string> CompileCommandsFiles(string root, RepoConfig? cfg)
-    {
-        var results = new List<string>();
-        void AddFile(string p)
-        {
-            try
-            {
-                var f = Path.GetFullPath(p);
-                if (File.Exists(f) && !results.Contains(f, StringComparer.OrdinalIgnoreCase)) results.Add(f);
-            }
-            catch { /* skip an unresolvable path */ }
-        }
-        void AddLocation(string loc)
-        {
-            string full;
-            try { full = Path.IsPathRooted(loc) ? loc : Path.Combine(root, loc); } catch { return; }
-            if (Directory.Exists(full)) { AddFile(Path.Combine(full, "compile_commands.json")); AddFile(Path.Combine(full, "build", "compile_commands.json")); }
-            else AddFile(full); // treat as a file path
-        }
-
-        foreach (var loc in CompileCommandsConfigured(cfg)) AddLocation(loc); // explicit first (wins collisions)
-        AddFile(Path.Combine(root, "compile_commands.json"));                 // then the conventional spots
-        AddFile(Path.Combine(root, "build", "compile_commands.json"));
-        return results;
-    }
-
-    private static IEnumerable<string> CompileCommandsConfigured(RepoConfig? cfg)
-    {
-        var env = Environment.GetEnvironmentVariable("CODECOMPASS_COMPILE_COMMANDS");
-        if (!string.IsNullOrWhiteSpace(env))
-            foreach (var p in env.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-                yield return p;
-        if (cfg?.CompileCommands is not null)
-            foreach (var p in cfg.CompileCommands)
-                if (!string.IsNullOrWhiteSpace(p)) yield return p.Trim();
     }
 }

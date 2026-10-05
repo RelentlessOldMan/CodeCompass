@@ -19,91 +19,30 @@ public class SemanticHonestyTests
     {
         var sb = new StringBuilder();
         sb.AppendLine("void widget_reset();");
-        for (int i = 0; i < 40_000; i++) sb.AppendLine("// filler line to push this translation unit over the size cap");
+        for (int i = 0; i < 40_000; i++) sb.AppendLine("// filler line to push this file well past a megabyte");
         sb.AppendLine("void big_caller() { " + symbolUse + " }");
         return sb.ToString();
     }
 
-    // P0-4: a candidate .cpp over CODECOMPASS_CPP_MAX_TU_MB was filtered out BEFORE the candidate count, so the pass
-    // read as complete, the lexical backfill skipped every C/C++ file, and the big file's references vanished silently.
+    // P0-4 (originally a clang size-cap bug: an oversize .cpp's references vanished silently). C/C++ references are a
+    // name search now, so a file of any size is searched like any other - and the answer says what C/C++ matches are.
     [Fact]
-    public void OversizeCppCandidate_MakesThePassIncomplete_AndIsDisclosed_AndBackfilled()
+    public void OversizeCppFile_ReferencesStillFound()
     {
         using var repo = new TempRepo();
         repo.Write("small.cpp", "void widget_reset();\nvoid caller() { widget_reset(); }\n");
         repo.Write("big.cpp", BigCpp("widget_reset();"));
         Assert.True(new FileInfo(repo.FullPath("big.cpp")).Length > 1024 * 1024);
-        var old = Environment.GetEnvironmentVariable("CODECOMPASS_CPP_MAX_TU_MB");
         ServerContext.Init(repo.Root);
         try
         {
-            Environment.SetEnvironmentVariable("CODECOMPASS_CPP_MAX_TU_MB", "1");
-            var direct = new ClangCppAnalyzer(repo.Root).FindReferencesDetailed("widget_reset",
-                new[] { repo.FullPath("small.cpp"), repo.FullPath("big.cpp") });
-            Assert.Equal(1, direct.SkippedTooBig);
-            Assert.True(SemanticCoverage.IsCppPassIncomplete(direct.MemoryStopped, direct.ParsedTus, direct.CandidateTus,
-                direct.UnresolvedIncludes.Count, direct.SkippedTooBig, direct.WorkerFailed));
-
             CodeCompassTools.Reindex();
             var r = CodeCompassTools.FindReferences("widget_reset");
-            Assert.Contains("big.cpp", r);            // the backfill found the reference clang never parsed
-            Assert.Contains("size cap", r);           // ...and the answer says why it's lexical
+            Assert.Contains("big.cpp", r);
+            Assert.Contains("small.cpp", r);
+            Assert.Contains("matched by NAME", r);
         }
-        finally
-        {
-            Environment.SetEnvironmentVariable("CODECOMPASS_CPP_MAX_TU_MB", old);
-            ServerContext.Init(repo.Root);
-        }
-    }
-
-    // P1-9: TUs parse in parallel and merge in completion order, USRs sit in a hash set - so the truncated SET varied
-    // between identical runs. Results are now canonical (path, line, column) before the cut.
-    [Fact]
-    public void CppReferences_AreCanonicallyOrdered_SoTruncationIsDeterministic()
-    {
-        using var repo = new TempRepo();
-        foreach (var n in new[] { "c", "a", "b" })
-            repo.Write($"{n}.cpp", "void probe_fn();\nvoid f_" + n + "() { probe_fn(); probe_fn(); }\n");
-        var files = new[] { "c", "a", "b" }.Select(n => repo.FullPath($"{n}.cpp")).ToList();
-        var an = new ClangCppAnalyzer(repo.Root);
-        var full = an.FindReferencesDetailed("probe_fn", files).Locations;
-        var keys = full.Select(l => (l.RelativePath, l.Line, l.Column)).ToList();
-        Assert.Equal(keys.OrderBy(k => k.RelativePath, StringComparer.Ordinal).ThenBy(k => k.Line).ThenBy(k => k.Column), keys);
-        var capped = an.FindReferencesDetailed("probe_fn", files, max: 3).Locations;
-        Assert.Equal(keys.Take(3), capped.Select(l => (l.RelativePath, l.Line, l.Column)));
-    }
-
-    // P2-1: libclang columns are UTF-8 BYTES; the lexical layer counts UTF-16 chars. A non-ASCII prefix made the same
-    // reference two different "file:line:col" keys, so it was listed twice.
-    [Theory]
-    [InlineData("foo();", 1, 1)]
-    [InlineData("/* é */ foo();", 10, 9)]       // é is 2 UTF-8 bytes
-    [InlineData("/* 中 */ foo();", 11, 9)]       // 中 is 3 UTF-8 bytes
-    [InlineData("/* \U0001F600 */ foo();", 12, 10)]  // an emoji: 4 bytes, 2 UTF-16 chars
-    public void ClangByteColumns_AreConvertedToCharColumns(string line, int byteCol, int charCol) =>
-        Assert.Equal(charCol, ClangCppAnalyzer.CharColumn(line, byteCol));
-
-    // P2-7: a worker crash was reported as a MEMORY stop (pointing at the wrong knob); only an OOM signature is.
-    [Fact]
-    public void ContainedWorkerFailure_IsLabeledAsAWorkerFailure_UnlessItIsAnOom()
-    {
-        var crash = ClangSubprocess.ContainedFailure(new[] { "a.cpp" }, "access violation");
-        Assert.True(crash.WorkerFailed);
-        Assert.False(crash.MemoryStopped);
-        var oom = ClangSubprocess.ContainedFailure(new[] { "a.cpp" }, "LLVM ERROR: out of memory");
-        Assert.True(oom.MemoryStopped);
-        Assert.False(oom.WorkerFailed);
-        var none = ClangSubprocess.ContainedFailure(null, null); // still incomplete -> backfill runs
-        Assert.True(SemanticCoverage.IsCppPassIncomplete(none.MemoryStopped, none.ParsedTus, none.CandidateTus, 0, 0, none.WorkerFailed));
-        Assert.Contains(ReferenceMerge.CppCoverageBits(0, 1, false, Array.Empty<string>(), workerFailed: true), b => b.Contains("worker crashed"));
-    }
-
-    [Fact]
-    public void Worker_RejectsMalformedRequest_WithTheRetryableExitCode()
-    {
-        using var input = new MemoryStream(Encoding.UTF8.GetBytes("{ not json"));
-        using var output = new MemoryStream();
-        Assert.Equal(ClangSubprocess.BadRequestExit, ClangSubprocess.RunWorkerCore(input, output));
+        finally { ServerContext.Init(repo.Root); }
     }
 
     // P1-10: Roslyn's reference enumeration order isn't contractual; the answer is now canonical before the cap.
@@ -179,9 +118,8 @@ public class SemanticHonestyTests
         }
     }
 
-    // P0-6b: C/C++ semantic hits bypassed the focus filter. Candidates only come from the focused root, so the leak is
-    // a HEADER that lives in an out-of-scope root: clang (resolving across all roots, as it must) reports the reference
-    // inside it, and that hit was displayed although its root was focused out.
+    // P0-6b: C/C++ hits once bypassed the focus filter (a reference inside a HEADER in an out-of-scope root was shown).
+    // C/C++ is a name search now; the same guarantee holds: a focused-out root contributes nothing.
     [Fact]
     public void Focus_FiltersCppSemanticHits_ByOwningRoot()
     {

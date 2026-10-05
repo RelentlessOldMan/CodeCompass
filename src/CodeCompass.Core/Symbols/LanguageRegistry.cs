@@ -92,6 +92,8 @@ public static class LanguageRegistry
         (enum_specifier name: (type_identifier) @enum)
         (namespace_definition name: (namespace_identifier) @namespace)
         (function_definition declarator: (function_declarator declarator: (identifier) @function))
+        (function_definition declarator: (function_declarator declarator: (field_identifier) @method))
+        (function_definition declarator: (function_declarator declarator: (qualified_identifier name: (identifier) @method)))
         """);
 
     private static readonly LanguageDefinition Python = new("python",
