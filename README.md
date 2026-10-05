@@ -326,7 +326,7 @@ rarely set these blind.
 | `CODECOMPASS_CPP_MAX_TU_MB` | Largest C/C++ source handed to clang (default **2**). Larger candidates are searched **lexically instead** — and the answer says so, naming this knob. |
 | `CODECOMPASS_CPP_PARSE_THREADS` | Translation units parsed concurrently (default: sized by free memory, at most 3). |
 | `CODECOMPASS_CPP_SUBPROCESS` | `0` parses in-process instead of in a short-lived worker (the worker returns clang's native memory to the OS after each query; keep it on). |
-| `CODECOMPASS_CPP_WORKER_TIMEOUT_SEC` | Hang protection for the worker (default **300**). A query that hits it is reported as a worker failure and answered lexically, with a note. |
+| `CODECOMPASS_CPP_WORKER_STALL_SEC` | Hang protection for the worker (default **600**): how long it may go with **no progress** (no file finished parsing) before it's stopped. There is no total time limit - a slow but progressing parse always completes with its real answer. A stalled query reports that no C/C++ references were found by analysis; text matches are never substituted. (The old `CODECOMPASS_CPP_WORKER_TIMEOUT_SEC` is still read as a fallback.) |
 
 `compile_commands.json` comes from the repo, so its arguments reach clang through an **allowlist**: defines,
 include paths, forced includes, language/standard, target and dialect flags pass; anything that would load

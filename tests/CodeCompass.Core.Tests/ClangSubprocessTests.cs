@@ -218,4 +218,81 @@ public class ClangSubprocessTests
         Assert.False(ClangSubprocess.TryFindReferences(cli, new[] { Path.GetTempPath() }, "", cands, 200, 60, out _));
     }
 
+    private static string RunCliText(string cli, System.Collections.Generic.Dictionary<string, string>? env, params string[] args)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo(cli) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        if (env is not null) foreach (var kv in env) psi.Environment[kv.Key] = kv.Value;
+        using var p = System.Diagnostics.Process.Start(psi)!;
+        var o = p.StandardOutput.ReadToEndAsync(); var e = p.StandardError.ReadToEndAsync();
+        Assert.True(p.WaitForExit(120_000), "CLI did not exit");
+        return o.GetAwaiter().GetResult() + "\n" + e.GetAwaiter().GetResult();
+    }
+
+    private sealed class EnvScope : IDisposable
+    {
+        private readonly string _key;
+        private readonly string? _old;
+        public EnvScope(string key, string? val) { _key = key; _old = Environment.GetEnvironmentVariable(key); Environment.SetEnvironmentVariable(key, val); }
+        public void Dispose() => Environment.SetEnvironmentVariable(_key, _old);
+    }
+
+    // P1-11: references are REFERENCES. There is no total time limit - a worker that is slow but keeps finishing TUs
+    // runs to completion and returns its real (semantic) answer. Here it takes ~4 s in total against a 2 s no-progress
+    // window, reporting progress every 0.7 s: it must NOT be stopped.
+    [Fact]
+    public void TryFindReferences_SlowButProgressingWorker_RunsToCompletion()
+    {
+        var cli = TestCli.Find();
+        ClangCppAnalyzer.CppRefResult r;
+        bool ok;
+        using (new EnvScope("CODECOMPASS_TEST_WORKER_PACE", "6:700"))
+            ok = ClangSubprocess.TryFindReferences(cli, new[] { Path.GetTempPath() }, "sym", new[] { "x.c" }, 200, 2, out r);
+        Assert.True(ok);
+        Assert.False(r.WorkerStalled, "a progressing worker must never be stopped for taking long");
+        Assert.False(r.WorkerFailed);
+    }
+
+    // End-to-end through `refs`: the C file plainly contains the name, but when the worker stalls its text match must NOT
+    // be shown as a reference - only the disclosure. (Before: the 300 s timeout swapped in lexical matches.)
+    [Fact]
+    public void Cli_Refs_StalledWorker_ShowsNoTextMatchesAsReferences()
+    {
+        var cli = TestCli.Find();
+        using var repo = new TempRepo();
+        repo.Write("lib.c", "int stall_probe_fn(void) { return 1; }\nint user(void) { return stall_probe_fn(); }\n");
+
+        RunCliText(cli, null, "index", repo.Root);
+        var all = RunCliText(cli, new() { ["CODECOMPASS_TEST_WORKER_HANG"] = "1", ["CODECOMPASS_CPP_WORKER_STALL_SEC"] = "2" },
+                             "refs", repo.Root, "stall_probe_fn");
+
+        Assert.Contains("NO C/C++ references are reported", all);
+        Assert.DoesNotContain("lib.c:", all);                                  // no text match posing as a reference
+        Assert.Matches(@"0 C/C\+\+ semantic \+ 0 lexical", all);
+    }
+
+    // A worker that makes NO progress for the whole window is stopped - and nothing is substituted: the pass does not
+    // count as "incomplete" (which would backfill text matches), and the disclosure says no C/C++ references were reported.
+    [Fact]
+    public void TryFindReferences_StalledWorker_StoppedAndNothingSubstituted()
+    {
+        var cli = TestCli.Find();
+        var cands = new[] { "x.c", "y.c" };
+        ClangCppAnalyzer.CppRefResult r;
+        bool ok;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using (new EnvScope("CODECOMPASS_TEST_WORKER_HANG", "1"))
+            ok = ClangSubprocess.TryFindReferences(cli, new[] { Path.GetTempPath() }, "sym", cands, 200, 2, out r);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(30), $"a stalled worker must be stopped promptly (took {sw.Elapsed})");
+        Assert.True(ok);
+        Assert.True(r.WorkerStalled);
+        Assert.Empty(r.Locations);
+        Assert.False(SemanticCoverage.IsCppPassIncomplete(r.MemoryStopped, r.ParsedTus, r.CandidateTus, 0, 0, r.WorkerFailed, r.WorkerStalled),
+            "a stall must not trigger the lexical backfill");
+        var bits = ReferenceMerge.CppCoverageBits(r.ParsedTus, r.CandidateTus, r.MemoryStopped, r.UnresolvedIncludes, workerStalled: r.WorkerStalled);
+        var bit = Assert.Single(bits);
+        Assert.Contains("NO C/C++ references are reported", bit);
+        Assert.Contains("never substituted", bit);
+    }
+
 }

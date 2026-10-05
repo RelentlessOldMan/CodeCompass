@@ -270,7 +270,7 @@ public static class CodeCompassTools
                 else if (rel.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase)) { csCandidates.Add(full); csDisplay[full] = DisplayPath(h, rel); }
             }
         int cppCand = 0, cppParsed = 0, cppSkipped = 0;
-        bool cppMemStopped = false, cppTooBroad = false, cppWorkerFailed = false;
+        bool cppMemStopped = false, cppTooBroad = false, cppWorkerFailed = false, cppWorkerStalled = false;
         IReadOnlyList<string> cppUnresolved = System.Array.Empty<string>();
         if (cppCandidates.Count > 0)
         {
@@ -286,7 +286,7 @@ public static class CodeCompassTools
             if (ClangSubprocess.Enabled && worker is null)
                 CodeCompass.Core.Diagnostics.Log.Global.Warn("clang subprocess enabled but worker exe (CodeCompass.Cli) not found next to the server; using in-process (memory may grow across broad C/C++ queries)");
             if (worker is not null &&
-                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, ClangSubprocess.TimeoutSeconds(), out var sub, ct))
+                ClangSubprocess.TryFindReferences(worker, cppRoots, name, cppCandidates, probe, ClangSubprocess.StallSeconds(), out var sub, ct))
                 r = sub;
             else
                 r = ServerContext.Cpp.FindReferencesDetailed(name, cppCandidates, probe, ct);
@@ -298,14 +298,14 @@ public static class CodeCompassTools
                     hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'p'));
             cppCand = r.CandidateTus; cppParsed = r.ParsedTus; cppUnresolved = r.UnresolvedIncludes;
             cppMemStopped = r.MemoryStopped; cppTooBroad = r.TooManyCandidates;
-            cppSkipped = r.SkippedTooBig; cppWorkerFailed = r.WorkerFailed;
+            cppSkipped = r.SkippedTooBig; cppWorkerFailed = r.WorkerFailed; cppWorkerStalled = r.WorkerStalled;
         }
         // The C/C++ semantic pass is INCOMPLETE when it stopped for memory, some TUs didn't parse, OR there
         // were unresolved #includes (a TU can PARSE with errors yet resolve nothing, so cppParsed==cppCand
         // does NOT mean "fully resolved"). In any of those cases the lexical layer would otherwise drop every
         // C/C++ file (SemanticCoverage treats them as "covered"), yielding a bare "0" on a symbol with real
         // hits. So when incomplete, let lexical cover C/C++ files too, deduped against the semantic hits.
-        bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppMemStopped, cppParsed, cppCand, cppUnresolved.Count, cppSkipped, cppWorkerFailed);
+        bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppMemStopped, cppParsed, cppCand, cppUnresolved.Count, cppSkipped, cppWorkerFailed, cppWorkerStalled);
         // Roslyn parses with an empty preprocessor set, so it silently misses references in inactive #if/#elif
         // branches. When any candidate .cs uses conditional compilation, treat the C# pass as incomplete so
         // the lexical backfill covers .cs too (deduped) and we disclose it - the C# twin of cppIncomplete.
@@ -362,7 +362,7 @@ public static class CodeCompassTools
         string cppNote = "";
         if (cppCandidates.Count > 0)
         {
-            var bits = ReferenceMerge.CppCoverageBits(cppParsed, cppCand, cppMemStopped, cppUnresolved, cppTooBroad, cppSkipped, cppWorkerFailed);
+            var bits = ReferenceMerge.CppCoverageBits(cppParsed, cppCand, cppMemStopped, cppUnresolved, cppTooBroad, cppSkipped, cppWorkerFailed, cppWorkerStalled);
             if (bits.Count > 0)
                 cppNote = " (Note: C/C++ coverage INCOMPLETE - " + string.Join("; ", bits) +
                           ". Missing headers aren't in the tree (no -I/compile DB can fix that), so a low or zero " +

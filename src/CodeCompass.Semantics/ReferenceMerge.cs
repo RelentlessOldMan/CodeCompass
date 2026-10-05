@@ -107,9 +107,17 @@ public static class ReferenceMerge
     /// unresolved. Each host wraps these bits in its own surface prose (CLI stderr line vs MCP note); sharing
     /// the bits keeps the substance (wording, thresholds, header list) identical across both.</summary>
     public static List<string> CppCoverageBits(int cppParsed, int cppCandidates, bool memoryStopped, IReadOnlyList<string> unresolvedIncludes, bool tooManyCandidates = false,
-        int skippedTooBig = 0, bool workerFailed = false)
+        int skippedTooBig = 0, bool workerFailed = false, bool workerStalled = false)
     {
         var bits = new List<string>();
+        // A stalled worker (no progress for the stall window) was stopped. Nothing stands in for its answer.
+        if (workerStalled)
+        {
+            bits.Add($"the C/C++ semantic analysis made no progress for {ClangSubprocess.StallSeconds():N0}s and was stopped, so NO " +
+                     $"C/C++ references are reported for this query (text matches are never substituted for references) - rerun it; " +
+                     "if a single file genuinely takes that long to parse, raise CODECOMPASS_CPP_WORKER_STALL_SEC");
+            return bits;
+        }
         // A deliberate broad-symbol short-circuit: the semantic pass was skipped UP FRONT because the candidate
         // set exceeded the limit (parsing it would grind for minutes and fall back to lexical anyway). Say so
         // distinctly - and DON'T also emit the generic "0/N parsed"/memory-stop lines, which would misread the
@@ -119,7 +127,7 @@ public static class ReferenceMerge
             bits.Add($"{cppCandidates:N0} candidate C/C++ file(s) exceeded the semantic-parse limit, so references are shown lexically (raise CODECOMPASS_CPP_MAX_SEMANTIC_CANDIDATES, or set it to 0, to force a semantic parse)");
             return bits;
         }
-        if (workerFailed) bits.Add("the C/C++ parse worker failed or timed out (not a memory stop), so these references are shown lexically (see the log; raise CODECOMPASS_CPP_WORKER_TIMEOUT_SEC if it timed out)");
+        if (workerFailed) bits.Add("the C/C++ parse worker crashed (not a memory stop), so these references are shown lexically (see the log)");
         if (skippedTooBig > 0) bits.Add($"{skippedTooBig:N0} candidate C/C++ file(s) over the {ClangCppAnalyzer.MaxTuBytes() / 1048576:N0} MB semantic-parse size cap were searched lexically instead (raise CODECOMPASS_CPP_MAX_TU_MB)");
         if (cppParsed < cppCandidates && !workerFailed) bits.Add($"{cppParsed:N0}/{cppCandidates:N0} candidate C/C++ file(s) parsed");
         if (memoryStopped) bits.Add("semantic pass hit its memory budget and stopped early (remaining C/C++ refs shown lexically; raise CODECOMPASS_CPP_SESSION_MEM_MB for the per-session ceiling or CODECOMPASS_CPP_QUERY_MEM_MB for a single query)");

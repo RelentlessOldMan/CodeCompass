@@ -83,7 +83,7 @@ public class SemanticHonestyTests
     public void ClangByteColumns_AreConvertedToCharColumns(string line, int byteCol, int charCol) =>
         Assert.Equal(charCol, ClangCppAnalyzer.CharColumn(line, byteCol));
 
-    // P2-7: a worker crash or timeout was reported as a MEMORY stop (pointing at the wrong knob); only an OOM signature is.
+    // P2-7: a worker crash was reported as a MEMORY stop (pointing at the wrong knob); only an OOM signature is.
     [Fact]
     public void ContainedWorkerFailure_IsLabeledAsAWorkerFailure_UnlessItIsAnOom()
     {
@@ -95,7 +95,7 @@ public class SemanticHonestyTests
         Assert.False(oom.WorkerFailed);
         var none = ClangSubprocess.ContainedFailure(null, null); // still incomplete -> backfill runs
         Assert.True(SemanticCoverage.IsCppPassIncomplete(none.MemoryStopped, none.ParsedTus, none.CandidateTus, 0, 0, none.WorkerFailed));
-        Assert.Contains(ReferenceMerge.CppCoverageBits(0, 1, false, Array.Empty<string>(), workerFailed: true), b => b.Contains("worker failed"));
+        Assert.Contains(ReferenceMerge.CppCoverageBits(0, 1, false, Array.Empty<string>(), workerFailed: true), b => b.Contains("worker crashed"));
     }
 
     [Fact]

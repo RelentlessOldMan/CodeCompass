@@ -117,7 +117,12 @@ public sealed class ClangCppAnalyzer : IDisposable
     /// partial or empty result can be disclosed honestly instead of read as a confident zero.</summary>
     public readonly record struct CppRefResult(
         IReadOnlyList<SemanticLocation> Locations, int CandidateTus, int ParsedTus, IReadOnlyList<string> UnresolvedIncludes,
-        bool MemoryStopped = false, bool TooManyCandidates = false, int SkippedTooBig = 0, bool WorkerFailed = false);
+        bool MemoryStopped = false, bool TooManyCandidates = false, int SkippedTooBig = 0, bool WorkerFailed = false,
+        bool WorkerStalled = false);
+
+    /// <summary>Invoked after each candidate TU finishes (parsed or not). The isolated worker turns this into a heartbeat
+    /// so its parent kills only a STALLED worker - never a slow but progressing one. Null (no-op) in-process.</summary>
+    public static Action? TuFinished;
 
     public ClangCppAnalyzer(string root) : this(new[] { root }) { }
 
@@ -403,7 +408,7 @@ public sealed class ClangCppAnalyzer : IDisposable
             // ones that used to fall off the cliff after a fatal error.
             CXTranslationUnit_Flags.CXTranslationUnit_KeepGoing,
             out CXTranslationUnit tu);
-        if (error != CXErrorCode.CXError_Success) return; // TU couldn't be produced at all - not counted as parsed
+        if (error != CXErrorCode.CXError_Success) { TuFinished?.Invoke(); return; } // TU couldn't be produced at all - not counted as parsed
 
         // From here the raw native `tu` (the single largest allocation in this system - up to ~1 GB) is owned
         // by nobody until TranslationUnit.GetOrCreate wraps it. If the wrap (or CollectUnresolvedIncludes)
@@ -427,6 +432,7 @@ public sealed class ClangCppAnalyzer : IDisposable
                 if (translationUnit is not null) translationUnit.Dispose(); // disposes the underlying handle
                 else { try { tu.Dispose(); } catch { } }                    // wrap never happened - free the raw TU
             }
+            TuFinished?.Invoke();
         }
     }
 

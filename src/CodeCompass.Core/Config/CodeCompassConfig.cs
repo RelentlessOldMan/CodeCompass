@@ -318,8 +318,15 @@ public static class CodeCompassConfig
         return !(v is "0" || string.Equals(v, "false", StringComparison.OrdinalIgnoreCase) || string.Equals(v, "off", StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>C/C++ worker timeout in seconds (default 300, clamped 5-3600). CODECOMPASS_CPP_WORKER_TIMEOUT_SEC.</summary>
-    public static int CppWorkerTimeoutSec() => EnvInt("CODECOMPASS_CPP_WORKER_TIMEOUT_SEC") is > 0 and var s ? Math.Clamp(s, 5, 3600) : 300;
+    /// <summary>How long the C/C++ worker may go WITHOUT PROGRESS (no TU finished) before it's considered stalled and
+    /// stopped - not a total time limit: a slow but progressing parse always runs to completion. Default 600 s, clamped
+    /// 1-86400. CODECOMPASS_CPP_WORKER_STALL_SEC (the old CODECOMPASS_CPP_WORKER_TIMEOUT_SEC is honored as a fallback).</summary>
+    public static int CppWorkerStallSec()
+    {
+        if (EnvInt("CODECOMPASS_CPP_WORKER_STALL_SEC") is > 0 and var s) return Math.Clamp(s, 1, 86400);
+        if (EnvInt("CODECOMPASS_CPP_WORKER_TIMEOUT_SEC") is > 0 and var t) return Math.Clamp(t, 1, 86400);
+        return 600;
+    }
 
     /// <summary>Directory names to index even though a default rule skips them: CODECOMPASS_KEEP + config keepDirs.</summary>
     public static IEnumerable<string> KeptDirs() => KeptDirs(_current);

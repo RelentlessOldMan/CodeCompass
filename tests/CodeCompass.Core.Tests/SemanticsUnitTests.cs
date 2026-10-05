@@ -63,21 +63,29 @@ public class SemanticsUnitTests
         Assert.Contains(bits, b => b.Contains("memory budget"));
     }
 
-    // ---- ClangSubprocess.TimeoutSeconds (env parse + clamp) ----
+    // ---- ClangSubprocess.StallSeconds (env parse + clamp; a no-progress window, not a total time limit) ----
 
     [Theory]
-    [InlineData(null, 300)]   // unset -> default
-    [InlineData("", 300)]     // garbage -> default
-    [InlineData("abc", 300)]  // garbage -> default
-    [InlineData("0", 300)]    // non-positive -> default (not clamped up)
-    [InlineData("-5", 300)]   // negative -> default
-    [InlineData("3", 5)]      // below the floor -> clamped up to 5
-    [InlineData("120", 120)]  // in range -> as-is
-    [InlineData("9999", 3600)]// above the ceiling -> clamped down to 3600
-    public void TimeoutSeconds_ParsesAndClamps(string? value, int expected)
+    [InlineData(null, 600)]       // unset -> default
+    [InlineData("", 600)]         // garbage -> default
+    [InlineData("abc", 600)]      // garbage -> default
+    [InlineData("0", 600)]        // non-positive -> default
+    [InlineData("-5", 600)]       // negative -> default
+    [InlineData("120", 120)]      // in range -> as-is
+    [InlineData("999999", 86400)] // above the ceiling -> clamped down
+    public void StallSeconds_ParsesAndClamps(string? value, int expected)
     {
-        using var _ = new EnvScope("CODECOMPASS_CPP_WORKER_TIMEOUT_SEC", value);
-        Assert.Equal(expected, ClangSubprocess.TimeoutSeconds());
+        using var _ = new EnvScope("CODECOMPASS_CPP_WORKER_STALL_SEC", value);
+        using var __ = new EnvScope("CODECOMPASS_CPP_WORKER_TIMEOUT_SEC", null);
+        Assert.Equal(expected, ClangSubprocess.StallSeconds());
+    }
+
+    [Fact]
+    public void StallSeconds_HonorsLegacyTimeoutVariable()
+    {
+        using var _ = new EnvScope("CODECOMPASS_CPP_WORKER_STALL_SEC", null);
+        using var __ = new EnvScope("CODECOMPASS_CPP_WORKER_TIMEOUT_SEC", "900");
+        Assert.Equal(900, ClangSubprocess.StallSeconds());
     }
 
     // ---- ClangSubprocess.Enabled (opt-out env) ----

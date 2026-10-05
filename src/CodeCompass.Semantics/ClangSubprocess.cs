@@ -18,8 +18,10 @@ namespace CodeCompass.Semantics;
 /// <para>The worker IS the CLI exe (which already links this assembly) invoked as <c>clang-refs-worker</c>:
 /// it reads a JSON request on stdin, runs the normal in-process analyzer, and writes a JSON response on
 /// stdout. The per-query memory budget still applies inside the child, so a single query is bounded exactly
-/// as before; the child just also releases on exit. On ANY failure (missing worker, crash, timeout, bad
-/// JSON) the caller falls back to the in-process analyzer, so correctness never regresses.</para>
+/// as before; the child just also releases on exit. A worker that can't start or rejects the request falls back to
+/// the in-process analyzer; a crash is contained (see <see cref="ContainedFailure"/>); a STALL - no progress for the
+/// stall window - is stopped and reported, with nothing substituted (see <see cref="StalledFailure"/>). There is no
+/// total time limit.</para>
 /// </summary>
 public static class ClangSubprocess
 {
@@ -83,8 +85,8 @@ public static class ClangSubprocess
             || stderr.Contains("Buffer allocation failed", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>The result to use when the isolated worker FAILED HARD (nonzero exit, timeout, or a broken pipe
-    /// from the child abort()ing) - most often an uncatchable LLVM OOM while parsing a pathological giant TU.
+    /// <summary>The result to use when the isolated worker FAILED HARD (nonzero exit, or a broken pipe from the
+    /// child abort()ing - a stall is NOT this, see <see cref="StalledFailure"/>) - most often an uncatchable LLVM OOM while parsing a pathological giant TU.
     /// The parent must NOT re-run that parse in-process: it would re-trigger the abort in the caller (the CLI
     /// process, or the long-lived MCP server) - the very crash the child isolates - which surfaces to a user as
     /// a SILENT 0 references + nonzero exit. Instead we return an INCOMPLETE pass (0 parsed of N candidates,
@@ -93,21 +95,36 @@ public static class ClangSubprocess
     public static ClangCppAnalyzer.CppRefResult ContainedFailure(IReadOnlyCollection<string>? candidates, string? stderr)
     {
         int cand = candidates?.Count ?? 0;
-        // An OOM signature is a memory stop (its disclosure names the memory knobs); anything else - a crash, a
-        // timeout, a broken pipe - is a WORKER failure, disclosed as such rather than mislabeled as memory. Either
+        // An OOM signature is a memory stop (its disclosure names the memory knobs); anything else - a crash or a
+        // broken pipe - is a WORKER failure, disclosed as such rather than mislabeled as memory. Either
         // way the pass is incomplete, so the lexical backfill runs.
         bool memStopped = IsOomSignature(stderr);
         return new ClangCppAnalyzer.CppRefResult(
             Array.Empty<SemanticLocation>(), cand, 0, Array.Empty<string>(), memStopped, WorkerFailed: !memStopped);
     }
 
+    /// <summary>The result when the worker STALLED - no TU finished for the whole stall window - and was stopped. It is
+    /// deliberately NOT an incomplete pass: nothing (no lexical text) is substituted for the references it didn't produce;
+    /// the caller discloses that no C/C++ references were reported (see SemanticCoverage.IsCppPassIncomplete).</summary>
+    public static ClangCppAnalyzer.CppRefResult StalledFailure(IReadOnlyCollection<string>? candidates) =>
+        new(Array.Empty<SemanticLocation>(), candidates?.Count ?? 0, 0, Array.Empty<string>(), WorkerStalled: true);
+
+    /// <summary>The line the worker writes to stderr each time a TU finishes - its liveness signal.</summary>
+    public const string HeartbeatLine = "\u0001codecompass-worker-progress";
+
     /// <summary>Run the C/C++ reference pass in a child process. Returns true and sets <paramref name="result"/>
-    /// on success; false on any failure (caller should fall back to in-process). Never throws.</summary>
+    /// on success; false on any failure (caller should fall back to in-process). Never throws.
+    /// <para>There is NO total time limit: the worker reports a heartbeat per finished TU and is stopped only after
+    /// <paramref name="stallSeconds"/> with no progress at all. A slow but progressing parse always runs to the end, so
+    /// the same query returns the same references on a fast or a slow machine.</para></summary>
     public static bool TryFindReferences(string workerExe, IReadOnlyList<string> roots, string name,
-        IReadOnlyCollection<string>? candidates, int max, int timeoutSeconds, out ClangCppAnalyzer.CppRefResult result,
+        IReadOnlyCollection<string>? candidates, int max, int stallSeconds, out ClangCppAnalyzer.CppRefResult result,
         System.Threading.CancellationToken ct = default)
     {
         result = default;
+        long lastProgress = Environment.TickCount64;
+        long stallMs = (long)stallSeconds * 1000;
+        bool Stalled() => Environment.TickCount64 - Interlocked.Read(ref lastProgress) > stallMs;
         Process? p = null;
         Task<string>? outTask = null, errTask = null;
         try
@@ -154,12 +171,11 @@ public static class ClangSubprocess
             // bounded by `max`, but a rogue/pathological child must not be able to balloon the long-lived
             // parent's managed heap via an unbounded ReadToEnd.
             outTask = ReadCappedAsync(p.StandardOutput, MaxResponseChars);
-            errTask = p.StandardError.ReadToEndAsync();
+            errTask = ReadStderrAsync(p.StandardError, () => Interlocked.Exchange(ref lastProgress, Environment.TickCount64));
 
-            // Send the request on a task guarded by the timeout, then close stdin. A synchronous write has no
-            // timeout: if the child dies/exits BEFORE draining a large request (many candidate paths can exceed
-            // the OS stdin pipe buffer), the write would block forever and WaitForExit below would never be
-            // reached. Guarding the write bounds that hang.
+            // Send the request on a task, then close stdin. A synchronous write could block forever if the child stops
+            // draining a large request (many candidate paths can exceed the OS stdin pipe buffer), so the write is
+            // watched by the same no-progress rule as the parse.
             var writeTask = Task.Run(() =>
             {
                 try
@@ -170,19 +186,17 @@ public static class ClangSubprocess
                 }
                 catch { /* child gone/broken pipe: the exit-code / empty-output path handles it */ }
             });
-            if (!writeTask.Wait(timeoutSeconds * 1000))
+            // Wait in short slices for as long as the worker keeps making progress; stop it only once it has made none
+            // for the whole stall window.
+            bool stalled = false;
+            while (!writeTask.Wait(500)) if (Stalled()) { stalled = true; break; }
+            if (!stalled) while (!p.WaitForExit(500)) if (Stalled()) { stalled = true; break; }
+            if (stalled)
             {
                 KillAndReap(p, outTask, errTask);
-                Log.Global.Warn($"clang subprocess: timed out after {timeoutSeconds}s WRITING the request to '{name}' ({req.Candidates.Count} candidates); CONTAINED as an incomplete C/C++ pass (lexical backfill will cover) - NOT retried in-process");
-                result = ContainedFailure(candidates, null);
-                return true;
-            }
-
-            if (!p.WaitForExit(timeoutSeconds * 1000))
-            {
-                KillAndReap(p, outTask, errTask);
-                Log.Global.Warn($"clang subprocess: timed out after {timeoutSeconds}s on '{name}' ({req.Candidates.Count} candidates); CONTAINED as an incomplete C/C++ pass (lexical backfill will cover) - NOT retried in-process (raise CODECOMPASS_CPP_WORKER_TIMEOUT_SEC)");
-                result = ContainedFailure(candidates, null);
+                Log.Global.Warn($"clang subprocess: no progress for {stallSeconds}s on '{name}' ({req.Candidates.Count} candidates); STOPPED - " +
+                                "no C/C++ references reported for this query (nothing substituted). Raise CODECOMPASS_CPP_WORKER_STALL_SEC if one TU legitimately parses that long.");
+                result = StalledFailure(candidates);
                 return true;
             }
             p.WaitForExit(); // parameterless: ensures the async stdout/stderr readers have fully flushed
@@ -261,6 +275,20 @@ public static class ClangSubprocess
         return sb.ToString();
     }
 
+    /// <summary>Drain the worker's stderr: heartbeat lines report progress (<paramref name="onProgress"/>); everything else
+    /// is kept (capped) for diagnostics and the OOM-signature check.</summary>
+    private static async Task<string> ReadStderrAsync(StreamReader reader, Action onProgress)
+    {
+        var sb = new StringBuilder();
+        string? line;
+        while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) is not null)
+        {
+            if (line == HeartbeatLine) { onProgress(); continue; }
+            if (sb.Length < 1 << 20) sb.AppendLine(line);
+        }
+        return sb.ToString();
+    }
+
     /// <summary>Kill the child (whole tree) and wait briefly for it to exit and for the async pipe readers to
     /// finish, so nothing is left running against a dead process. Best-effort; never throws.</summary>
     private static void KillAndReap(Process p, params Task?[] readers)
@@ -282,9 +310,9 @@ public static class ClangSubprocess
         return s.Length <= max ? s : "..." + s[^max..];
     }
 
-    /// <summary>Per-query worker timeout in seconds (env CODECOMPASS_CPP_WORKER_TIMEOUT_SEC, default 300),
-    /// clamped to a sane range.</summary>
-    public static int TimeoutSeconds() => CodeCompass.Core.Config.CodeCompassConfig.CppWorkerTimeoutSec();
+    /// <summary>No-progress window in seconds before a worker counts as stalled (CODECOMPASS_CPP_WORKER_STALL_SEC,
+    /// default 600). Not a total time limit.</summary>
+    public static int StallSeconds() => CodeCompass.Core.Config.CodeCompassConfig.CppWorkerStallSec();
 
     /// <summary>Worker entry point (invoked as `CodeCompass.Cli.exe clang-refs-worker`). Reads a RefRequest
     /// from stdin, runs the in-process analyzer, writes a RefResponse to stdout. This process is disposable:
@@ -293,11 +321,13 @@ public static class ClangSubprocess
     {
         using var input = Console.OpenStandardInput();
         using var output = Console.OpenStandardOutput();
-        return RunWorkerCore(input, output);
+        void Heartbeat() { try { Console.Error.WriteLine(HeartbeatLine); } catch { } }
+        ClangCppAnalyzer.TuFinished = Heartbeat;
+        return RunWorkerCore(input, output, Heartbeat);
     }
 
     /// <summary>Worker body over explicit streams (so it's unit-testable without spawning a process).</summary>
-    public static int RunWorkerCore(Stream input, Stream output)
+    public static int RunWorkerCore(Stream input, Stream output, Action? heartbeat = null)
     {
         try
         {
@@ -305,8 +335,14 @@ public static class ClangSubprocess
             try { req = JsonSerializer.Deserialize<RefRequest>(input, Json); }
             catch (JsonException) { return BadRequestExit; }
             if (req is null || string.IsNullOrEmpty(req.Name)) return BadRequestExit;
-            // Test seam: a deterministic mid-parse crash, so the parent's containment path can be exercised for real.
+            heartbeat?.Invoke(); // request received: the no-progress clock restarts from here
+            // Test seams (env is inherited from the parent): a deterministic mid-parse crash; a worker that hangs with no
+            // progress; and a slow worker that keeps reporting progress ("count:ms" - count heartbeats, ms apart).
             if (Environment.GetEnvironmentVariable("CODECOMPASS_TEST_WORKER_CRASH") == "1") return 3;
+            if (Environment.GetEnvironmentVariable("CODECOMPASS_TEST_WORKER_HANG") == "1") Thread.Sleep(Timeout.Infinite);
+            if (Environment.GetEnvironmentVariable("CODECOMPASS_TEST_WORKER_PACE") is { } pace &&
+                pace.Split(':') is [var n, var ms] && int.TryParse(n, out var count) && int.TryParse(ms, out var gap))
+                for (int i = 0; i < count; i++) { Thread.Sleep(gap); heartbeat?.Invoke(); }
 
             var roots = req.Roots.Count > 0 ? (IReadOnlyList<string>)req.Roots : new[] { Directory.GetCurrentDirectory() };
             var candidates = req.Candidates.Count > 0 ? req.Candidates : null;

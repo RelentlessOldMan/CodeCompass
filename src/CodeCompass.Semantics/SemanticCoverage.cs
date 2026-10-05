@@ -85,9 +85,13 @@ public static class SemanticCoverage
     /// until 1.0.187. One predicate both call removes that whole divergence class.</para>
     /// </summary>
     /// <para><paramref name="skippedTooBig"/>: candidate sources over the per-TU size cap were never parsed, so their
-    /// references must come from the lexical layer. <paramref name="workerFailed"/>: the isolated worker died or timed
-    /// out (not a memory stop), so nothing was parsed.</para>
+    /// references must come from the lexical layer. <paramref name="workerFailed"/>: the isolated worker crashed (not a
+    /// memory stop), so nothing was parsed.</para>
+    /// <para><paramref name="workerStalled"/> returns FALSE on purpose: a worker that stopped making progress was killed, and
+    /// text matches are never substituted for references because of how long something took (references are references -
+    /// the user's hard rule). The answer instead says plainly that no C/C++ references were reported.</para>
     public static bool IsCppPassIncomplete(bool memoryStopped, int parsedTus, int candidateTus, int unresolvedIncludeCount,
-        int skippedTooBig = 0, bool workerFailed = false)
-        => memoryStopped || parsedTus < candidateTus || unresolvedIncludeCount > 0 || skippedTooBig > 0 || workerFailed;
+        int skippedTooBig = 0, bool workerFailed = false, bool workerStalled = false)
+        => !workerStalled &&
+           (memoryStopped || parsedTus < candidateTus || unresolvedIncludeCount > 0 || skippedTooBig > 0 || workerFailed);
 }

@@ -1100,7 +1100,7 @@ static int CmdRefs(string[] args)
     ClangCppAnalyzer.CppRefResult cppRes;
     var cppWorker = ClangSubprocess.Enabled ? ClangSubprocess.WorkerExePath() : null;
     if (cppWorker is not null &&
-        ClangSubprocess.TryFindReferences(cppWorker, new[] { root }, name, cppCandidates, 200, ClangSubprocess.TimeoutSeconds(), out var cppSub))
+        ClangSubprocess.TryFindReferences(cppWorker, new[] { root }, name, cppCandidates, 200, ClangSubprocess.StallSeconds(), out var cppSub))
         cppRes = cppSub;
     else
         cppRes = new ClangCppAnalyzer(root).FindReferencesDetailed(name, cppCandidates);
@@ -1119,7 +1119,7 @@ static int CmdRefs(string[] args)
     // lexical rather than treat these files as covered" - covers memory-stop, unparsed TUs, AND unresolved
     // includes (a TU can PARSE with errors yet resolve nothing).
     bool cppIncomplete = SemanticCoverage.IsCppPassIncomplete(cppRes.MemoryStopped, cppRes.ParsedTus, cppRes.CandidateTus,
-        cppRes.UnresolvedIncludes.Count, cppRes.SkippedTooBig, cppRes.WorkerFailed);
+        cppRes.UnresolvedIncludes.Count, cppRes.SkippedTooBig, cppRes.WorkerFailed, cppRes.WorkerStalled);
     // The C# semantic pass (Roslyn, empty preprocessor set) can't see code in inactive #if/#elif branches, so
     // it SILENTLY misses references guarded by conditional compilation. When any candidate .cs uses it, treat
     // the C# pass as incomplete: backfill lexical for .cs too (deduped) and disclose - the C# twin of the
@@ -1169,7 +1169,7 @@ static int CmdRefs(string[] args)
     if ((cppCandidates?.Count ?? 0) > 0 || cppRes.CandidateTus > 0 || cppRes.SkippedTooBig > 0)
     {
         var bits = ReferenceMerge.CppCoverageBits(cppRes.ParsedTus, cppRes.CandidateTus, cppRes.MemoryStopped, cppRes.UnresolvedIncludes,
-            cppRes.TooManyCandidates, cppRes.SkippedTooBig, cppRes.WorkerFailed);
+            cppRes.TooManyCandidates, cppRes.SkippedTooBig, cppRes.WorkerFailed, cppRes.WorkerStalled);
         if (bits.Count > 0)
             Console.Out.WriteLine("-- C/C++ coverage INCOMPLETE: " + string.Join("; ", bits) +
                 " (missing headers aren't in the tree - a low/zero C/C++ count may mean 'couldn't parse', not 'no references').");
