@@ -249,8 +249,9 @@ Two tiers, both driven by one script — **`check.ps1`**:
   repo or manual setup needed.
 
 Run it automatically before every push: **`./check.ps1 -InstallHook`** (points git at the tracked
-`.githooks/pre-push`, which runs `./check.ps1 -Big` and aborts the push on failure). Bypass a single
-push with `git push --no-verify`.
+`.githooks/pre-push`, which runs `./check.ps1` - build + the xUnit suite - and aborts the push on failure).
+The heavy `-Big` scenarios run on GitHub: the release workflow gates every push to `main` with
+`check.ps1 -Big` before publishing. Bypass a single push's local check with `git push --no-verify`.
 
 Big corpora are never committed (`.corpus/` is gitignored); `check.ps1 -Big` generates them on the
 fly. The underlying generators can also be run directly: **`make-bigfile-corpus.ps1`** (one ~2 GB

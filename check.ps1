@@ -33,7 +33,7 @@
 
 .EXAMPLE
   ./check.ps1              # fast unit tests
-  ./check.ps1 -Big         # unit + large-file scenarios (pre-push)
+  ./check.ps1 -Big         # unit + large-file scenarios (the release gate)
   ./check.ps1 -Big -SizeGB 2
   ./check.ps1 -Network \\myserver\share\scratch   # real-share smoke test (run by hand)
 #>
@@ -50,12 +50,13 @@ $root = $PSScriptRoot
 $failures = New-Object System.Collections.Generic.List[string]
 Set-Location $root   # dotnet restore/build/test below resolve the solution from the current directory
 
-# Point git at the tracked hooks dir so .githooks/pre-push runs ./check.ps1 -Big before every push.
+# Point git at the tracked hooks dir so .githooks/pre-push runs ./check.ps1 (build + xUnit) before every push;
+# the release workflow runs the full -Big gate on GitHub for every push to main.
 if ($InstallHook) {
     Push-Location $root
     try { git config core.hooksPath .githooks }
     finally { Pop-Location }
-    Write-Host "Installed: git will run '.githooks/pre-push' (=> ./check.ps1 -Big) before each push." -ForegroundColor Green
+    Write-Host "Installed: git will run '.githooks/pre-push' (=> ./check.ps1) before each push." -ForegroundColor Green
     Write-Host "Bypass a single push with:  git push --no-verify"
     exit 0
 }
