@@ -11,8 +11,12 @@ namespace CodeCompass.Core.Symbols;
 /// </summary>
 public sealed class TreeSitterSymbolExtractor : IDisposable
 {
-    private readonly Dictionary<string, (Language Language, Query Query)> _cache = new();
-    private readonly HashSet<string> _failed = new();
+    // Compiled grammars + queries are shared by every extractor in the process, compiled once per language. Compiling is
+    // not cheap (the C++ definition query takes ~0.9 s), and extractors are short-lived: the parallel build gets a fresh
+    // worker - and extractor - every time Parallel.ForEach retires a loop replica (many per second), and every watch batch
+    // makes one. A per-instance cache recompiled the query each time: llvm's build went from ~47 s to ~285 s (v1.0.242).
+    // Sharing is safe: a TSLanguage and a TSQuery are read-only once built, and each Execute uses its own cursor.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<(Language Language, Query Query)?>> Shared = new();
     private readonly int _maxChars = CodeCompassConfig.MaxSymbolChars();
 
     public IReadOnlyList<Symbol> Extract(string relativePath, string text)
@@ -144,24 +148,17 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
         return startRow;
     }
 
-    private (Language, Query)? GetOrLoad(LanguageDefinition def)
-    {
-        if (_cache.TryGetValue(def.Key, out var cached)) return cached;
-        if (_failed.Contains(def.Key)) return null;
-
-        try
+    // A grammar/query that fails to load is remembered (null) so that language falls back to lexical-only.
+    private static (Language, Query)? GetOrLoad(LanguageDefinition def) =>
+        Shared.GetOrAdd(def.Key, _ => new Lazy<(Language, Query)?>(() =>
         {
-            var language = new Language(def.NativeLibrary, def.NativeFunction);
-            var query = new Query(language, def.QuerySource);
-            _cache[def.Key] = (language, query);
-            return (language, query);
-        }
-        catch
-        {
-            _failed.Add(def.Key);
-            return null;
-        }
-    }
+            try
+            {
+                var language = new Language(def.NativeLibrary, def.NativeFunction);
+                return (language, new Query(language, def.QuerySource));
+            }
+            catch { return null; }
+        }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
 
     private static SymbolKind MapKind(string captureName) => captureName switch
     {
@@ -180,13 +177,6 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
         _ => SymbolKind.Other,
     };
 
-    public void Dispose()
-    {
-        foreach (var (language, query) in _cache.Values)
-        {
-            query.Dispose();
-            language.Dispose();
-        }
-        _cache.Clear();
-    }
+    // The compiled grammars/queries are process-wide (see Shared) and live for the process; nothing per-instance to free.
+    public void Dispose() { }
 }

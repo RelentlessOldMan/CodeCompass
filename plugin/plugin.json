@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "codecompass",
-  "version": "1.0.241",
+  "version": "1.0.242",
   "description": "Fast local code search and navigation for large codebases. Indexed literal search, go-to-definition, and find-references (semantic for C#, by name elsewhere), exposed as MCP tools.",
   "author": { "name": "CodeCompass" },
   "license": "MIT",

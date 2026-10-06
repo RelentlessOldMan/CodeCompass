@@ -46,6 +46,23 @@ public class NetworkPathTests
         finally { Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", old); }
     }
 
+    // A directory symlink can lead a local-looking path to a share; the resolved final path decides. (This account can't
+    // create symlinks, so the parse is tested directly, and a real local path must stay local.)
+    [Theory]
+    [InlineData(@"\\?\UNC\server\share\repo", true)]
+    [InlineData(@"\\?\unc\server\share", true)]
+    [InlineData(@"\\?\C:\repo", false)]
+    [InlineData(null, false)]
+    public void FinalPath_OnAShare_IsNetwork(string? finalPath, bool network) =>
+        Assert.Equal(network, NetworkPath.IsUncFinalPath(finalPath));
+
+    [Fact]
+    public void ExistingLocalPath_ResolvesLocal()
+    {
+        Assert.False(NetworkPath.IsNetwork(AppContext.BaseDirectory));
+        Assert.False(NetworkPath.IsNetwork(System.IO.Path.Combine(AppContext.BaseDirectory, "CodeCompass.Core.dll")));
+    }
+
     // Linux/macOS: an NFS/CIFS/SMB mount is a path like any other, so it was treated as local and got the 3 s ledger margin
     // against the SERVER's clock (review finding 5). The deepest mount containing the path decides.
     private static readonly string[] MountRoots = { "/", "/mnt/nas", "/mnt/nas/scratch", "/Volumes/Team Share", "/net/hung" };

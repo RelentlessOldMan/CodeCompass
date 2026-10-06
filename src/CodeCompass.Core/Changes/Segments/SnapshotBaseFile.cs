@@ -10,14 +10,18 @@ namespace CodeCompass.Core.Changes.Segments;
 ///
 /// Columnar layout (little-endian): header, then path offsets (int64), the UTF-8 path blob
 /// (sorted), sizes (int64), mtimes (int64), and raw 16-byte XxHash128 content hashes. Fixed-width
-/// columns make every field directly indexable by record number.
+/// columns make every field directly indexable by record number. Version 2 (written since v1.0.243) appends
+/// change times, file ids and hashed-at (int64 each) and a 32-byte SHA-256 column, which CodeCompass leaves
+/// zero - the layout another tool (CodeDiffer) reads; see docs/hash-ledger-format.md. Version 1 still reads.
 /// </summary>
 public static class SnapshotBaseFile
 {
     internal const uint Magic = 0x4E535343; // "CCSN"
-    internal const int Version = 1;
-    internal const int HeaderSize = 12 + 8 * 5;
+    internal const int Version = 2;
+    internal const int Sections = 9;
+    internal const int HeaderSize = 12 + 8 * Sections;
     internal const int HashBytes = 16; // XxHash128
+    internal const int ShaBytes = 32;  // SHA-256 column (not computed: all zero)
 
     /// <summary>
     /// Write a base file from a sorted entry sequence. The caller supplies the record count
@@ -33,7 +37,11 @@ public static class SnapshotBaseFile
         long sizesOff = pathBlobOff + pathBlobLen;
         long mtimesOff = sizesOff + (long)count * 8;
         long hashesOff = mtimesOff + (long)count * 8;
-        long end = hashesOff + (long)count * HashBytes;
+        long ctimesOff = hashesOff + (long)count * HashBytes;
+        long idsOff = ctimesOff + (long)count * 8;
+        long hashedAtOff = idsOff + (long)count * 8;
+        long shaOff = hashedAtOff + (long)count * 8;
+        long end = shaOff + (long)count * ShaBytes;
 
         using var fs = new FileStream(filePath, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
         fs.SetLength(end);
@@ -49,6 +57,10 @@ public static class SnapshotBaseFile
         view.Write(28, sizesOff);
         view.Write(36, mtimesOff);
         view.Write(44, hashesOff);
+        view.Write(52, ctimesOff);
+        view.Write(60, idsOff);
+        view.Write(68, hashedAtOff);
+        view.Write(76, shaOff); // the SHA-256 column stays zero: SetLength zero-fills
 
         int i = 0;
         long pathAcc = 0;
@@ -67,6 +79,9 @@ public static class SnapshotBaseFile
 
             FillHash(hashBuf, state.ContentHash);
             view.WriteArray(hashesOff + (long)i * HashBytes, hashBuf, 0, HashBytes);
+            view.Write(ctimesOff + (long)i * 8, state.ChangeTicks);
+            view.Write(idsOff + (long)i * 8, state.FileId);
+            view.Write(hashedAtOff + (long)i * 8, state.HashedAtTicks);
             i++;
         }
         if (i != count) throw new InvalidOperationException($"snapshot base: wrote {i} entries, declared {count}");
@@ -94,6 +109,10 @@ public sealed class SnapshotBaseReader : IDisposable
     private readonly MemoryMappedFile _mmf;
     private readonly MemoryMappedViewAccessor _view;
     private readonly long _pathOffsetsOff, _pathBlobOff, _sizesOff, _mtimesOff, _hashesOff;
+    private readonly long _ctimesOff, _idsOff, _hashedAtOff; // version 2 only (-1 in a version 1 base)
+
+    /// <summary>The base's format version (1 or 2).</summary>
+    public int Version { get; }
 
     public int Count { get; }
     public string FilePath { get; }
@@ -108,19 +127,33 @@ public sealed class SnapshotBaseReader : IDisposable
         _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
 
         if (_view.ReadUInt32(0) != SnapshotBaseFile.Magic) throw new InvalidDataException("not a CodeCompass snapshot base");
-        if (_view.ReadInt32(4) != SnapshotBaseFile.Version) throw new InvalidDataException("unsupported snapshot base version");
+        Version = _view.ReadInt32(4);
+        if (Version is not (1 or 2)) throw new InvalidDataException("unsupported snapshot base version");
         Count = _view.ReadInt32(8);
         _pathOffsetsOff = _view.ReadInt64(12);
         _pathBlobOff = _view.ReadInt64(20);
         _sizesOff = _view.ReadInt64(28);
         _mtimesOff = _view.ReadInt64(36);
         _hashesOff = _view.ReadInt64(44);
+        _ctimesOff = _idsOff = _hashedAtOff = -1;
+        long cap = _view.Capacity;
+        long lastEnd = _hashesOff + (long)Count * SnapshotBaseFile.HashBytes;
+        if (Version == 2)
+        {
+            if (cap < 12 + 8 * SnapshotBaseFile.Sections) throw new InvalidDataException("corrupt CodeCompass snapshot base (short header)");
+            _ctimesOff = _view.ReadInt64(52);
+            _idsOff = _view.ReadInt64(60);
+            _hashedAtOff = _view.ReadInt64(68);
+            long shaOff = _view.ReadInt64(76);
+            if (_ctimesOff < lastEnd || _idsOff - _ctimesOff < (long)Count * 8 || _hashedAtOff - _idsOff < (long)Count * 8 ||
+                shaOff - _hashedAtOff < (long)Count * 8 || shaOff + (long)Count * SnapshotBaseFile.ShaBytes > cap)
+                throw new InvalidDataException("corrupt CodeCompass snapshot base (bad v2 section offsets)");
+        }
 
         // Reject a structurally-corrupt/tampered base at open so callers rebuild.
-        long cap = _view.Capacity;
         if (Count < 0 || _pathOffsetsOff < 0 || _pathBlobOff < _pathOffsetsOff ||
             _sizesOff < _pathBlobOff || _mtimesOff < _sizesOff || _hashesOff < _mtimesOff ||
-            _hashesOff + (long)Count * SnapshotBaseFile.HashBytes > cap)
+            lastEnd > cap)
             throw new InvalidDataException("corrupt CodeCompass snapshot base (bad section offsets)");
         // Each section must be big enough for its count - otherwise a torn header (zeroed offsets, Count intact) passes
         // the ordering checks above and GetState reads in-bounds GARBAGE: changed files look unchanged and the index
@@ -154,7 +187,11 @@ public sealed class SnapshotBaseReader : IDisposable
         long mtime = _view.ReadInt64(_mtimesOff + (long)i * 8);
         var hb = new byte[SnapshotBaseFile.HashBytes];
         _view.ReadArray(_hashesOff + (long)i * SnapshotBaseFile.HashBytes, hb, 0, hb.Length);
-        return new FileState(size, mtime, Convert.ToHexString(hb));
+        if (Version == 1) return new FileState(size, mtime, Convert.ToHexString(hb));
+        return new FileState(size, mtime, Convert.ToHexString(hb),
+                             _view.ReadInt64(_ctimesOff + (long)i * 8),
+                             _view.ReadInt64(_idsOff + (long)i * 8),
+                             _view.ReadInt64(_hashedAtOff + (long)i * 8));
     }
 
     /// <summary>Binary search for an exact path.</summary>

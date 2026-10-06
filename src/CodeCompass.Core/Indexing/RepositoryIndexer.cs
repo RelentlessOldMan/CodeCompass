@@ -196,7 +196,13 @@ public static class RepositoryIndexer
                     inFlight[tid] = (file.RelativePath, file.Size, clock.ElapsedMilliseconds);
                     try
                     {
-                        if (LargeFileIndexer.TryStreamIndex(file.FullPath, out var big, out var len, out var bigHash, out var bin, out var bigBlocks))
+                        // Streamed through its own stream, so bracket it with attribute-only stats (LedgerTrust).
+                        var bigBefore = Storage.FileIdentity.OfPath(file.FullPath);
+                        bool streamed = LargeFileIndexer.TryStreamIndex(file.FullPath, out var big, out var len, out var bigHash, out var bin, out var bigBlocks);
+                        var bigAfter = Storage.FileIdentity.OfPath(file.FullPath);
+                        FileState BigRecord(long size, string h) => LedgerTrust.Record(
+                            new ReadStamp(file.Size, mtime, bigBefore, bigAfter, readStart, DateTime.UtcNow.Ticks), isNetwork, null, 0, size, h);
+                        if (streamed)
                         {
                             worker.Text.AddDocument(file.RelativePath, big);
                             worker.TrigramPostings += big.Length;
@@ -205,7 +211,7 @@ public static class RepositoryIndexer
                                 PositionalSidecar.Write(dir, file.RelativePath, bigBlocks); // block index for cheap large-file search
                                 posSidecars.Add(PositionalSidecar.SidecarName(file.RelativePath));
                             }
-                            worker.Snapshot[file.RelativePath] = LedgerTrust.Record(mtime, readStart, isNetwork, len, bigHash);
+                            worker.Snapshot[file.RelativePath] = BigRecord(len, bigHash);
                             worker.Bytes += len;
                             // Streamed files are text-searchable but get no symbols (tree-sitter needs the
                             // whole string). If it's a symbol-bearing language, count it so a go-to-definition
@@ -215,7 +221,7 @@ public static class RepositoryIndexer
                             Interlocked.Add(ref progressBytes, len);
                             if (worker.Text.ApproxBytes >= textBudget) FlushText(worker, dir, ref textSegCounter, textSegFiles);
                         }
-                        else if (bin) worker.Snapshot[file.RelativePath] = LedgerTrust.Record(mtime, readStart, isNetwork, file.Size, FileState.BinaryHash);
+                        else if (bin) worker.Snapshot[file.RelativePath] = BigRecord(file.Size, FileState.BinaryHash);
                         else
                             // WARN, not Debug: a large file that fails to read (vs a deliberate binary skip)
                             // is silently absent from the index otherwise - the exact "N fewer files, no log"
@@ -248,17 +254,21 @@ public static class RepositoryIndexer
                 try
                 {
                     byte[] bytes;
+                    Storage.FileIdentity before = default, after = default;
                     // OutOfMemory here is NOT an I/O error: it means the machine can't commit the read.
                     // Let it fall to the memory-pressure handler below (which reclaims and skips the file
                     // without aborting the whole build) rather than mislabeling it "transient I/O".
-                    try { bytes = File.ReadAllBytes(file.FullPath); }
+                    // The read handle is statted just before and after the read (LedgerTrust, ledger v2).
+                    try { bytes = Storage.FileIdentity.ReadAllBytes(file.FullPath, out before, out after); }
                     catch (OutOfMemoryException) { throw; }
                     // WARN, not Debug: a read failure silently drops the file from the index (the "N fewer
                     // files, no log" symptom over SMB); surface it at the default level so it's diagnosable.
                     catch (Exception ex) { Log.For(root).Warn($"NOT INDEXED - file unreadable (transient I/O over a share?): {file.RelativePath}: {ex.Message}"); return worker; }
+                    FileState Record(string h) => LedgerTrust.Record(
+                        new ReadStamp(file.Size, mtime, before, after, readStart, DateTime.UtcNow.Ticks), isNetwork, null, 0, bytes.Length, h);
                     if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
                     {
-                        worker.Snapshot[file.RelativePath] = LedgerTrust.Record(mtime, readStart, isNetwork, bytes.Length, FileState.BinaryHash);
+                        worker.Snapshot[file.RelativePath] = Record(FileState.BinaryHash);
                         return worker;
                     }
 
@@ -288,7 +298,7 @@ public static class RepositoryIndexer
                         if (worker.Extractor.WouldSkipSymbols(file.RelativePath, content)) worker.SymbolSkipped++;
                         else foreach (var s in worker.Extractor.Extract(file.RelativePath, content)) worker.Symbols.Add(s);
                     }
-                    worker.Snapshot[file.RelativePath] = LedgerTrust.Record(mtime, readStart, isNetwork, bytes.Length, hash);
+                    worker.Snapshot[file.RelativePath] = Record(hash);
                     worker.Bytes += bytes.Length;
                     Interlocked.Increment(ref progressFiles);
                     Interlocked.Add(ref progressBytes, bytes.Length);
@@ -863,39 +873,49 @@ public static class RepositoryIndexer
         bool wasPresent = oldState is { IsBinary: false };
         long readStart = DateTime.UtcNow.Ticks;                        // before the bytes are read (LedgerTrust)
         bool network = Storage.NetworkPath.IsNetwork(full);
+        // The read handle's identity just before and after the read (default = unknown): see LedgerTrust.Record.
+        Storage.FileIdentity before = default, after = default;
+        // A ledger on a share (CODECOMPASS_CACHE_DIR) may hold entries another machine recorded on its own clock.
+        bool entryClockIsOurs = oldState is not { MTimeTicks: < 0 } || !Storage.NetworkPath.IsNetwork(dir);
+        FileState Rec(long recordedSize, string hash) => LedgerTrust.Record(
+            new ReadStamp(size, mtime, before, after, readStart, DateTime.UtcNow.Ticks), network, oldState, priorRecordedBy, recordedSize, hash,
+            entryClockIsOurs);
 
         // Large files: stream (bounded memory), trigrams only, no symbols.
         if (size >= LargeFileIndexer.StreamThresholdBytes)
         {
-            if (!LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out var isBinary, out var blocks))
+            before = Storage.FileIdentity.OfPath(full); // streamed through its own stream: attribute-only stats around it
+            bool streamed = LargeFileIndexer.TryStreamIndex(full, out var big, out var len, out var bigHash, out var isBinary, out var blocks);
+            after = Storage.FileIdentity.OfPath(full);
+            if (!streamed)
             {
                 // Binary/unreadable: drop it if it was indexed, so we never leave stale content behind. A binary file is
                 // recorded as such so later updates skip it while it's unchanged.
                 if (wasPresent) RemoveFromIndex(text, symbols, dir, rel);
-                if (isBinary) upsert(rel, LedgerTrust.Record(mtime, readStart, network, oldState, priorRecordedBy,size, FileState.BinaryHash)); else drop(rel);
+                if (isBinary) upsert(rel, Rec(size, FileState.BinaryHash)); else drop(rel);
                 return wasPresent ? ChangeKind.Removed : ChangeKind.None;
             }
-            if (oldState?.ContentHash == bigHash) { upsert(rel, LedgerTrust.Record(mtime, readStart, network, oldState, priorRecordedBy,len, bigHash)); return ChangeKind.None; } // touched, identical
+            if (oldState?.ContentHash == bigHash) { upsert(rel, Rec(len, bigHash)); return ChangeKind.None; } // touched, identical
             text.RemovePath(rel);
             text.AddDocument(rel, big);
             symbols.RemovePath(rel); // over the symbol cap anyway; clear any stale symbols
             if (blocks is not null) PositionalSidecar.Write(dir, rel, blocks); else PositionalSidecar.Delete(dir, rel);
-            upsert(rel, LedgerTrust.Record(mtime, readStart, network, oldState, priorRecordedBy,len, bigHash));
+            upsert(rel, Rec(len, bigHash));
             return wasPresent ? ChangeKind.Modified : ChangeKind.Added;
         }
 
         byte[] bytes;
-        try { bytes = File.ReadAllBytes(full); }
+        try { bytes = Storage.FileIdentity.ReadAllBytes(full, out before, out after); }
         catch { if (oldState is { } keep) upsert(rel, keep); return ChangeKind.None; } // transient read error: keep as-was
         if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
         {
             if (wasPresent) RemoveFromIndex(text, symbols, dir, rel);
-            upsert(rel, LedgerTrust.Record(mtime, readStart, network, oldState, priorRecordedBy,bytes.Length, FileState.BinaryHash));
+            upsert(rel, Rec(bytes.Length, FileState.BinaryHash));
             return wasPresent ? ChangeKind.Removed : ChangeKind.None;
         }
 
         var hash = ContentHasher.Hash(bytes);
-        if (oldState?.ContentHash == hash) { upsert(rel, LedgerTrust.Record(mtime, readStart, network, oldState, priorRecordedBy,bytes.Length, hash)); return ChangeKind.None; } // touched, identical
+        if (oldState?.ContentHash == hash) { upsert(rel, Rec(bytes.Length, hash)); return ChangeKind.None; } // touched, identical
 
         var content = TextDecoder.FromBytes(bytes);
         text.RemovePath(rel);
@@ -912,7 +932,7 @@ public static class RepositoryIndexer
         else
             PositionalSidecar.Delete(dir, rel);
 
-        upsert(rel, LedgerTrust.Record(mtime, readStart, network, oldState, priorRecordedBy,bytes.Length, hash));
+        upsert(rel, Rec(bytes.Length, hash));
         return wasPresent ? ChangeKind.Modified : ChangeKind.Added;
     }
 

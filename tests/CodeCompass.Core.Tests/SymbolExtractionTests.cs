@@ -268,6 +268,22 @@ public class SymbolExtractionTests
         Assert.Contains(("omega_fn", SymbolKind.Function), syms);
     }
 
+    // v1.0.242 regression: each extractor compiled its own query, and the C++ definition query takes ~0.9 s to compile.
+    // The parallel build makes a fresh extractor for every loop replica (many per second), so llvm's build went from ~47 s
+    // to ~285 s. Queries are compiled once per process now: ten new extractors cost one compile, not ten (~9 s).
+    [Fact]
+    public void ManyExtractors_CompileTheQueryOnce()
+    {
+        using (var warm = new TreeSitterSymbolExtractor()) warm.Extract("w.cpp", "int warm_fn() { return 0; }\n");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 10; i++)
+        {
+            using var x = new TreeSitterSymbolExtractor();
+            Assert.Contains(x.Extract("a.cpp", $"int fn_{i}() {{ return {i}; }}\n"), s => s.Name == $"fn_{i}");
+        }
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), $"10 extractors took {sw.Elapsed.TotalSeconds:F1} s: the query is being recompiled");
+    }
+
     [Fact]
     public void UnknownExtension_YieldsNothing()
     {

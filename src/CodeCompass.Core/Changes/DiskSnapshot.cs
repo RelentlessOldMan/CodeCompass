@@ -27,7 +27,8 @@ public sealed class DiskSnapshot : IDisposable
     private const string JournalName = "snapshot.journal";
     private const string LegacyName = "snapshot.bin";
     private const string BasePattern = "snapshot-*.base";
-    private const uint JournalMagic = 0x4A4E5343; // "CSNJ"
+    private const uint JournalMagicV1 = 0x4A4E5343; // "CSNJ": path, size, mtime, hash (read only - older versions)
+    private const uint JournalMagic = 0x324E5343;   // "CSN2": v1's fields + change time, file id, hashed-at, SHA-256 hex ("")
     private const int DefaultCompactThreshold = 50_000;
 
     private readonly string _dir;
@@ -313,7 +314,8 @@ public sealed class DiskSnapshot : IDisposable
         {
             using var fs = File.OpenRead(jp);
             using var r = new BinaryReader(fs, Encoding.UTF8, leaveOpen: true);
-            if (r.ReadUInt32() != JournalMagic) throw new InvalidDataException("bad journal magic");
+            uint magic = r.ReadUInt32();
+            if (magic is not (JournalMagic or JournalMagicV1)) throw new InvalidDataException("bad journal magic");
 
             int sets = r.ReadInt32();
             for (int i = 0; i < sets; i++)
@@ -322,7 +324,10 @@ public sealed class DiskSnapshot : IDisposable
                 var size = r.ReadInt64();
                 var mtime = r.ReadInt64();
                 var hash = r.ReadString();
-                _overlay[path] = new FileState(size, mtime, hash);
+                if (magic == JournalMagicV1) { _overlay[path] = new FileState(size, mtime, hash); continue; }
+                long ctime = r.ReadInt64(), fileId = r.ReadInt64(), hashedAt = r.ReadInt64();
+                _ = r.ReadString(); // SHA-256 hex: CodeCompass doesn't compute it
+                _overlay[path] = new FileState(size, mtime, hash, ctime, fileId, hashedAt);
             }
             int rems = r.ReadInt32();
             for (int i = 0; i < rems; i++)
@@ -356,6 +361,10 @@ public sealed class DiskSnapshot : IDisposable
             w.Write(state.Size);
             w.Write(state.MTimeTicks);
             w.Write(state.ContentHash);
+            w.Write(state.ChangeTicks);
+            w.Write(state.FileId);
+            w.Write(state.HashedAtTicks);
+            w.Write(""); // SHA-256 hex: not computed
         }
         w.Write(_removed.Count);
         foreach (var p in _removed) w.Write(p);

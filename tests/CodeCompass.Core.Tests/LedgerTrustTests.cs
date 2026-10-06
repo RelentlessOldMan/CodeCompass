@@ -102,14 +102,16 @@ public class LedgerTrustTests
         Assert.True(Finds(repo.Root, "token_beta_two"));
     }
 
-    // A file last modified well before the read is trusted, so updates skip it without reading it.
+    // A file last modified well before the read is trusted, so updates skip it without reading it. It must actually be left
+    // alone for the margin: backdating its modified time is itself a metadata change that moves the change time to now,
+    // which (ledger v2) keeps the entry pending - the "restored timestamp" case the change time exists to catch.
     [Fact]
     public void SettledFile_KeepsItsMtime_SoUpdatesSkipIt()
     {
         using var repo = new TempRepo();
         var path = repo.FullPath("a.txt");
         File.WriteAllText(path, "token_gamma");
-        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(-5));
+        System.Threading.Thread.Sleep(3500);
         BuildIndex(repo.Root);
 
         Assert.True(DiskSnapshot.TryOpen(IndexStore.CacheDirPath(repo.Root), out var snap));
@@ -335,6 +337,19 @@ public class LedgerTrustTests
             }
         }
         finally { Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", old); }
+    }
+
+    // Backdated modified time, fresh change time: pending on Windows (where the change time is known), not trusted.
+    [Fact]
+    public void BackdatedModifiedTime_WithAFreshChangeTime_IsPending()
+    {
+        if (!OperatingSystem.IsWindows()) return; // the change time is only read on Windows
+        using var repo = new TempRepo();
+        var path = repo.FullPath("a.txt");
+        File.WriteAllText(path, "token_backdated");
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(-5));
+        BuildIndex(repo.Root);
+        Assert.Equal(-File.GetLastWriteTimeUtc(path).Ticks, RecordedTicks(repo.Root, "a.txt"));
     }
 
     private static long RecordedTicks(string root, string rel)

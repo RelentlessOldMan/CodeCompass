@@ -25,12 +25,41 @@ public static class NetworkPath
         try
         {
             var root = Path.GetPathRoot(fullPath);
-            if (!string.IsNullOrEmpty(root) && root.Length >= 2 && root[1] == ':')
-                return new DriveInfo(root).DriveType == DriveType.Network; // mapped network drive
+            if (!string.IsNullOrEmpty(root) && root.Length >= 2 && root[1] == ':'
+                && new DriveInfo(root).DriveType == DriveType.Network) return true; // mapped network drive
         }
-        catch { /* unknown -> treat as local */ }
-        return false;
+        catch { /* unknown -> keep checking */ }
+        // A local-looking path can still lead to a share through a directory symlink (e.g. the repo root, or a folder
+        // above it): the resolved final path says where the bytes really are.
+        return IsUncFinalPath(FinalPath(fullPath));
     }
+
+    /// <summary>Is a <c>GetFinalPathNameByHandle</c> result (<c>\\?\UNC\server\share\...</c>) on a share?</summary>
+    internal static bool IsUncFinalPath(string? finalPath) =>
+        finalPath is not null && finalPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase);
+
+    // The fully resolved path of an existing file or directory (Windows), or null. Attribute-only open, so it never blocks
+    // or is blocked by a writer; backup semantics so a directory can be opened.
+    private static string? FinalPath(string fullPath)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        try
+        {
+            using var h = CreateFileW(FileIdentity.LongPath(fullPath), 0x80 /* FILE_READ_ATTRIBUTES */, 7, IntPtr.Zero,
+                                      3 /* OPEN_EXISTING */, 0x02000000 /* FILE_FLAG_BACKUP_SEMANTICS */, IntPtr.Zero);
+            if (h.IsInvalid) return null;
+            var buf = new char[1024];
+            uint n = GetFinalPathNameByHandleW(h, buf, (uint)buf.Length, 0);
+            return n == 0 || n >= buf.Length ? null : new string(buf, 0, (int)n);
+        }
+        catch { return null; }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern uint GetFinalPathNameByHandleW(Microsoft.Win32.SafeHandles.SafeFileHandle h, char[] buf, uint size, uint flags);
 
     /// <summary>Linux/macOS: is the deepest mount containing <paramref name="fullPath"/> a network filesystem (NFS, CIFS,
     /// SMB...)? There, a network share is just a mount point, not a path shape.
