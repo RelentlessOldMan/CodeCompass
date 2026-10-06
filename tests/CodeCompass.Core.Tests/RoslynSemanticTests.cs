@@ -283,4 +283,48 @@ public class RoslynSemanticTests
         var after = analyzer.FindReferences("Run").Select(r => (r.RelativePath, r.Line, r.Column)).ToList();
         Assert.Equal(before, after);
     }
+
+    // `refs Equals` on EF Core ran 20+ minutes without finishing. Every `override Equals` is linked to all the others
+    // through object.Equals, and Roslyn's search cascades along that link - so one search per declaration (547 in EF Core)
+    // re-found every Equals use in the solution each time. A declaration that an earlier search already covered (it came
+    // back as one of that search's definitions) must not be searched again; the answer must stay the same.
+    // (Framework members named Equals - MemoryExtensions.Equals, Vector.Equals, ... - are distinct symbols and are each
+    // searched once whatever the repo holds, so the invariant is "the count does not grow with the overrides".)
+    [Fact]
+    public void FindReferences_OverridesOfOneMember_AreSearchedOnce()
+    {
+        var (fewRefs, fewSearches) = EqualsRefs(classes: 5);
+        var (manyRefs, manySearches) = EqualsRefs(classes: 40);
+
+        Assert.Equal(5 + 1, fewRefs);
+        Assert.Equal(40 + 1, manyRefs);
+        Assert.Equal(fewSearches, manySearches);
+    }
+
+    private static (int CallSites, int Searches) EqualsRefs(int classes)
+    {
+        using var repo = new TempRepo();
+        for (int i = 0; i < classes; i++)
+            repo.Write($"T{i}.cs", $$"""
+            namespace App;
+            public class T{{i}}
+            {
+                public override bool Equals(object? o) => o is T{{i}};
+                public override int GetHashCode() => {{i}};
+                public static bool Same(T{{i}} a, object b) => a.Equals(b); // CALL
+            }
+            """);
+        repo.Write("Plain.cs", """
+        namespace App;
+        public class Plain
+        {
+            public bool Equals(Plain other) => true;
+            public static bool Use(Plain p) => p.Equals(p); // CALL
+        }
+        """);
+
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var refs = analyzer.FindReferences("Equals", max: 1000);
+        return (refs.Count(r => r.LineText.Contains("// CALL")), analyzer.ReferenceSearches);
+    }
 }

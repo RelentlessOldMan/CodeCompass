@@ -81,6 +81,10 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     public IReadOnlyList<string> UnreadableFiles { get { lock (_gate) return _unreadable.ToList(); } }
     private readonly List<string> _unreadable = new();
 
+    /// <summary>Whole-solution Roslyn reference searches run so far (test hook: the cost driver of FindReferences).</summary>
+    internal int ReferenceSearches => Volatile.Read(ref _referenceSearches);
+    private int _referenceSearches;
+
     /// <summary>True (semantic) references to any C# symbol named <paramref name="name"/>. <paramref name="include"/>
     /// (optional) keeps only hits it accepts - applied BEFORE the <paramref name="max"/> cut, so a session focus
     /// can't have its in-scope hits crowded out by out-of-scope ones.</summary>
@@ -90,11 +94,18 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         var (solution, project) = EnsureBuilt(ct);
         var all = new List<SemanticLocation>();
 
+        // A search cascades to linked symbols (overrides, the member they override, interface implementations) and returns
+        // each one's references under its own Definition. A declaration already returned as a Definition has had its
+        // references collected, so searching it again only repeats the work: with every `override Equals` linked through
+        // object.Equals, one search per declaration was quadratic (EF Core's 547 Equals ran 20+ minutes).
+        var covered = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         foreach (var symbol in FindDeclarations(project, name, ct).Concat(PositionalRecordProperties(project, name, ct)))
         {
-            var referenced = SymbolFinder.FindReferencesAsync(symbol, solution, ct).GetAwaiter().GetResult();
+            if (covered.Contains(symbol)) continue;
+            Interlocked.Increment(ref _referenceSearches);            var referenced = SymbolFinder.FindReferencesAsync(symbol, solution, ct).GetAwaiter().GetResult();
             foreach (var r in referenced)
             {
+                covered.Add(r.Definition);
                 foreach (var rl in r.Locations)
                 {
                     var loc = rl.Location;
