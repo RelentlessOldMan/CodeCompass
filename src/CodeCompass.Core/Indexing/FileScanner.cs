@@ -41,25 +41,28 @@ public static class FileScanner
     /// <summary>Stream a file line by line and find the query within each line. Bounded memory, so it
     /// works on files far larger than a single .NET string can hold. Matches <see cref="ScanText"/>
     /// for single-line queries; a query containing a newline won't be found by this path (rare, and
-    /// only affects files large enough to require streaming).</summary>
-    public static void ScanByLine(string rel, string fullPath, string query, List<SearchMatch> results, int maxResults, StringComparison comparison = StringComparison.Ordinal, bool network = false)
+    /// only affects files large enough to require streaming). Returns the error when the file could not be opened or
+    /// failed partway (the matches found before it are kept), null when it was read; never throws.</summary>
+    public static Exception? ScanByLine(string rel, string fullPath, string query, List<SearchMatch> results, int maxResults, StringComparison comparison = StringComparison.Ordinal, bool network = false)
     {
         int line = 0;
-        IEnumerable<string> lines;
-        try { lines = Storage.SourceFile.ReadLines(fullPath, network); } // streams; honors BOM/encoding like ReadAllText
-        catch { return; }
-        foreach (var raw in lines)
+        try
         {
-            line++;
-            var lineText = raw.TrimEnd('\r');
-            int from = 0, idx;
-            while ((idx = lineText.IndexOf(query, from, comparison)) >= 0)
+            foreach (var raw in Storage.SourceFile.ReadLines(fullPath, network)) // streams; honors BOM/encoding like ReadAllText
             {
-                var (shown, offset) = Text.LineSnippet.Make(lineText, idx, query.Length);
-                results.Add(new SearchMatch(rel, line, idx + 1, shown, offset));
-                if (results.Count >= maxResults) return;
-                from = idx + Math.Max(1, query.Length);
+                line++;
+                var lineText = raw.TrimEnd('\r');
+                int from = 0, idx;
+                while ((idx = lineText.IndexOf(query, from, comparison)) >= 0)
+                {
+                    var (shown, offset) = Text.LineSnippet.Make(lineText, idx, query.Length);
+                    results.Add(new SearchMatch(rel, line, idx + 1, shown, offset));
+                    if (results.Count >= maxResults) return null;
+                    from = idx + Math.Max(1, query.Length);
+                }
             }
+            return null;
         }
+        catch (Exception ex) { return ex; }
     }
 }

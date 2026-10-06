@@ -19,7 +19,46 @@ public class IndexerContentVersionTests
     {
         Assert.Equal(1, SegmentBuilder.Version);          // trigram text segment layout
         Assert.Equal(2, SymbolSegmentBuilder.Version);    // symbol segment layout (v2 added endLines)
-        Assert.Equal(3, BuildInfo.IndexerContentVersion); // v3: C++ member definitions; bump on OUTPUT change
+        Assert.Equal(4, BuildInfo.IndexerContentVersion); // v4: C/C++ definitions only; bump on OUTPUT change
+    }
+
+    // An incremental update re-extracts only CHANGED files, so it must not stamp the index as current: the index is still
+    // only as new as its oldest content. Stamping it erased the "rebuild needed" note on the first update (which the MCP
+    // server runs automatically at startup), leaving old-indexer output - e.g. C++ member definitions listed as uses -
+    // with nothing telling the user to rebuild (review finding 7). Only a full build stamps the current version.
+    [Fact]
+    public void IncrementalUpdate_KeepsAnOlderContentVersion_FullBuildStampsCurrent()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { }");
+        var (t0, s0, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(repo.Root);
+        t0.Dispose(); s0.Dispose();
+
+        var metaPath = System.IO.Path.Combine(CodeCompass.Core.Storage.IndexStore.CacheDirPath(repo.Root), "meta.json");
+        var meta = IndexMetaFile.Read(repo.Root)!;
+        System.IO.File.WriteAllText(metaPath, System.Text.Json.JsonSerializer.Serialize(meta with { ContentVersion = BuildInfo.IndexerContentVersion - 1 }));
+
+        var (t1, s1, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Update(repo.Root);
+        t1.Dispose(); s1.Dispose();
+        Assert.True(IndexMetaFile.IndexerBehind(IndexMetaFile.Read(repo.Root), out _, out _), "an update must not hide that a rebuild is needed");
+
+        var (t2, s2, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(repo.Root);
+        t2.Dispose(); s2.Dispose();
+        Assert.False(IndexMetaFile.IndexerBehind(IndexMetaFile.Read(repo.Root), out _, out _));
+    }
+
+    // A pre-stamp meta (ContentVersion 0) IS behind (IndexerBehind says so), so an update must carry the 0 too - stamping
+    // the current version cleared the note on an index older than v1 (review round 2, finding 6). No meta at all is still
+    // unknown provenance, and gets the current stamp.
+    [Fact]
+    public void CarriedContentVersion_KeepsAPreStampZero_NullMetaIsCurrent()
+    {
+        var preStamp = new IndexMeta("r", "1.0.0", "t", 1, ContentVersion: 0);
+        Assert.True(IndexMetaFile.IndexerBehind(preStamp, out _, out _));
+        Assert.Equal(0, IndexMetaFile.CarriedContentVersion(preStamp));
+        Assert.Equal(BuildInfo.IndexerContentVersion, IndexMetaFile.CarriedContentVersion(null));
+        var newer = new IndexMeta("r", "1.0.0", "t", 1, ContentVersion: BuildInfo.IndexerContentVersion + 1);
+        Assert.Equal(BuildInfo.IndexerContentVersion, IndexMetaFile.CarriedContentVersion(newer));
     }
 
     [Fact]

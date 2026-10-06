@@ -148,9 +148,11 @@ $rows = foreach ($sym in $symbolSet) {
     $after = Cur-RSS
     $txt = Refs-Text $resp
     $refCount = if ($txt) { @([regex]::Matches($txt, ':\d+:\d+:')).Count } else { 0 }
-    $memStop = [bool]($txt -match 'memory budget')
-    $incomplete = if ($txt -match '(\d+)\s*/\s*(\d+)\s+candidate') { "$($Matches[1])/$($Matches[2])" } else { $null }
-    $lexNote = [bool]($txt -match 'lexical')
+    # Since v1.0.239 C/C++ references are a name search: there is no memory stop or parsed/candidate coverage any more
+    # (kept as columns, always false/null), and the by-name note replaces the old "lexical" caveat.
+    $memStop = $false
+    $incomplete = $null
+    $lexNote = [bool]($txt -match 'matched by NAME')
     $timedOut = ($null -eq $resp)
     Write-Host ("  {0,-16} refs={1,-5} {2,6}ms  before={3,6}MB after={4,6}MB{5}" -f $(if($KeepNames){$sym}else{Get-Hash4 $sym}), $refCount, $ms, $before, $after, $(if($timedOut){' TIMEOUT'}elseif($script:killed){' KILLED'}else{''})) -ForegroundColor DarkGray
     [pscustomobject]@{ Id = if ($KeepNames) { $sym } else { Get-Hash4 $sym }; Refs = $refCount; Ms = $ms; BeforeMB = $before; AfterMB = $after; MemStop = $memStop; Cov = $incomplete; Lexical = $lexNote; TimedOut = $timedOut }

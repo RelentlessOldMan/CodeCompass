@@ -90,27 +90,23 @@ $gated = @($syms.PSObject.Properties | Where-Object {
     ($_.Value.PSObject.Properties.Name -contains 'unreachableRefs') -and @($_.Value.unreachableRefs).Count -gt 0
 })
 if ($gated.Count -gt 0) {
-    Write-Host "--- unresolved-include oracle: gated refs stay unresolved + disclosure fires ---"
+    # C/C++ references are a NAME search (no compiler): a use behind a missing header or an inactive #ifdef is still a
+    # use of the name, so it IS listed, and the answer says C/C++ is matched by name. (The clang-era oracle asserted the
+    # opposite: gated refs unresolved + an "unresolved #include" disclosure + a doctor include scan, all removed in v1.0.239.)
+    Write-Host "--- gated-refs oracle: uses behind missing headers / #ifdef are found by name + the by-name note fires ---"
     foreach ($prop in $gated) {
         $sym = $prop.Name; $unrefs = @($prop.Value.unreachableRefs)
         $out = Get-Refs $sym
-        $leaked = $false
+        $missing = 0
         foreach ($u in $unrefs) {
             $line = ($u -split ':')[-1]; $file = [IO.Path]::GetFileName(($u -replace ':\d+$', ''))
-            if ($out -match [regex]::Escape($file) -and $out -match ":${line}:") { $leaked = $true }
+            if (-not ($out -match ([regex]::Escape($file) + ":${line}:"))) { $missing++ }
         }
-        $disclosed = ($out -match 'coverage INCOMPLETE' -and ($out -match 'unresolved' -or $out -match 'VENDOR_missing'))
-        if (-not $leaked) { Write-Host "  OK  $sym : $($unrefs.Count) gated ref(s) correctly NOT resolved" -ForegroundColor Green }
-        else { $fail++; Write-Host "  LEAK $sym : a gated (unreachable) ref was resolved" -ForegroundColor Red }
-        if ($disclosed) { Write-Host "  OK  $sym : find_references disclosed the unresolved include" -ForegroundColor Green }
-        else { $fail++; Write-Host "  MISS $sym : no unresolved-include disclosure emitted" -ForegroundColor Red }
+        if ($missing -eq 0) { Write-Host "  OK  $sym : $($unrefs.Count) gated ref(s) found by name" -ForegroundColor Green }
+        else { $fail++; Write-Host "  MISS $sym : $missing of $($unrefs.Count) gated ref(s) not listed" -ForegroundColor Red }
+        if ($out -match 'matched by NAME') { Write-Host "  OK  $sym : the answer says C/C++ is matched by name" -ForegroundColor Green }
+        else { $fail++; Write-Host "  MISS $sym : no matched-by-name note" -ForegroundColor Red }
     }
-    $do = [IO.Path]::GetTempFileName()
-    $dp = Start-Process $Cli -ArgumentList @("doctor", $Corpus) -NoNewWindow -PassThru -RedirectStandardOutput $do -RedirectStandardError ([IO.Path]::GetTempFileName())
-    $null = $dp.WaitForExit(120000)
-    $dout = Get-Content $do -Raw; Remove-Item $do -Force -ErrorAction SilentlyContinue
-    if ($dout -match 'translation unit\(s\) reference at least one') { Write-Host "  OK  doctor reported the unresolved-include scan" -ForegroundColor Green }
-    else { $fail++; Write-Host "  MISS doctor did not report the unresolved-include scan" -ForegroundColor Red }
 }
 
 # --- EXPECTED-MISS oracle (honest-miss dual of unreachableRefs) ---

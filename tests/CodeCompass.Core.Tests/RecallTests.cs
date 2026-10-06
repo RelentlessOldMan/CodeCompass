@@ -106,20 +106,16 @@ public class RecallTests
     }
 
     // P2-12: same-size edit within the same timestamp tick right after the ledger was written: size+mtime matched and the
-    // prefilter skipped the file forever ("racily clean"). A coarse filesystem (FAT, some NAS) stamps whole seconds, so the
-    // file carries one here. (Restoring an exact sub-second NTFS timestamp after an edit is a different hole - it needs the
-    // file's change time to catch - see LedgerTrust.)
+    // prefilter skipped the file forever ("racily clean").
     [Fact]
     public void RacilyCleanEdit_IsPickedUpByUpdate()
     {
         using var repo = new TempRepo();
         repo.Write("a.cs", "class AlphaOne { }");
-        var now = DateTime.UtcNow;
-        var mtime = new DateTime(now.Ticks - now.Ticks % TimeSpan.TicksPerSecond, DateTimeKind.Utc); // a coarse stamp
-        File.SetLastWriteTimeUtc(repo.FullPath("a.cs"), mtime);
         BuildIndex(repo);
+        var mtime = File.GetLastWriteTimeUtc(repo.FullPath("a.cs"));
         repo.Write("a.cs", "class AlphaTwo { }");                  // same length
-        File.SetLastWriteTimeUtc(repo.FullPath("a.cs"), mtime);     // the same coarse tick
+        File.SetLastWriteTimeUtc(repo.FullPath("a.cs"), mtime);     // a coarse clock: the same timestamp
         var u = RepositoryIndexer.Update(repo.Root);
         using (u.Text) using (u.Symbols)
         {
@@ -186,14 +182,13 @@ public class RecallTests
         finally { ServerContext.Init(repo.Root); }
     }
 
-    // P2-2: the reference backfill's raw-hit budget could run out on non-references (docs) before reaching a real one,
-    // and the answer came back as a confident "No references found".
+    // P2-2: the reference backfill's raw-hit budget could run out on non-references before reaching a real one, and the
+    // answer came back as a confident "No references found". Non-references (a longer identifier containing the name) no
+    // longer count toward the budget at all, so the real use is found.
     [Fact]
-    public void LexicalBudgetExhaustion_IsDisclosed_EvenOnAZero()
+    public void NonReferenceHits_DoNotUseTheBudget()
     {
         using var repo = new TempRepo();
-        // Code-file hits that are NOT references (a longer identifier containing the name) still use the raw scan
-        // budget; the real use sorts after them.
         for (int i = 0; i < 20; i++) repo.Write($"a{i:D2}.py", "zork_fnx()\n");
         repo.Write("z.py", "zork_fn()\n");
         ServerContext.Init(repo.Root);
@@ -201,7 +196,26 @@ public class RecallTests
         {
             CodeCompassTools.Reindex();
             var r = CodeCompassTools.FindReferences("zork_fn", maxResults: 1);
+            Assert.Contains("z.py:1:1", r);
+            Assert.DoesNotContain("reached its budget", r);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    // When REAL references overflow a file's share of the budget, the answer still says so rather than presenting the
+    // count as exact.
+    [Fact]
+    public void LexicalBudgetExhaustion_IsDisclosed()
+    {
+        using var repo = new TempRepo();
+        repo.Write("busy.py", string.Concat(Enumerable.Range(0, ReferenceMerge.MaxLexicalHitsPerFile + 10).Select(_ => "zork_fn()\n")));
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            var r = CodeCompassTools.FindReferences("zork_fn", maxResults: 500);
             Assert.Contains("name search reached its budget", r);
+            Assert.Contains($"more than {ReferenceMerge.MaxLexicalHitsPerFile} matches", r);
         }
         finally { ServerContext.Init(repo.Root); }
     }

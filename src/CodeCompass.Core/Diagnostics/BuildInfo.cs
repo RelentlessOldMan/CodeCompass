@@ -35,6 +35,12 @@ public static class BuildInfo
     ///       records find_definition/search_symbols otherwise miss until each file is next touched.
     ///   3 - C++ member functions defined inside a class body, and out-of-class definitions (Value::method), are now
     ///       symbols: find_definition finds them, and find_references (a C/C++ name search) stops listing them as uses.
+    ///   4 - C/C++ symbols are DEFINITIONS only: a struct/union/enum/class counts only with a body (not every `struct x`
+    ///       use), a plain function only with a return type (not `list_for_each(...) {`), plus pointer/reference-returning
+    ///       functions, ns::C::m, typedefs/aliases in C++ headers, and .inl/.ipp/.tcc/.h++/.c++ files. v3 indexes record
+    ///       type USES as definitions, which made find_references drop real uses. Also new in v4: constructors in a class
+    ///       body, destructors (~A, A::~A), operators (operator=), pointer and function-pointer typedefs, functions that
+    ///       return a function pointer, and export-macro types (class LIB_API K {...}).
     /// </summary>
-    public const int IndexerContentVersion = 3;
+    public const int IndexerContentVersion = 4;
 }

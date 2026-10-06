@@ -354,35 +354,26 @@ if ($Verify) {
     # header defines). find_references must NOT resolve them, and must DISCLOSE the unresolved include.
     $gated = @($groundTruth.Keys | Where-Object { $groundTruth[$_].unreachableRefs -and $groundTruth[$_].unreachableRefs.Count -gt 0 })
     if ($gated.Count -gt 0) {
-        Write-Host "--- unresolved-include oracle: unreachable refs stay unresolved + disclosure fires ---"
+        Write-Host "--- gated-refs oracle: uses behind a missing header are found by name + the by-name note fires ---"
         foreach ($sym in $gated) {
             $unrefs = $groundTruth[$sym].unreachableRefs
             $o = [System.IO.Path]::GetTempFileName(); $e = [System.IO.Path]::GetTempFileName()
             $p = Start-Process $exe -ArgumentList @("refs", $outFull, $sym) -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
             $null = $p.WaitForExit(60000)
             $out = Get-Content $o -Raw; $err = Get-Content $e -Raw
-            $leaked = $false
+            # C/C++ references are a NAME search (no compiler since v1.0.239): a use behind a missing header is still a
+            # use of the name, so it IS listed, and the answer (on STDOUT, so `refs > out.txt` keeps it) says so.
+            $missing = 0
             foreach ($u in $unrefs) {
                 $parts = $u -split ':'; $line = $parts[-1]; $file = [System.IO.Path]::GetFileName(($parts[0..($parts.Count-2)] -join ':'))
-                if ($out -match [regex]::Escape("$file") -and $out -match ":${line}:") { $leaked = $true }
+                if (-not ($out -match ([regex]::Escape("$file") + ":${line}:"))) { $missing++ }
             }
-            # The coverage caveat is a correctness qualifier on the answer, so it must land on STDOUT (so a
-            # `refs > out.txt` keeps it), not just stderr - assert stdout specifically.
-            $disclosed = ($out -match 'coverage INCOMPLETE' -and ($out -match 'unresolved' -or $out -match 'VENDOR_missing'))
-            if (-not $leaked) { Write-Host "  OK  $sym : $($unrefs.Count) gated ref(s) correctly NOT resolved" -ForegroundColor Green }
-            else { $fail++; Write-Host "  LEAK $sym : a gated (unreachable) ref was resolved" -ForegroundColor Red }
-            if ($disclosed) { Write-Host "  OK  $sym : find_references disclosed the unresolved include" -ForegroundColor Green }
-            else { $fail++; Write-Host "  MISS $sym : no unresolved-include disclosure emitted" -ForegroundColor Red }
+            if ($missing -eq 0) { Write-Host "  OK  $sym : $($unrefs.Count) gated ref(s) found by name" -ForegroundColor Green }
+            else { $fail++; Write-Host "  MISS $sym : $missing of $($unrefs.Count) gated ref(s) not listed" -ForegroundColor Red }
+            if ($out -match 'matched by NAME') { Write-Host "  OK  $sym : the answer says C/C++ is matched by name" -ForegroundColor Green }
+            else { $fail++; Write-Host "  MISS $sym : no matched-by-name note" -ForegroundColor Red }
             Remove-Item $o, $e -Force -ErrorAction SilentlyContinue
         }
-        # doctor should proactively report the unresolved-include gap.
-        $do = [System.IO.Path]::GetTempFileName()
-        $dp = Start-Process $exe -ArgumentList @("doctor", $outFull) -NoNewWindow -PassThru -RedirectStandardOutput $do -RedirectStandardError ([System.IO.Path]::GetTempFileName())
-        $null = $dp.WaitForExit(120000)
-        $dout = Get-Content $do -Raw
-        if ($dout -match 'translation unit\(s\) reference at least one') { Write-Host "  OK  doctor reported the unresolved-include scan" -ForegroundColor Green }
-        else { $fail++; Write-Host "  MISS doctor did not report the unresolved-include scan" -ForegroundColor Red }
-        Remove-Item $do -Force -ErrorAction SilentlyContinue
     }
 
     if ($fail -ne 0) { exit 1 }

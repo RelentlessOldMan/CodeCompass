@@ -50,8 +50,8 @@ context on thinking, not on scrolling files it didn't need.</p>
   <li><b>Lexical</b> &mdash; a trigram index for instant literal/substring search across the whole repo.</li>
   <li><b>Symbolic</b> &mdash; tree-sitter parses every file into symbols (classes, methods, functions&hellip;) for go-to-definition.</li>
   <li><b>Semantic</b> &mdash; real find-references for <b>C#</b> (Roslyn): it resolves the actual symbol. Every other language,
-      <b>C and C++ included</b>, gets a fast <b>name search</b> for references: whole-word uses in code, never in comments or
-      strings, never the definition itself.</li>
+      <b>C and C++ included</b>, gets a fast <b>name search</b> for references: whole-word uses in code, never the definition
+      itself, and for C and C++ never inside a comment or string.</li>
 </ul>
 
 <h3>Minimal token footprint</h3>
@@ -65,7 +65,7 @@ CodeCompass exposes a deliberately small <b>7 tools</b> with terse descriptions 
 <tbody>
 <tr><td>Literal / substring search (all files)</td><td style="text-align:left"><span class="yes">Yes</span></td></tr>
 <tr><td>Go-to-definition &amp; symbol search</td><td style="text-align:left"><span class="yes">Yes</span> &mdash; C#, C, C++, Python, JS, TS/TSX, Go, Rust, TRACE32 PRACTICE (.cmm)</td></tr>
-<tr><td>Semantic find-references (excludes comments/strings)</td><td style="text-align:left"><span class="yes">Yes</span> for C# &amp; C/C++; lexical whole-word elsewhere</td></tr>
+<tr><td>Find-references</td><td style="text-align:left"><span class="yes">Yes</span> &mdash; semantic for C#; by name elsewhere (C/C++: comments, strings and definitions excluded)</td></tr>
 <tr><td>Auto re-index on file changes (get-latest, edits)</td><td style="text-align:left"><span class="yes">Yes</span> &mdash; debounced, content-hash verified, ignores build output</td></tr>
 <tr><td>Runs fully local, no GPU, no cloud</td><td style="text-align:left"><span class="yes">Yes</span></td></tr>
 <tr><td>Dozens-of-GB repos without exhausting RAM</td><td style="text-align:left"><span class="yes">Yes</span> &mdash; indexes are memory-mapped on disk</td></tr>
@@ -100,7 +100,7 @@ codecompass update  &lt;path&gt;            incremental reindex of changes
 codecompass watch   &lt;path&gt;            auto-reindex on file changes
 codecompass search  &lt;path&gt; &lt;query&gt;     literal text search  -> file:line:col
 codecompass def     &lt;path&gt; &lt;name&gt;      go-to-definition
-codecompass refs    &lt;path&gt; &lt;name&gt;      references (semantic C#/C++, lexical elsewhere)
+codecompass refs    &lt;path&gt; &lt;name&gt;      references (semantic C#; by name elsewhere)
 codecompass callees &lt;path&gt; &lt;name&gt;      in-repo methods a C# method calls (C# only)
 codecompass symbols &lt;path&gt; &lt;substr&gt;    symbol-name search
 codecompass survey  &lt;path&gt;            report what the size caps skip + suggest config

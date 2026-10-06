@@ -11,6 +11,25 @@ public class LexicalSpanFilterTests
 {
     private static int Col(string line, string needle) => line.IndexOf(needle, System.StringComparison.Ordinal) + 1; // 1-based
 
+    // Paths that differ only in case are different files on a case-sensitive tree (Reg.h / reg.h), so the span cache must
+    // key them apart (review finding 13). This checks the key itself on ANY filesystem: on a case-insensitive one both
+    // spellings open the same file, so after the content changes, a lookup under the other spelling must re-read it - an
+    // ignore-case cache would serve the first spelling's spans. (The end-to-end test in CppNameRefsTests needs a
+    // case-sensitive folder, which not every machine can make.)
+    [Fact]
+    public void SpanCache_KeysPathsExactly()
+    {
+        using var repo = new TempRepo();
+        repo.Write("Reg.h", "/* uses MAGIC_REG */\n");
+        var f = new LexicalSpanFilter();
+        Assert.True(f.IsInCommentOrString(System.IO.Path.Combine(repo.Root, "Reg.h"), 1, 9));
+
+        repo.Write("Reg.h", "int x = MAGIC_REG;\n");
+        var other = System.IO.Path.Combine(repo.Root, "reg.h");
+        if (!System.IO.File.Exists(other)) return; // case-sensitive tree: "reg.h" is another (absent) file - covered end to end
+        Assert.False(f.IsInCommentOrString(other, 1, 9));
+    }
+
     [Fact]
     public void CSharp_Comments_And_Strings_AreSuppressed_CodeIsNot()
     {
@@ -126,6 +145,62 @@ public class LexicalSpanFilterTests
         var path = System.IO.Path.Combine(repo.Root, "a.cpp");
         var f = new LexicalSpanFilter();
         Assert.False(f.IsInCommentOrString(path, 1, Col(line, "Widget")));   // real ref must survive
+    }
+
+    // Review 2026-10-05: C/C++ references are a name search now, so this scanner alone decides code vs comment/string for
+    // every C/C++ hit. Four shapes it misread, each silently dropping a real reference:
+
+    // (1) a backslash line-continuation inside a string, in a CRLF file (only backslash+LF was recognized).
+    [Fact]
+    public void CFamily_StringContinuation_WithCrlf_EndsWhereTheStringDoes()
+    {
+        using var repo = new TempRepo();
+        var lines = new[] { "const char* b = \"abc\\", "def\"; int x1 = eps_fn(1);" };
+        repo.Write("a.c", string.Join("\r\n", lines) + "\r\n");
+        var f = new LexicalSpanFilter();
+        Assert.False(f.IsInCommentOrString(System.IO.Path.Combine(repo.Root, "a.c"), 2, Col(lines[1], "eps_fn")));
+    }
+
+    // (2) encoding-prefixed char literals (L'"', L'/', u'x', U'x', u8'x'): the prefix is not an identifier abutting a quote.
+    [Theory]
+    [InlineData("if (c == L'\"') return eps_fn(3);", "eps_fn")]
+    [InlineData("if (sepc == L'/' || sepc == L'\\\\') eps_fn(4);", "eps_fn")]
+    [InlineData("auto a = u'\"'; eps_fn(5);", "eps_fn")]
+    [InlineData("auto a = U'\"'; eps_fn(6);", "eps_fn")]
+    [InlineData("auto a = u8'\"'; eps_fn(7);", "eps_fn")]
+    public void CFamily_PrefixedCharLiteral_ClosesNormally_RealRefSurvives(string line, string token)
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cpp", line + "\n");
+        var f = new LexicalSpanFilter();
+        Assert.False(f.IsInCommentOrString(System.IO.Path.Combine(repo.Root, "a.cpp"), 1, line.LastIndexOf(token) + 1));
+    }
+
+    // (3) classic-Mac CR-only line endings: a // comment ends at the CR. (The index counts lines by LF, so the whole file is
+    // "line 1" to it - columns run on across the CRs.)
+    [Fact]
+    public void CFamily_CrOnlyLineEndings_CommentEndsAtTheCr()
+    {
+        using var repo = new TempRepo();
+        var text = "// lead comment\rint a = eps_fn(1);\rint b = eps_fn(2);\r";
+        repo.Write("a.c", text);
+        var f = new LexicalSpanFilter();
+        var path = System.IO.Path.Combine(repo.Root, "a.c");
+        Assert.False(f.IsInCommentOrString(path, 1, text.IndexOf("eps_fn") + 1));
+        Assert.False(f.IsInCommentOrString(path, 1, text.LastIndexOf("eps_fn") + 1));
+        Assert.True(f.IsInCommentOrString(path, 1, text.IndexOf("lead") + 1));
+    }
+
+    // (4) an unterminated string fails OPEN, like an unterminated char literal: a stray quote must not hide the rest of the
+    // line.
+    [Fact]
+    public void CFamily_UnterminatedString_FailsOpenToCode_RealRefSurvives()
+    {
+        using var repo = new TempRepo();
+        var line = "STRINGIFY(\"oops); eps_fn(1);";
+        repo.Write("a.c", line + "\n");
+        var f = new LexicalSpanFilter();
+        Assert.False(f.IsInCommentOrString(System.IO.Path.Combine(repo.Root, "a.c"), 1, Col(line, "eps_fn")));
     }
 
     // Fail-OPEN invariant for raw strings: an R"-opener with no '(' before end-of-line is malformed. ScanRawString

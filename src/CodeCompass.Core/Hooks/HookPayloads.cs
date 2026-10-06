@@ -12,14 +12,15 @@ public static class HookPayloads
     // a dead end it had to escape through a shell command.
     private const string DenyReason =
         "CodeCompass is the indexed code-search tool for this workspace. Instead of Grep use: search_code " +
-        "(literal text), find_definition, find_references (semantic for C#/C++), find_callees, search_symbols - " +
+        "(literal text), find_definition, find_references (semantic for C#; by name elsewhere), find_callees, search_symbols - " +
         "precise file:line:col results for far fewer tokens. Use Read for a known file and Glob for file-NAME " +
         "patterns. (Disable with CODECOMPASS_ENFORCE=0.)";
 
     private const string SessionText =
         "CodeCompass is available for this workspace via MCP. For code search and navigation prefer its tools - " +
         "search_code, find_definition, find_references, find_callees, search_symbols - over Grep or reading whole " +
-        "files: precise file:line:col ranges for far fewer tokens; find_references is semantic for C# and C/C++. " +
+        "files: precise file:line:col ranges for far fewer tokens; find_references is semantic for C#, and matches " +
+        "other languages (C/C++ included) by name, so same-named symbols are listed together. " +
         "The index auto-updates as files change.";
 
     /// <summary>PreToolUse payload that denies the tool call and redirects to CodeCompass.</summary>

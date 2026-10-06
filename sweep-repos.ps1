@@ -113,7 +113,7 @@ foreach ($r in $rows) {
     Write-Host (($fmt -f $r.Repo, $r.Files, [int]$r.IdxMs, "$([int]$r.IdxPeakMB)MB", $r.Warns, $refTot, [int]$r.RefMs, "$([int]$r.RefPeakMB)MB") + $flag)
 }
 Write-Host ""
-Write-Host "refs column = C#/C++/lexical reference counts for an auto-picked symbol per repo." -ForegroundColor DarkGray
+Write-Host "refs column = C# semantic / 0 / name-matched reference counts for an auto-picked symbol per repo (C/C++ is a name search since v1.0.239)." -ForegroundColor DarkGray
 $maxIdxPeak = ($rows | Measure-Object -Property IdxPeakMB -Maximum).Maximum
 $maxRefPeak = ($rows | Where-Object { $null -ne $_.RefPeakMB } | Measure-Object -Property RefPeakMB -Maximum).Maximum
 $killed = @($rows | Where-Object { $_.IdxKilled -or $_.RefKilled }).Count

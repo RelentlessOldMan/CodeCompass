@@ -234,6 +234,7 @@ public static class CodeCompassTools
         => ServerContext.QueryAll((handles, ct) =>
     {
         if (string.IsNullOrWhiteSpace(name)) return "Provide a symbol/identifier to find references to.";
+        (name, var qualifiedNote) = ReferenceMerge.MemberOfQualified(name); // Widget::spin -> spin (calls don't spell Widget)
         maxResults = Math.Clamp(maxResults, 1, MaxResultsCeiling); // agent-supplied; guard against 0/negative/absurd
         // Collect one past the cap across both sources (C# semantic, then name matches) so truncation is detected by
         // the same overflow probe the other tools use - exact, not a fuzzy threshold. Kind tags let the footer report
@@ -272,20 +273,25 @@ public static class CodeCompassTools
         var spanFilter = new LexicalSpanFilter(name);
         var seenKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
-            System.StringComparer.OrdinalIgnoreCase);
+            System.StringComparer.Ordinal); // exact: on a case-sensitive tree Reg.h and reg.h are different files
         foreach (var h in handles)
             seenKeys.UnionWith(ReferenceMerge.DefinitionKeys(h.Symbols.FindByName(name), rel => DisplayPath(h, rel)));
 
         var lexLimits = new CodeCompass.Core.Indexing.Segments.SegmentedIndex.SearchLimits();
         int namedCFamily = 0;
+        var unreadable = new List<string>();
         if (hits.Count <= maxResults && indexable)
             foreach (var h in handles)
             {
+                int unreadableBefore = lexLimits.UnreadablePaths.Count;
                 // Reference mode: canonical candidate order (build-order-independent: a local and a UNC index built in
                 // separate runs return the same set), code files only, and a per-file cap so one huge generated file
                 // can't fill the whole answer.
-                foreach (var m in h.Text.Search(name, probe * 5, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
-                                                limits: lexLimits, pathFilter: CodeCompass.Core.Text.ReferenceFileFilter.IsCodeReference))
+                // Filters run DURING the scan (only real references count toward the budget), so noisy files - longer
+                // identifiers containing the name, comments, .cs files Roslyn already answered - can't crowd out a real use.
+                var accept = ReferenceMerge.ReferenceAccept(h.Root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => DisplayPath(h, rel));
+                foreach (var m in h.Text.Search(name, probe, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
+                                                limits: lexLimits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete), accept: accept, ct: ct))
                 {
                     // Shared filter (same as the CLI). The span filter reads the file, so give it the absolute path;
                     // display/dedup keep the relative one.
@@ -297,6 +303,7 @@ public static class CodeCompassTools
                     if (SemanticCoverage.IsCFamily(m.Path)) namedCFamily++;
                     if (hits.Count > maxResults) break;                          // got the overflow row
                 }
+                foreach (var rel in lexLimits.UnreadablePaths.Skip(unreadableBefore)) unreadable.Add(DisplayPath(h, rel));
                 if (hits.Count > maxResults) break;
             }
 
@@ -309,6 +316,7 @@ public static class CodeCompassTools
                 $"named={hits.Count(h => h.Kind == 'l')} (C/C++ {namedCFamily}) total={hits.Count}");
 
         var notes = new StringBuilder();
+        if (qualifiedNote is not null) notes.Append(" (Note: " + qualifiedNote + ".)");
         if (anyCFamily || namedCFamily > 0) notes.Append(" (Note: " + ReferenceMerge.CppByNameNote + ".)");
         // C# conditional-compilation disclosure: Roslyn can't see inactive #if/#elif branches, so a semantic count may
         // miss #if-guarded references (shown by name where the backfill found them).
@@ -317,6 +325,7 @@ public static class CodeCompassTools
                 csConditional.Select(f => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f)).ToList()) + ")");
         if (csUnreadable.Count > 0)
             notes.Append(" (Note: " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(System.IO.Path.GetFileName).ToList()!) + ")");
+        if (unreadable.Count > 0) notes.Append(" (Note: " + ReferenceMerge.UnreadableCandidatesNote(unreadable) + ".)");
         // The name search's raw scan budget (or a file's per-file cap) ran out before the filtered list did: the count
         // may be incomplete, so say so rather than presenting it (or a zero) as exact.
         if (hits.Count <= maxResults && (lexLimits.HitTotalCap || lexLimits.HitPerFileCap))

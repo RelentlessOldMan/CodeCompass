@@ -719,7 +719,7 @@ public static class ServerContext
         string root = Root;
 
         string token, text;
-        if (reconciling) { token = "reconciling"; text = "refreshing (external changes)â€¦"; }
+        if (reconciling) { token = "reconciling"; text = "refreshing (external changes)…"; }
         else
         {
             switch (state)
@@ -727,7 +727,7 @@ public static class ServerContext
                 case IndexState.Ready: token = "ready"; text = $"{files:N0} files"; break;
                 case IndexState.Building:
                     long total = Interlocked.Read(ref _progressTotalBytes), done = Interlocked.Read(ref _progressBytes);
-                    text = total > 0 ? $"indexing {100.0 * done / total:F0}%" : "indexingâ€¦"; token = "building"; break;
+                    text = total > 0 ? $"indexing {100.0 * done / total:F0}%" : "indexing…"; token = "building"; break;
                 case IndexState.NeedsCliBuild: token = "needsCliBuild"; text = "not indexed - run: codecompass index"; break;
                 default: token = "idle"; text = "idle"; break;
             }

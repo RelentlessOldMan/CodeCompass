@@ -279,23 +279,23 @@ static int CmdParseBench(string[] args)
 
 // Claude Code status-line command. Claude runs this on every render, piping a small JSON object on
 // stdin (session_id, cwd, workspace.project_dir, model, ...). We read the repo's status file (written
-// by the MCP server) and print a compact segment like "CodeCompass âœ“ 48,000 files". A separate
+// by the MCP server) and print a compact segment like "CodeCompass ✓ 48,000 files". A separate
 // short-lived process can't see the server's memory, so the status is bridged through that file.
 //
-// Bare mode is a self-contained default status line: "<model> Â· <cwd> Â· CodeCompass âœ“ N files". Setting
+// Bare mode is a self-contained default status line: "<model> · <cwd> · CodeCompass ✓ N files". Setting
 // any statusLine command replaces Claude Code's built-in default entirely, so we render the model + cwd
 // ourselves - otherwise adding CodeCompass would DROP that info. The CodeCompass part is omitted when
 // this repo has no status file, so it's harmless in repos we've never indexed.
 //
 // --wrap "<cmd>": the user already has their own status line. We forward the SAME stdin JSON to <cmd>,
-// print its output, then append " | CodeCompass â€¦" (their command already shows model/cwd, so we do NOT
+// print its output, then append " | CodeCompass …" (their command already shows model/cwd, so we do NOT
 // add our own). Claude Code has a single status-line slot; this composes into it.
 //
 // Contract: fast, and silent on any error.
 static int CmdStatusline(string[] args)
 {
     // Claude Code reads this line as UTF-8; on Windows the console defaults to a legacy codepage that
-    // would mangle the status glyphs (âœ“ â†» â€¦). Force UTF-8 (best-effort - can throw if redirected oddly).
+    // would mangle the status glyphs (✓ ↻ …). Force UTF-8 (best-effort - can throw if redirected oddly).
     try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
 
     string stdin = "";
@@ -362,12 +362,12 @@ static int CmdStatusline(string[] args)
     }
     else
     {
-        // Self-contained default: model Â· cwd Â· CodeCompass (each part omitted if unavailable).
+        // Self-contained default: model · cwd · CodeCompass (each part omitted if unavailable).
         var parts = new List<string>(3);
         if (!string.IsNullOrWhiteSpace(model)) parts.Add(model!);
         if (!string.IsNullOrWhiteSpace(cwd)) parts.Add(ShortenPath(cwd!));
         if (cc.Length > 0) parts.Add(cc);
-        line = string.Join(" Â· ", parts);
+        line = string.Join(" · ", parts);
     }
     if (line.Length > 0) Console.WriteLine(line);
     return 0;
@@ -375,11 +375,11 @@ static int CmdStatusline(string[] args)
 
 static string StatusIcon(string state) => state switch
 {
-    "ready" => "âœ“",         // âœ“
-    "building" => "â€¦",      // â€¦
-    "reconciling" => "â†»",   // â†»
-    "needsCliBuild" => "âš ", // âš 
-    _ => "â€¢",               // â€¢
+    "ready" => "✓",         // ✓
+    "building" => "…",      // …
+    "reconciling" => "↻",   // ↻
+    "needsCliBuild" => "⚠", // ⚠
+    _ => "•",               // •
 };
 
 // Compact a path for display: collapse the user's home dir to ~ (keeps the status line short).
@@ -1053,7 +1053,9 @@ static int CmdRefs(string[] args)
     if (args.Length < 3) return Usage();
     var root = Path.GetFullPath(args[1]);
     NoteLinkedRootsNotSearched(root);
-    var name = args[2];
+    var (name, qualifiedNote) = ReferenceMerge.MemberOfQualified(args[2]); // Widget::spin -> spin (calls don't spell Widget)
+    // Said first, so every answer below - including the early ones (name too short, no index) - carries it.
+    if (qualifiedNote is not null) Console.Out.WriteLine("-- " + qualifiedNote + ".");
 
     // C# references are semantic (comments/strings excluded). Note: from the CLI the Roslyn model builds fresh each
     // run; the MCP server keeps it warm across calls.
@@ -1075,6 +1077,15 @@ static int CmdRefs(string[] args)
     // Everything else - C/C++ and every language without a semantic analyzer - is matched by NAME from the index:
     // whole-word, in a code file, and (C#/C/C++) never inside a comment or string.
     bool haveIndex = RepositoryIndexer.TryLoad(root, out var index, out var refSymbols);
+    if (!haveIndex)
+    {
+        // Never a bare "0": without the index the name search can't run, so say what wasn't searched and fail like
+        // search/def do (a script or agent must not read this as "unused").
+        Console.Out.WriteLine("-- only C# semantic references were searched; C/C++ and other languages were NOT searched " +
+                              "(there is no index for this folder).");
+        Console.Error.WriteLine($"-- {cs.Count} C# semantic + 0 name-matched reference(s)");
+        return NoIndex(root);
+    }
     var csCandidates = new List<string>();
     bool anyCFamily = false;
     if (haveIndex)
@@ -1092,7 +1103,7 @@ static int CmdRefs(string[] args)
     bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0;
     // Classifies comment/string spans in C#/C/C++ candidate files so the name search skips hits inside them.
     var spanFilter = new LexicalSpanFilter(name);
-    var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var seenKeys = new HashSet<string>(StringComparer.Ordinal); // exact: on a case-sensitive tree Reg.h and reg.h differ
     foreach (var s in cs) seenKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
     if (haveIndex) seenKeys.UnionWith(ReferenceMerge.DefinitionKeys(refSymbols!.FindByName(name), rel => rel));
     int named = 0, namedCFamily = 0;
@@ -1101,8 +1112,10 @@ static int CmdRefs(string[] args)
     {
         // Reference mode: canonical candidate order (build-order-independent, so a local and a UNC index return the
         // same set), code files only, and a per-file cap so one huge generated file can't fill the whole answer.
+        // Filters run DURING the scan (only real references count toward the budget) - shared with the MCP tool.
+        var accept = ReferenceMerge.ReferenceAccept(root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => rel);
         foreach (var m in index!.Search(name, 1000, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
-                                        limits: limits, pathFilter: ReferenceFileFilter.IsCodeReference))
+                                        limits: limits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete), accept: accept))
         {
             // Absolute path for the span filter (it reads the file to classify comments/strings); display + dedup stay
             // on the repo-relative m.Path.
@@ -1127,6 +1140,8 @@ static int CmdRefs(string[] args)
             csConditional.Select(f => Path.GetRelativePath(root, f)).ToList()));
     if (csUnreadable.Count > 0)
         Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(f => Path.GetRelativePath(root, f)).ToList()));
+    if (limits.UnreadablePaths.Count > 0)
+        Console.Out.WriteLine("-- " + ReferenceMerge.UnreadableCandidatesNote(limits.UnreadablePaths) + ".");
     if (limits.HitTotalCap || limits.HitPerFileCap)
         Console.Out.WriteLine("-- the name search reached its budget" +
             (limits.HitPerFileCap ? $" (files with more than {ReferenceMerge.MaxLexicalHitsPerFile} matches were cut off)" : "") +

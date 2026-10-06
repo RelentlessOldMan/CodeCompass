@@ -21,14 +21,74 @@ public static class ReferenceMerge
     /// it does cut a file, the answer says so. Passed to <c>SegmentedIndex.Search(..., maxPerFile:)</c> by both paths.</summary>
     public const int MaxLexicalHitsPerFile = 64;
 
-    /// <summary>Dedup keys (<c>display:line:col</c>) for the DEFINITIONS of the queried name, from the symbol index
-    /// (C# declarations, and C/C++ functions, methods and types). Callers seed their already-seen set with these so a
-    /// name match never lists where a symbol is defined as a use of it (Roslyn never reports a declaration as a
-    /// reference either - field report v4). Exact name-token position, so a real use that merely shares the
-    /// definition's line is still counted.</summary>
+    /// <summary>Dedup keys (<c>display:line:col</c>) for the DEFINITIONS of the queried name, from the symbol index, in
+    /// every language it covers. Callers seed their already-seen set with these so a name match never lists where a
+    /// symbol is defined as a use of it (Roslyn never reports a declaration as a reference either - field report v4).
+    /// Exact name-token position, so a real use that merely shares the definition's line is still counted. This relies
+    /// on the symbol queries capturing definitions ONLY (see LanguageRegistry) - a captured use would be dropped.</summary>
     public static IEnumerable<string> DefinitionKeys(IEnumerable<CodeCompass.Core.Symbols.Symbol> definitions, Func<string, string> display) =>
-        definitions.Where(s => SemanticCoverage.IsCommentAware(s.RelativePath))
-                   .Select(s => $"{display(s.RelativePath)}:{s.Line}:{s.Column}");
+        definitions.Select(s => $"{display(s.RelativePath)}:{s.Line}:{s.Column}");
+
+    /// <summary>Which files a reference name search reads: code only (never logs/docs/data), and .cs only when the C#
+    /// semantic pass couldn't see everything - otherwise Roslyn already answered for C# and those files would only use up
+    /// the scan budget.</summary>
+    public static Func<string, bool> ReferencePathFilter(bool csharpIncomplete) =>
+        p => ReferenceFileFilter.IsCodeReference(p) && (csharpIncomplete || !SemanticCoverage.IsCSharp(p));
+
+    /// <summary>The per-match test a reference name search applies DURING the scan, so only real references count toward
+    /// its budget (see SegmentedIndex.Search's <c>accept</c>): whole word, not in a comment/string, and not already listed
+    /// (a semantic hit or a definition, keyed by <paramref name="displayKey"/>:line:col). Shared by the CLI and MCP.</summary>
+    public static Func<CodeCompass.Core.Indexing.SearchMatch, bool> ReferenceAccept(string root, int nameLength, bool csharpIncomplete,
+        LexicalSpanFilter spanFilter, ISet<string> alreadyListed, Func<string, string> displayKey) =>
+        m =>
+        {
+            var full = Path.GetFullPath(Path.Combine(root, m.Path.Replace('/', Path.DirectorySeparatorChar)));
+            return IsLexicalReference(full, m.LineText, m.Column, nameLength, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset)
+                && !alreadyListed.Contains($"{displayKey(m.Path)}:{m.Line}:{m.Column}");
+        };
+
+    /// <summary>Files the name search could not read just now (locked by an editor or another program, an ACL, a network
+    /// error): references in them are missing, so the answer must not read as complete. Empty when none.</summary>
+    public static string UnreadableCandidatesNote(IReadOnlyCollection<string> displayPaths) =>
+        displayPaths.Count == 0 ? "" :
+        $"{displayPaths.Count} file(s) could not be read just now, so any references in them are NOT listed: " +
+        FileList(displayPaths.OrderBy(p => p, StringComparer.Ordinal).ToList()) +
+        " (another program may have them open; rerun the query)";
+
+    /// <summary>A qualified C++ name (<c>Widget::spin</c>, <c>ns::f</c>) is searched by its last part: uses like
+    /// <c>w.spin(3)</c> never spell the qualifier, so matching the whole string finds only the definition. Returns the
+    /// name to search and, when it was changed, a note saying so (null otherwise).</summary>
+    public static (string Name, string? Note) MemberOfQualified(string name)
+    {
+        // Template arguments are skipped when looking for the last "::" (std::vector<std::string> is `vector`, not
+        // `string>`) and dropped from the result: a name search needs a plain identifier.
+        int depth = 0, lastSep = -1, firstOpen = -1;
+        for (int i = 0; i < name.Length; i++)
+        {
+            char c = name[i];
+            // An operator name (operator<<, operator<=>) runs to the end: its '<'s are part of the name, not brackets.
+            if (depth == 0 && IsOperatorKeyword(name, i)) { firstOpen = -1; break; }
+            if (c == '<') { if (depth++ == 0 && firstOpen < 0) firstOpen = i; }
+            else if (c == '>') { if (depth > 0) depth--; }
+            else if (depth == 0 && c == ':' && i + 1 < name.Length && name[i + 1] == ':') { lastSep = i; firstOpen = -1; i++; }
+        }
+        int start = lastSep < 0 ? 0 : lastSep + 2;
+        int end = firstOpen >= start ? firstOpen : name.Length;
+        var member = name[start..end].Trim();
+        if (member.Length == 0 || member == name) return (name, null);
+        return (member, $"\"{name}\" was matched by the name \"{member}\" (uses like obj.{member}(...) don't spell the " +
+                        $"qualifier or template arguments), so other symbols named {member} are listed too");
+    }
+
+    private static bool IsOperatorKeyword(string s, int i)
+    {
+        const string kw = "operator";
+        if (string.CompareOrdinal(s, i, kw, 0, kw.Length) != 0) return false;
+        bool startOk = i == 0 || !(char.IsLetterOrDigit(s[i - 1]) || s[i - 1] == '_');
+        int after = i + kw.Length;
+        bool endOk = after >= s.Length || !(char.IsLetterOrDigit(s[after]) || s[after] == '_');
+        return startOk && endOk;
+    }
 
     /// <summary>What C/C++ reference lines are, said once per answer that has any.</summary>
     public const string CppByNameNote =

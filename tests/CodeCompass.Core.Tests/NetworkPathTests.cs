@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using CodeCompass.Core.Storage;
 using Xunit;
 
@@ -43,5 +44,30 @@ public class NetworkPathTests
             Assert.True(NetworkPath.IsNetwork(@"\\fileserver\share\repo"));
         }
         finally { Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", old); }
+    }
+
+    // Linux/macOS: an NFS/CIFS/SMB mount is a path like any other, so it was treated as local and got the 3 s ledger margin
+    // against the SERVER's clock (review finding 5). The deepest mount containing the path decides.
+    private static readonly string[] MountRoots = { "/", "/mnt/nas", "/mnt/nas/scratch", "/Volumes/Team Share", "/net/hung" };
+    private static readonly string[] NetworkRoots = { "/mnt/nas", "/Volumes/Team Share", "/net/hung" };
+
+    [Theory]
+    [InlineData("/mnt/nas", true)]
+    [InlineData("/mnt/nas/repo/a.c", true)]
+    [InlineData("/mnt/nasty/repo", false)]          // a prefix of the name, not a parent directory
+    [InlineData("/mnt/nas/scratch/x.c", false)]     // a local mount nested under the share
+    [InlineData("/home/u/repo", false)]
+    [InlineData("/Volumes/Team Share/repo", true)]
+    public void UnixMountTable_DeepestMountDecides(string path, bool network) =>
+        Assert.Equal(network, NetworkPath.OnNetworkMount(path, MountRoots, r => NetworkRoots.Contains(r)));
+
+    // Review round 3: asking a mount for its type is a statfs, which blocks on a hung hard-mounted NFS export (or wakes an
+    // automount). Only the ONE mount that contains the path may be asked - never an unrelated one.
+    [Fact]
+    public void UnixMountTable_AsksOnlyTheContainingMount()
+    {
+        var asked = new System.Collections.Generic.List<string>();
+        NetworkPath.OnNetworkMount("/home/u/repo/a.c", MountRoots, r => { asked.Add(r); return NetworkRoots.Contains(r); });
+        Assert.Equal(new[] { "/" }, asked);
     }
 }

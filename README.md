@@ -18,7 +18,8 @@ Three complementary layers, cheapest first:
 - **Symbolic** — tree-sitter parses every file into symbols (classes, methods, functions…) for go-to-definition.
 - **Semantic** — real find-references for **C#** (Roslyn): it resolves the actual symbol. Every other
   language, **C and C++ included**, gets a fast **name search** for references: whole-word uses in code
-  files, never in comments or strings, never the definition itself (see *C/C++ references* below).
+  files, never the definition itself, and for C and C++ never inside a comment or string (see *C/C++
+  references* below).
 
 Everything is **memory-mapped on disk** — the trigram index, the symbol index, and the
 change-detection ledger — so searching a dozens-of-GB repo uses only a few hundred MB of RAM and
@@ -31,7 +32,7 @@ editing it keeps just the changed files in memory. This is what lets an 87 GB re
 |---|---|
 | Literal / substring search (all files) | ✅ Yes |
 | Go-to-definition & symbol search | ✅ C#, C, C++, Python, JS, TS/TSX, Go, Rust, TRACE32 PRACTICE (.cmm) |
-| Semantic find-references (excludes comments/strings) | ✅ C# & C/C++; lexical whole-word elsewhere |
+| Find-references | ✅ semantic for C#; by name elsewhere (C/C++: comments, strings and definitions excluded) |
 | Auto re-index on file changes | ✅ debounced, content-hash verified, ignores build output |
 | Federate external directories (linked roots) | ✅ shared-once index, live-watched, cross-root references |
 | Runs fully local, no GPU, no cloud | ✅ Yes |

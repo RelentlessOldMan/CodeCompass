@@ -82,7 +82,33 @@ public sealed class DiskSnapshot : IDisposable
 
     public FileState this[string relPath]
     {
-        set { _overlay[relPath] = value; _removed.Remove(relPath); }
+        set { _overlay[relPath] = value; _removed.Remove(relPath); _lastSetTicks = DateTime.UtcNow.Ticks; }
+    }
+
+    private long _lastSetTicks;
+
+    /// <summary>An upper bound, on our clock, on when every entry now in this ledger was recorded: the latest write of its
+    /// files or the latest in-memory upsert. <see cref="LedgerTrust"/>'s second look measures its margin from here, so a
+    /// later bound only delays trust; 0 = no bound (the second look doesn't trust). File write times are our clock only on
+    /// a LOCAL cache dir: CODECOMPASS_CACHE_DIR may point at a share whose clock is behind ours, which would make the bound
+    /// too early and trust a racy entry - so there only this process's own upserts count (entries loaded from disk were
+    /// recorded before the load, which is before any upsert).</summary>
+    public long RecordedByUtcTicks
+    {
+        get
+        {
+            long t = _lastSetTicks;
+            if (Storage.NetworkPath.IsNetwork(_dir)) return t;
+            foreach (var name in new[] { ManifestName, JournalName, LegacyName })
+                t = Math.Max(t, WriteTicks(Path.Combine(_dir, name)));
+            if (_base is not null) t = Math.Max(t, WriteTicks(_base.FilePath));
+            return t;
+        }
+    }
+
+    private static long WriteTicks(string path)
+    {
+        try { return File.Exists(path) ? File.GetLastWriteTimeUtc(path).Ticks : 0; } catch { return 0; }
     }
 
     /// <summary>Remove a path; returns whether it was present.</summary>

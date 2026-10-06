@@ -9,7 +9,7 @@ grepping or reading whole files, and the index auto-updates as files change.
 
 - **search_code** — literal text / substring search across the indexed tree.
 - **find_definition** — jump to where a symbol (class, function, type, …) is defined, by exact name.
-- **find_references** — where a symbol is used; semantic for C# and C/C++, lexical elsewhere.
+- **find_references** — where a symbol is used; semantic for C#; other languages (C/C++ included) are matched by name, so same-named symbols are listed together.
 - **find_callees** — the in-repo methods a C# method calls (semantic; C# only).
 - **search_symbols** — symbol-name search by case-insensitive substring.
 - **manage_links** — link external directories into the search; `action=focus` scopes searches to some roots (answers say what was excluded).

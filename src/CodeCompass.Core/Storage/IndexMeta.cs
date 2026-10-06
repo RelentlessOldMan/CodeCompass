@@ -30,17 +30,25 @@ public static class IndexMetaFile
     /// threshold (adaptive per repo shape + network) is recorded so incremental updates use the SAME cutoff
     /// the build did - otherwise an edited mid-size file could leave a stale/orphaned sidecar.</summary>
     public static void Write(string repoRoot, int files, int filesOverCap = 0, int filesSymbolSkipped = 0, int droppedDirs = 0,
-                             long sidecarThresholdBytes = 8L << 20, string? landscape = null, int ambiguousDirsSkipped = 0)
+                             long sidecarThresholdBytes = 8L << 20, string? landscape = null, int ambiguousDirsSkipped = 0,
+                             int? contentVersion = null)
     {
         try
         {
             var meta = new IndexMeta(Path.GetFullPath(repoRoot), BuildInfo.Version,
-                DateTime.UtcNow.ToString("o"), files, filesOverCap, filesSymbolSkipped, BuildInfo.IndexerContentVersion, droppedDirs,
+                DateTime.UtcNow.ToString("o"), files, filesOverCap, filesSymbolSkipped, contentVersion ?? BuildInfo.IndexerContentVersion, droppedDirs,
                 sidecarThresholdBytes, landscape, ambiguousDirsSkipped);
             AtomicFile.WriteText(Path.Combine(IndexStore.GetCacheDir(repoRoot), Name), w => w.Write(JsonSerializer.Serialize(meta)));
         }
         catch { /* best-effort; never break a build over metadata */ }
     }
+
+    /// <summary>The content version an INCREMENTAL write (update, prune) records: it re-extracts only changed files, so the
+    /// index stays as old as its oldest content - an older stamp is carried forward (only a full build stamps the current
+    /// version). That includes a pre-stamp meta (0), which <see cref="IndexerBehind"/> counts as behind; only a MISSING meta
+    /// (unknown provenance - don't cry wolf) gets the current version.</summary>
+    public static int CarriedContentVersion(IndexMeta? prior) =>
+        prior is { ContentVersion: var v } && v < BuildInfo.IndexerContentVersion ? v : BuildInfo.IndexerContentVersion;
 
     /// <summary>Read a cache dir's meta (null if absent/invalid). Takes the cache dir directly so
     /// <c>cache</c> can read it without knowing the repo path.</summary>

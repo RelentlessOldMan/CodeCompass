@@ -22,14 +22,16 @@ public sealed class LexicalSpanFilter
     // Half-open spans (startLine, startChar, endLine, endChar), all 0-based - matching Roslyn's LinePosition and
     // the index's 1-based line/col after a -1 shift. Per file, sorted by start and non-overlapping (a single lex
     // never nests a comment inside a string or vice-versa), so a point lands in at most one span.
-    private readonly Dictionary<string, (int sl, int sc, int el, int ec)[]> _cache = new(StringComparer.OrdinalIgnoreCase);
+    // Keyed by EXACT path: on a case-sensitive tree (Linux Samba share, WSL) Reg.h and reg.h are different files, and the
+    // paths all come from one index, so their spelling is consistent.
+    private readonly Dictionary<string, (int sl, int sc, int el, int ec)[]> _cache = new(StringComparer.Ordinal);
 
     // The symbol this query is about, and where it occurs in each file's CURRENT text (0-based line, col). The hits being
     // classified carry the INDEX's coordinates; if the file changed since, those coordinates may now land inside a
     // comment/string that wasn't there - suppressing a real reference. A position where the token no longer sits is
     // stale: keep the hit (fail open).
     private readonly string? _token;
-    private readonly Dictionary<string, HashSet<(int, int)>> _occurrences = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HashSet<(int, int)>> _occurrences = new(StringComparer.Ordinal);
 
     public LexicalSpanFilter() { }
 
@@ -163,7 +165,8 @@ public sealed class LexicalSpanFilter
             if (c == '/' && d == '/')
             {
                 int sl = line, sc = col;
-                while (i < n && text[i] != '\n') { i++; col++; }
+                // Ends at LF or CR: a CR-only (classic Mac) file has no LF at all, and the comment must not swallow it.
+                while (i < n && text[i] != '\n' && text[i] != '\r') { i++; col++; }
                 list.Add((sl, sc, line, col));
                 continue;
             }
@@ -183,20 +186,25 @@ public sealed class LexicalSpanFilter
             if (c == '"')
             {
                 if (IsRawStringOpen(text, i)) { ScanRawString(text, list, ref i, ref line, ref col); continue; }
-                int sl = line, sc = col;
-                i++; col++;
-                while (i < n && text[i] != '"')
+                int sl = line, sc = col, j = i + 1, jl = line, jc = col + 1;
+                bool closed = false;
+                while (j < n)
                 {
-                    if (text[i] == '\\' && i + 1 < n)
+                    char t = text[j];
+                    if (t == '\\' && j + 1 < n)
                     {
-                        if (text[i + 1] == '\n') { i += 2; line++; col = 0; continue; }   // line continuation
-                        i += 2; col += 2; continue;                                        // escaped char
+                        if (text[j + 1] == '\n') { j += 2; jl++; jc = 0; continue; }                     // continuation (LF)
+                        if (text[j + 1] == '\r' && j + 2 < n && text[j + 2] == '\n') { j += 3; jl++; jc = 0; continue; } // (CRLF)
+                        j += 2; jc += 2; continue;                                                        // escaped char
                     }
-                    if (text[i] == '\n') break;                                            // unterminated at EOL
-                    i++; col++;
+                    if (t == '"') { closed = true; j++; jc++; break; }
+                    if (t == '\n' || t == '\r') break;                                                    // unterminated at EOL
+                    j++; jc++;
                 }
-                if (i < n && text[i] == '"') { i++; col++; }
-                list.Add((sl, sc, line, col));
+                // Fail OPEN, like the char-literal rule: an unterminated string (a stray quote in a macro, a malformed line)
+                // is not a string - treating it as one would hide real code to the end of the line.
+                if (closed) { list.Add((sl, sc, jl, jc)); i = j; line = jl; col = jc; }
+                else { i++; col++; }
                 continue;
             }
             if (c == '\'')
@@ -206,10 +214,11 @@ public sealed class LexicalSpanFilter
                 // DROP a genuine reference. So a '\'' only opens a char literal when preceded by a non-identifier
                 // char, AND it must close within a short bound on the same line (char literals are tiny) - anything
                 // longer is a stray apostrophe, and we fail OPEN to code rather than risk suppressing a reference.
-                if (i > 0 && IsIdentifierChar(text[i - 1])) { i++; col++; continue; }
+                // ...except an encoding prefix (L'x', u'x', U'x', u8'x'), which is part of the literal, not an identifier.
+                if (i > 0 && IsIdentifierChar(text[i - 1]) && !HasEncodingPrefix(text, i)) { i++; col++; continue; }
                 int sl = line, sc = col, j = i + 1, jcol = col + 1, scanned = 0;
                 bool closed = false;
-                while (j < n && text[j] != '\n' && scanned < 16)
+                while (j < n && text[j] != '\n' && text[j] != '\r' && scanned < 16)
                 {
                     if (text[j] == '\\' && j + 1 < n) { j += 2; jcol += 2; scanned += 2; continue; }
                     if (text[j] == '\'') { closed = true; j++; jcol++; break; }
@@ -240,6 +249,15 @@ public sealed class LexicalSpanFilter
     }
 
     private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+    // Is the identifier run immediately before the quote at `quote` exactly a character-literal encoding prefix?
+    private static bool HasEncodingPrefix(string text, int quote)
+    {
+        int q = quote - 1;
+        while (q >= 0 && IsIdentifierChar(text[q])) q--;
+        var prefix = text.Substring(q + 1, quote - (q + 1));
+        return prefix is "L" or "u" or "U" or "u8";
+    }
 
     private static void ScanRawString(string text, List<(int, int, int, int)> list, ref int i, ref int line, ref int col)
     {

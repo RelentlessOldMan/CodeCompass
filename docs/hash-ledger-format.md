@@ -123,7 +123,9 @@ are no longer trustworthy.
 ## Times
 
 `mtime` is the file's last-write time in **UTC**, as .NET ticks: 100-nanosecond intervals since 0001-01-01 00:00 UTC
-(`FileInfo.LastWriteTimeUtc.Ticks`). `0` means unknown.
+(`FileInfo.LastWriteTimeUtc.Ticks`). `0` means unknown. A **negative** value means *pending*: CodeCompass saw the file
+with last-write time `-mtime` but hasn't trusted the entry yet (see below). A live file's ticks are always positive, so
+neither ever matches.
 
 ## Hashes
 
@@ -149,23 +151,27 @@ symlinks and junctions). Hash those yourself.
 
 An entry stands for the live file's content only if **all** of these hold:
 
-1. The entry's `mtime` is not `0`.
+1. The entry's `mtime` is greater than `0`.
 2. The live file's size equals the entry's size.
 3. The live file's UTC last-write ticks equal the entry's `mtime`.
 
-CodeCompass decides what to record when it hashes a file, so readers need no clock rules of their own. It records an
-`mtime` of `0` (so the entry matches no file) when the timestamp couldn't prove the bytes:
+CodeCompass decides what to record when it hashes a file, so readers need no clock rules of their own. Every
+filesystem's timestamps tick coarsely somewhere - FAT/exFAT every 2 s, some NAS boxes every second, and even NTFS only
+advances a file's modified time on a ~1-16 ms timer - so a same-size edit in the same tick as the read keeps size and mtime
+unchanged ("racily clean"). CodeCompass records the real `mtime` only when it knows that tick was over before the read:
 
-- **Possibly racy:** the timestamp is a whole second (a coarse filesystem such as FAT/exFAT or some NAS boxes, where a
-  same-size edit in the same second leaves size and mtime unchanged) and within the last hour of CodeCompass's clock.
-  The hour also absorbs any realistic clock difference between a file server and the indexing machine.
-- **Changed while being read:** for a file modified within the last hour, CodeCompass checks its size and timestamp
-  again after reading it; if either moved since the file was listed, the hash may not match.
+- **First look:** the file was last modified safely before the read began - at least 3 seconds before on a local disk,
+  and an hour before on a network share (whose clock CodeCompass can't read; the hour absorbs realistic clock difference).
+- **Second look:** otherwise the entry is recorded *pending* (negative). On a later update CodeCompass re-reads the file;
+  if it still has the same size and last-write time, and that read began more than 3 seconds after the pending entry was
+  recorded (both times on CodeCompass's own clock), the timestamp's tick had already started at the first look and is long
+  over, so the entry is trusted. This needs no agreement between clocks, so it also settles files whose timestamp is in the
+  future (a share whose clock runs ahead, a future-dated file), which the first look never trusts.
 
-A sub-second timestamp (NTFS, or ext4/xfs behind Samba) can't be racy: any later edit gets a new timestamp.
+Either way, any write after the read gets a newer timestamp, which the next update (and any reader) sees as a mismatch.
 
-Known limit: a tool that rewrites a file at the same size and then deliberately restores its exact previous
-timestamp is not detected (that needs the file's change time, which this format doesn't record).
+Known limit: a tool that rewrites a file at the same size and then deliberately restores its previous timestamp, well after
+it was read, is not detected (that needs the file's change time, which this format doesn't record).
 
 Anything that fails a rule: hash the file yourself.
 
