@@ -456,9 +456,10 @@ static int CmdCache(string[] args)
     static double Mb(long b) => b / 1048576.0;
     static long DirSize(string d) { try { return new DirectoryInfo(d).EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length); } catch { return 0; } }
 
-    // The cache subdirs are the repo-key folders; "logs" is not a cache.
+    // The cache subdirs are the repo-key folders; "logs" is not a cache, nor is a cache moved aside by an unfinished clear.
     IEnumerable<string> CacheDirs() => Directory.Exists(baseDir)
-        ? Directory.EnumerateDirectories(baseDir).Where(d => !string.Equals(Path.GetFileName(d), "logs", StringComparison.OrdinalIgnoreCase))
+        ? Directory.EnumerateDirectories(baseDir).Where(d => !string.Equals(Path.GetFileName(d), "logs", StringComparison.OrdinalIgnoreCase)
+                                                             && !CodeCompass.Core.Storage.IndexStore.IsClearingLeftover(d))
         : Enumerable.Empty<string>();
 
     switch (sub)
@@ -487,9 +488,16 @@ static int CmdCache(string[] args)
                 var meta = CodeCompass.Core.Storage.IndexMetaFile.ReadFromCacheDir(d);
                 if (meta is null || Directory.Exists(meta.Root)) continue; // keep unknown + live
                 long sz = DirSize(d);
-                try { Directory.Delete(d, true); freed += sz; removed++; Console.WriteLine($"  removed {Mb(sz),8:N1} MB  {meta.Root}"); }
-                catch (Exception ex) { Console.Error.WriteLine($"  could not remove {d}: {ex.Message}"); }
+                if (CodeCompass.Core.Storage.IndexStore.TryClearCacheDir(d, out var why)) { freed += sz; removed++; Console.WriteLine($"  removed {Mb(sz),8:N1} MB  {meta.Root}"); }
+                else Console.Error.WriteLine($"  kept {meta.Root}: {why}");
             }
+            // Caches an earlier clear moved aside but couldn't finish deleting (a file was still being released).
+            if (Directory.Exists(baseDir))
+                foreach (var d in Directory.EnumerateDirectories(baseDir).Where(CodeCompass.Core.Storage.IndexStore.IsClearingLeftover))
+                {
+                    long sz = DirSize(d);
+                    try { Directory.Delete(d, true); freed += sz; } catch (Exception ex) { Console.Error.WriteLine($"  could not remove leftover {d}: {ex.Message}"); }
+                }
             Console.WriteLine($"\nGC: removed {removed} cache(s), freed {Mb(freed):N1} MB. (Caches without meta.json are kept - clear by path.)");
             return 0;
         }
@@ -499,15 +507,27 @@ static int CmdCache(string[] args)
             var dir = CodeCompass.Core.Storage.IndexStore.CacheDirPath(Path.GetFullPath(args[2]));
             if (!Directory.Exists(dir)) { Console.Error.WriteLine($"no cache for {args[2]}"); return 1; }
             long sz = DirSize(dir);
-            try { Directory.Delete(dir, true); Console.WriteLine($"cleared {Mb(sz):N1} MB cache for {Path.GetFullPath(args[2])}"); return 0; }
-            catch (Exception ex) { Console.Error.WriteLine($"could not clear: {ex.Message}"); return 1; }
+            // All or nothing: a cache a running server holds is refused intact, never half-deleted.
+            if (!CodeCompass.Core.Storage.IndexStore.TryClearCacheDir(dir, out var why)) { Console.Error.WriteLine($"could not clear: {why}"); return 1; }
+            Console.WriteLine($"cleared {Mb(sz):N1} MB cache for {Path.GetFullPath(args[2])}");
+            if (why.Length > 0) Console.Error.WriteLine("note: " + why);
+            return 0;
         }
         case "clear-all":
         {
             long freed = 0; int removed = 0;
-            foreach (var d in CacheDirs()) { long sz = DirSize(d); try { Directory.Delete(d, true); freed += sz; removed++; } catch { } }
+            var kept = new List<string>();
+            foreach (var d in CacheDirs())
+            {
+                long sz = DirSize(d);
+                if (CodeCompass.Core.Storage.IndexStore.TryClearCacheDir(d, out var why)) { freed += sz; removed++; }
+                else kept.Add($"{CodeCompass.Core.Storage.IndexMetaFile.ReadFromCacheDir(d)?.Root ?? d}: {why}");
+            }
             Console.WriteLine($"cleared {removed} cache(s), freed {Mb(freed):N1} MB (logs kept).");
-            return 0;
+            if (kept.Count == 0) return 0;
+            Console.Error.WriteLine($"{kept.Count} cache(s) were in use and left intact:");
+            foreach (var k in kept) Console.Error.WriteLine("  " + k);
+            return 1;
         }
         default:
             Console.Error.WriteLine("usage: codecompass cache [list | gc | clear <path> | clear-all]");

@@ -82,15 +82,10 @@ public static class LinkManager
         if (!Directory.Exists(cacheDir)) return new(RemoveStatus.UnlinkedNoIndex, $"unlinked: {linked}", Array.Empty<string>());
         if (confirmPurge is null || !confirmPurge(cacheDir))
             return new(RemoveStatus.UnlinkedKept, $"unlinked: {linked} (index kept at {cacheDir}; remove with purge to reclaim disk)", Array.Empty<string>());
-        try
-        {
-            Directory.Delete(cacheDir, recursive: true);
-            return new(RemoveStatus.UnlinkedPurged, $"unlinked: {linked} (index deleted)", Array.Empty<string>());
-        }
-        catch (Exception ex)
-        {
-            return new(RemoveStatus.PurgeFailed, $"unlinked: {linked} (could not delete index: {ex.Message})", Array.Empty<string>());
-        }
+        // All or nothing (IndexStore.TryClearCacheDir): an index a running server still holds is kept whole, never half-deleted.
+        return IndexStore.TryClearCacheDir(cacheDir, out var why)
+            ? new(RemoveStatus.UnlinkedPurged, $"unlinked: {linked} (index deleted)", Array.Empty<string>())
+            : new(RemoveStatus.PurgeFailed, $"unlinked: {linked} (index kept: {why})", Array.Empty<string>());
     }
 
     public sealed record LinkInfo(string Path, string Status, bool Exists, bool Indexed);
