@@ -75,6 +75,35 @@ public class McpFindReferencesTests
         }
     }
 
+    // Field report: the tester found orphaned CodeCompass.Mcp.exe processes still running (and holding their index open)
+    // after the host session ended. The host ends a stdio server by closing its stdin; the server must exit on its own.
+    [Fact]
+    public void Mcp_Server_ExitsWhenStdinCloses()
+    {
+        var mcp = TestCli.FindMcp();
+        using var repo = new TempRepo();
+        repo.Write("a.c", "int a(void){ return 0; }\n");
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = mcp, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            UseShellExecute = false, CreateNoWindow = true, StandardInputEncoding = new UTF8Encoding(false),
+        };
+        psi.ArgumentList.Add(repo.Root);
+        using var p = Process.Start(psi)!;
+        var o = p.StandardOutput.ReadToEndAsync(); var e = p.StandardError.ReadToEndAsync(); // drain both pipes
+        try
+        {
+            p.StandardInput.WriteLine("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}");
+            p.StandardInput.WriteLine("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+            p.StandardInput.Flush();
+            System.Threading.Thread.Sleep(1500);   // let it start serving (and begin its startup index work)
+            p.StandardInput.Close();
+            Assert.True(p.WaitForExit(20_000), "the MCP server kept running after its stdin closed (an orphan)");
+        }
+        finally { if (!p.HasExited) try { p.Kill(entireProcessTree: true); } catch { } }
+    }
+
     private static string JsonEncode(string s) => JsonSerializer.Serialize(s);
 
     private static string McpFindReferences(string exe, string root, string symbol)
