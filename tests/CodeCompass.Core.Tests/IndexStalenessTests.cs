@@ -76,7 +76,8 @@ public class IndexStalenessTests
             foreach (var cmd in new[] { "search", "def", "symbols", "refs" })
             {
                 RunCli(cli, cmd, project.Root, out var stdout, out _, "only_in_lib_zq");
-                Assert.Contains("1 linked root(s) are NOT searched", stdout);
+                var note = Assert.Single(stdout.Split('\n'), l => l.Contains("1 linked root(s) are NOT searched"));
+                Assert.StartsWith("-- ", note); // a qualifier, like every other note on stdout - never mistaken for a hit line
             }
         }
         finally { LinkStore.Remove(project.Root, lib.Root); }

@@ -564,9 +564,12 @@ public static class CodeCompassTools
             {
                 if (string.IsNullOrWhiteSpace(path)) return "Provide 'path' - the linked directory to remove.";
                 if (!System.IO.Path.IsPathRooted(path)) return $"Provide an ABSOLUTE path (got relative '{path}'). Relative paths resolve against the server's launch directory, not this workspace.";
-                var r = LinkManager.Remove(project, path, _ => purge);
+                // Before purging, let go of the root this session was serving - otherwise our own open index refuses the purge.
+                var r = LinkManager.Remove(project, path, _ => { if (purge) ServerContext.ReconcileLinksNow(); return purge; });
                 var sb = new StringBuilder(r.Message);
                 foreach (var o in r.OtherProjects) sb.Append($"\n      {o}");
+                if (r.Status == LinkManager.RemoveStatus.PurgeFailed)
+                    sb.Append($"\nAnother process still has it open; once that ends, delete it with: codecompass cache clear \"{System.IO.Path.GetFullPath(path)}\"");
                 if (r.Status != LinkManager.RemoveStatus.NotLinked) sb.Append(" — active on the next query.");
                 return sb.ToString();
             }

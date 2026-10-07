@@ -961,7 +961,7 @@ static void NoteLinkedRootsNotSearched(string root)
 {
     int n = LinkStore.Read(root).Count;
     if (n > 0)
-        Console.Out.WriteLine($"note: {n} linked root(s) are NOT searched by CLI queries (project-root only); " +
+        Console.Out.WriteLine($"-- note: {n} linked root(s) are NOT searched by CLI queries (project-root only); " +
                               "use the CodeCompass MCP tools for federated search across linked roots.");
 }
 

@@ -403,6 +403,10 @@ public static class ServerContext
         catch (Exception ex) { Log.For(Root).Warn($"linked-root reconcile skipped: {ex.Message}"); }
     }
 
+    /// <summary>Apply a link change made in THIS session now, not on the next query: an unlinked root's index is closed,
+    /// so `manage_links remove purge=true` can delete it (the all-or-nothing clear refuses while anything holds it).</summary>
+    public static void ReconcileLinksNow() => MaybeReconcileLinks();
+
     // Bring the federated set in line with the desired link list (caller holds _linkedGate). Each newly-added
     // root gets the SAME freshness handling as the project root: try to win crash-proof write-ownership, and
     // if we do, live-watch it (local AND network) and reconcile out-of-session changes on load (gated for

@@ -65,12 +65,20 @@ public static class IndexStore
     {
         error = "";
         var aside = dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + ClearingMarker + Guid.NewGuid().ToString("N")[..8];
-        try { Directory.Move(dir, aside); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        // A few short retries ride out a handle held only for a moment (antivirus, the search indexer); a server's
+        // memory-mapped index is held for its whole life, so it is still refused.
+        for (int attempt = 1; ; attempt++)
         {
-            error = "the cache is in use (a CodeCompass server or watcher has it open), so nothing was deleted - " +
-                    $"close it and retry ({ex.Message})";
-            return false;
+            if (!Directory.Exists(dir)) return true; // already gone (another clear or gc won the race): cleared
+            try { Directory.Move(dir, aside); break; }
+            catch (DirectoryNotFoundException) when (!Directory.Exists(dir)) { return true; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt < 3) { Thread.Sleep(100); continue; }
+                error = "the cache is in use (a CodeCompass server or watcher has it open), so nothing was deleted - " +
+                        $"close it and retry ({ex.Message})";
+                return false;
+            }
         }
         try { Directory.Delete(aside, true); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

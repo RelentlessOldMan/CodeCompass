@@ -35,7 +35,20 @@ public class CacheClearTests
             Assert.False(Directory.Exists(dir));
             Assert.Empty(Directory.EnumerateDirectories(Path.GetDirectoryName(dir)!, Path.GetFileName(dir) + "*")); // nothing left aside
         }
-        finally { try { Directory.Delete(dir, true); } catch { } }
+        finally
+        {
+            foreach (var d in Directory.EnumerateDirectories(Path.GetDirectoryName(dir)!, Path.GetFileName(dir) + "*"))
+                try { Directory.Delete(d, true); } catch { }
+        }
+    }
+
+    // A cache that is already gone (another clear or gc won the race) is cleared, not "in use".
+    [Fact]
+    public void TryClearCacheDir_AlreadyGone_IsCleared_NotInUse()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "cc-clear-gone-" + Guid.NewGuid().ToString("N"));
+        Assert.True(IndexStore.TryClearCacheDir(dir, out var why), why);
+        Assert.Equal("", why);
     }
 
     // `link remove` with purge deletes the linked root's index - which the MCP server typically still holds open. Same rule:
@@ -58,6 +71,7 @@ public class CacheClearTests
             Assert.Contains("in use", r.Message);
             Assert.All(files, f => Assert.True(File.Exists(f), f));
         }
+        IndexStore.TryClearCacheDir(cacheDir, out _); // released now: don't leave it in the test cache
     }
 
     // The CLI says so and fails, rather than reporting a partial clear as done.

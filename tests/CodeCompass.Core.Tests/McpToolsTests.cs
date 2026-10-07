@@ -89,6 +89,40 @@ public class McpToolsTests
         Assert.Contains("ABSOLUTE", msg);
     }
 
+    // Review finding: `remove purge=true` on a linked root this session has searched was always refused - the server itself
+    // held the index open, so the all-or-nothing clear said "in use, close it and retry", which the agent can't do from
+    // inside its own session. The server lets go of the unlinked root first, so the purge deletes it.
+    [Fact]
+    public void ManageLinks_RemovePurge_OfALinkedRootThisSessionLoaded_DeletesIt()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class A { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class PurgeMeGizmo { } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+        var cacheDir = CodeCompass.Core.Storage.IndexStore.CacheDirPath(external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.Contains("Gizmo.cs", CodeCompassTools.SearchCode("PurgeMeGizmo")); // loaded: the server holds it open
+
+            var msg = CodeCompassTools.ManageLinks("remove", external.Root, purge: true);
+            Assert.Contains("index deleted", msg);
+            Assert.False(System.IO.Directory.Exists(cacheDir));
+            Assert.DoesNotContain("Gizmo.cs", CodeCompassTools.SearchCode("PurgeMeGizmo")); // no longer federated
+        }
+        finally
+        {
+            ServerContext.Init(project.Root);
+            CodeCompass.Core.Storage.LinkStore.Remove(project.Root, external.Root);
+            CodeCompass.Core.Storage.IndexStore.TryClearCacheDir(cacheDir, out _);
+        }
+    }
+
     // An unrecognized action must return the usage default, not silently behave like "list" or throw.
     [Fact]
     public void ManageLinks_UnknownAction_ReturnsUsage()
