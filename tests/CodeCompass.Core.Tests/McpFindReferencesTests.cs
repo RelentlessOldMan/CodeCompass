@@ -13,14 +13,14 @@ namespace CodeCompass.Core.Tests;
 // The MCP tool handler is the surface real users hit (via Claude/Codex), and it had ~no direct coverage -
 // which is how the false-zero stayed latent on the MCP path. This drives the actual built MCP server over
 // stdio (initialize -> tools/call find_references) and asserts the product-surface behavior end-to-end.
-// Soft-skips if the server exe isn't built (bare `dotnet test`); the release gate builds it and runs this.
+// The server must be built from this commit in this configuration (TestCli.FindMcp): a missing or stale exe FAILS -
+// these used to soft-skip, and picked the newest exe under any bin\ folder, so they could pass without testing anything.
 public class McpFindReferencesTests
 {
     [Fact]
     public void Mcp_FindReferences_MissingHeader_CallsStillFound()
     {
-        var mcp = FindExe("CodeCompass.Mcp");
-        if (mcp is null) return;
+        var mcp = TestCli.FindMcp();
 
         using var repo = new TempRepo();
         for (int i = 0; i < 4; i++)
@@ -44,8 +44,7 @@ public class McpFindReferencesTests
     [Fact]
     public void Mcp_ManageLinks_AddFederatesLinkedRoot()
     {
-        var mcp = FindExe("CodeCompass.Mcp");
-        if (mcp is null) return;
+        var mcp = TestCli.FindMcp();
 
         using var project = new TempRepo();
         project.Write("app.c", "int app(void){ return 0; }\n");
@@ -140,18 +139,5 @@ public class McpFindReferencesTests
             if (!p.WaitForExit(5000)) { try { p.Kill(entireProcessTree: true); } catch { } }
             _ = err; // observed
         }
-    }
-
-    private static string? FindExe(string baseName)
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        for (int i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
-        {
-            var bin = Path.Combine(dir.FullName, "src", baseName, "bin");
-            if (Directory.Exists(bin))
-                return Directory.EnumerateFiles(bin, baseName + ".exe", SearchOption.AllDirectories)
-                    .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
-        }
-        return null;
     }
 }

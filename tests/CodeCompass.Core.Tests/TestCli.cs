@@ -6,24 +6,30 @@ using System.Security.Cryptography;
 
 namespace CodeCompass.Core.Tests;
 
-/// <summary>Locate and run the built <c>CodeCompass.Cli.exe</c> for end-to-end subprocess tests.</summary>
+/// <summary>Locate and run the built <c>CodeCompass.Cli.exe</c> (or the MCP server) for end-to-end subprocess tests.</summary>
 internal static class TestCli
 {
     /// <summary>The CLI built in the SAME configuration as this test run, verified to be built from the same code. A
     /// missing or stale exe FAILS the calling test: the old soft-skip let these regression tests pass vacuously on a
     /// fresh clone (the test project doesn't reference the CLI, so `dotnet test` alone never builds it), and "newest
     /// exe anywhere under bin" could silently test an older commit's binary. Build the solution first (check.ps1 does).</summary>
-    public static string Find()
+    public static string Find() => Find("CodeCompass.Cli");
+
+    /// <summary>The MCP server, held to the same rule as <see cref="Find()"/>: the stdio tests are the only ones that drive
+    /// the real server, and a soft-skip or another configuration's binary would let them pass without testing this code.</summary>
+    public static string FindMcp() => Find("CodeCompass.Mcp");
+
+    private static string Find(string project)
     {
         var testDir = AppContext.BaseDirectory;
         var config = testDir.Contains($"{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
             ? "Release" : "Debug";
         var dir = new DirectoryInfo(testDir);
-        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "CodeCompass.Cli"))) dir = dir.Parent;
-        if (dir is null) throw new InvalidOperationException("can't find the repo root (src/CodeCompass.Cli) above " + testDir);
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", project))) dir = dir.Parent;
+        if (dir is null) throw new InvalidOperationException($"can't find the repo root (src/{project}) above " + testDir);
 
-        var cliDir = Path.Combine(dir.FullName, "src", "CodeCompass.Cli", "bin", config, Path.GetFileName(Path.TrimEndingDirectorySeparator(testDir)));
-        var exe = Path.Combine(cliDir, "CodeCompass.Cli.exe");
+        var cliDir = Path.Combine(dir.FullName, "src", project, "bin", config, Path.GetFileName(Path.TrimEndingDirectorySeparator(testDir)));
+        var exe = Path.Combine(cliDir, project + ".exe");
         if (!File.Exists(exe))
             throw new InvalidOperationException($"{exe} is not built - run `dotnet build CodeCompass.sln -c {config}` (check.ps1 does) so the subprocess tests exercise this commit.");
         foreach (var lib in new[] { "CodeCompass.Core.dll", "CodeCompass.Semantics.dll" })
