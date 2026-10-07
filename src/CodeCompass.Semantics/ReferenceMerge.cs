@@ -42,9 +42,11 @@ public static class ReferenceMerge
         LexicalSpanFilter spanFilter, ISet<string> alreadyListed, Func<string, string> displayKey) =>
         m =>
         {
+            // Already-listed first: it's a set lookup, while IsLexicalReference may read and lex the whole file - which,
+            // for a name defined in thousands of generated files, was over a second of reading only to drop definitions.
+            if (alreadyListed.Contains($"{displayKey(m.Path)}:{m.Line}:{m.Column}")) return false;
             var full = Path.GetFullPath(Path.Combine(root, m.Path.Replace('/', Path.DirectorySeparatorChar)));
-            return IsLexicalReference(full, m.LineText, m.Column, nameLength, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset)
-                && !alreadyListed.Contains($"{displayKey(m.Path)}:{m.Line}:{m.Column}");
+            return IsLexicalReference(full, m.LineText, m.Column, nameLength, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset);
         };
 
     /// <summary>Files the name search could not read just now (locked by an editor or another program, an ACL, a network

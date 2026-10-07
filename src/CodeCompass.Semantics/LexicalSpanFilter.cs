@@ -38,6 +38,9 @@ public sealed class LexicalSpanFilter
     /// <param name="token">The queried name; enables the stale-coordinate check.</param>
     public LexicalSpanFilter(string token) => _token = string.IsNullOrEmpty(token) ? null : token;
 
+    /// <summary>Files read and classified so far (test hook: each one is a whole-file read plus a lex).</summary>
+    internal int FilesClassified => _cache.Count;
+
     /// <summary>True if the match at (1-based line, 1-based column) in <paramref name="path"/> falls inside a
     /// comment or string/char literal - i.e. it is NOT a real code reference and the lexical backfill should skip
     /// it. Non-covered languages (no semantic promise about comments) and any file we can't classify return

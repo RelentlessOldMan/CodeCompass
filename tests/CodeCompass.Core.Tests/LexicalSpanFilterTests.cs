@@ -238,4 +238,24 @@ public class LexicalSpanFilterTests
         var f = new LexicalSpanFilter();
         Assert.False(f.IsInCommentOrString(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "does-not-exist-xyz.cs"), 1, 1));
     }
+
+    // On a generated corpus where ~3,100 files each DEFINE the queried name, refs read and lexed every one of them for
+    // comments/strings before noticing the hit was an already-known definition - over a second of a 4 s name search. A hit
+    // already listed (a definition or a semantic hit) must be dropped without classifying its file; a new one still is.
+    [Fact]
+    public void ReferenceAccept_AlreadyListedHit_IsDroppedWithoutClassifyingItsFile()
+    {
+        using var repo = new TempRepo();
+        repo.Write("def.c", "int compute17(int x) { return x + 17; }\n");
+        repo.Write("use.c", "int y = compute17(1);\n");
+        var filter = new LexicalSpanFilter("compute17");
+        var listed = new HashSet<string>(System.StringComparer.Ordinal) { "def.c:1:5" };
+        var accept = ReferenceMerge.ReferenceAccept(repo.Root, "compute17".Length, csharpIncomplete: false, filter, listed, rel => rel);
+
+        Assert.False(accept(new CodeCompass.Core.Indexing.SearchMatch("def.c", 1, 5, "int compute17(int x) { return x + 17; }")));
+        Assert.Equal(0, filter.FilesClassified);
+
+        Assert.True(accept(new CodeCompass.Core.Indexing.SearchMatch("use.c", 1, 9, "int y = compute17(1);")));
+        Assert.Equal(1, filter.FilesClassified);
+    }
 }
