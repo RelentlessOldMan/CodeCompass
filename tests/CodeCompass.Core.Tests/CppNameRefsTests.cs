@@ -133,6 +133,23 @@ public class CppNameRefsTests
         Assert.Equal(ReferenceMerge.MaxLexicalHitsPerFile, Lines(stdout).Count(l => l.StartsWith("busy.c:")));
     }
 
+    // The CLI twin of the MCP check: in a mixed repo, a symbol only C# uses gets no C/C++ caveat (field report: the caveat
+    // must follow the query, not the repo's languages).
+    [Fact]
+    public void Cli_Refs_CSharpOnlySymbol_InAMixedRepo_HasNoCppNote()
+    {
+        var cli = TestCli.Find();
+        using var repo = new TempRepo();
+        repo.Write("App.cs", "namespace N { public static class App { public static int OnlyCsZq() => 1; public static int Use() => OnlyCsZq(); } }\n");
+        repo.Write("util.c", "int util(void){ return 0; }\n");
+
+        Assert.Equal(0, TestCli.Run(cli, "index", repo.Root).Exit);
+        var (_, stdout, stderr) = TestCli.Run(cli, "refs", repo.Root, "OnlyCsZq");
+
+        Assert.Contains("App.cs", stdout);
+        Assert.DoesNotContain("matched by NAME", stdout + stderr);
+    }
+
     // Build logs and disassembly are not code: they never appear, and never use up the result budget.
     [Fact]
     public void Cli_Refs_NonCodeFiles_Excluded()

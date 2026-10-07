@@ -674,6 +674,35 @@ public class McpToolsTests
         finally { ServerContext.Init(repo.Root); }
     }
 
+    // Field report (1.0.189, two linked repos): a C#-only symbol's answer carried the C/C++ caveat from the OTHER root - the
+    // caveat was scoped to the project, not the query. It must appear only when C/C++ files are part of THIS answer.
+    [Fact]
+    public void FindReferences_CSharpOnlySymbol_CarriesNoCppNote_EvenWithACppLinkedRoot()
+    {
+        using var project = new TempRepo();
+        project.Write("src/App.cs", "namespace N { public static class App { public static int OnlyCsZq() => 1; public static int Use() => OnlyCsZq(); } }\n");
+        project.Write("native/util.c", "int util(void){ return 0; }\n");          // C in this root too, not naming the symbol
+        using var external = new TempRepo();
+        external.Write("lib/drv.c", "int drv(void){ return 2; }\n");              // a C/C++ linked root
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root); et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            var result = CodeCompassTools.FindReferences("OnlyCsZq");
+            Assert.Contains("src/App.cs", result);
+            Assert.DoesNotContain("matched by NAME", result);
+            Assert.DoesNotContain("C/C++", result);
+        }
+        finally
+        {
+            CodeCompass.Core.Storage.LinkStore.Remove(project.Root, external.Root);
+            ServerContext.Init(project.Root);
+        }
+    }
+
     [Fact]
     public void FindReferences_SignalsTruncationExactlyAtCap()
     {
