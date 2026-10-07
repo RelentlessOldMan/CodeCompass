@@ -40,6 +40,34 @@ public class RecallTests
         using (t) using (s) Assert.Single(t.Search("NeedleSpan"));
     }
 
+    // The non-ASCII twin of the test above (field report): the forced cut must land on a codepoint boundary, or the split
+    // character mis-decodes on both sides and the text next to it can't be found. A 4-byte emoji is placed so the cut falls
+    // 1, 2 and 3 bytes into it; the token glued to it - and the pair - must still be found, exactly once.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void FourByteCharacterStraddlingAForcedBlockCut_TextBesideItIsFound(int bytesBeforeCut)
+    {
+        using var repo = new TempRepo();
+        const int cut = 16 << 20;
+        const string emoji = "\U0001F600";                         // 4 bytes in UTF-8
+        var sb = new StringBuilder(cut + 4096);
+        sb.Append('x', cut - bytesBeforeCut).Append(emoji).Append("NeedleEmo").Append('y', 2000).Append('\n').Append("tail line\n");
+        repo.Write("bundle.js", sb.ToString());
+        Assert.Equal(cut + 4 - bytesBeforeCut + "NeedleEmo".Length + 2000 + 1 + "tail line\n".Length,
+                     (int)new FileInfo(repo.FullPath("bundle.js")).Length);   // really UTF-8 and really straddling
+        BuildIndex(repo);
+        Assert.True(PositionalSidecar.HasSidecar(IndexStore.GetCacheDir(repo.Root), "bundle.js"));
+
+        Assert.True(RepositoryIndexer.TryLoad(repo.Root, out var t, out var s));
+        using (t) using (s)
+        {
+            Assert.Single(t.Search("NeedleEmo"));
+            Assert.Single(t.Search(emoji + "Needle"));
+        }
+    }
+
     // P2-8: newlines INSIDE a multi-line match weren't counted, so each later match reported a line too small.
     [Fact]
     public void MultiLineQuery_LaterMatchesReportTheRightLine()
