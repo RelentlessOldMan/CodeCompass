@@ -107,6 +107,7 @@ function Invoke-WarmBattery([string]$RepoPath, [string]$ServerExe, [string[]]$Sy
     $errTask = $proc.StandardError.ReadToEndAsync()   # drain server logs so they can't fill the pipe
 
     $script:rpcId = 1
+    $script:pendingRead = $null
     # Write one JSON-RPC line and read stdout until the matching response (or timeout). Returns the text
     # payload of a tools/call result, '' on timeout/EOF.
     function Send-Call([string]$tool, [string]$argJson, [int]$timeoutSec) {
@@ -115,8 +116,12 @@ function Invoke-WarmBattery([string]$RepoPath, [string]$ServerExe, [string[]]$Sy
         $proc.StandardInput.WriteLine($req); $proc.StandardInput.Flush()
         $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSec)
         while ($true) {
-            $rt = $proc.StandardOutput.ReadLineAsync()
+            # A timed-out call leaves its read pending; reuse it (a second ReadLineAsync on the stream throws), and
+            # the late response it yields is skipped below by id.
+            if ($null -eq $script:pendingRead) { $script:pendingRead = $proc.StandardOutput.ReadLineAsync() }
+            $rt = $script:pendingRead
             while (-not $rt.Wait(200)) { if ([DateTime]::UtcNow -gt $deadline -or $proc.HasExited) { return '' } }
+            $script:pendingRead = $null
             $line = $rt.Result
             if ($null -eq $line) { return '' }
             $obj = $null; try { $obj = $line | ConvertFrom-Json } catch { continue }

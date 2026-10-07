@@ -85,6 +85,13 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     internal int ReferenceSearches => Volatile.Read(ref _referenceSearches);
     private int _referenceSearches;
 
+    /// <summary>SemanticModels the last FindReferences call held alive across its searches (test hook; 0 = none held).</summary>
+    internal int LastPinnedModels { get; private set; }
+
+    /// <summary>Called after each reference search with the solution searched (test hook: lets a test force a GC between
+    /// searches and check what survived).</summary>
+    internal Action<Solution>? AfterSearch { get; set; }
+
     /// <summary>True (semantic) references to any C# symbol named <paramref name="name"/>. <paramref name="include"/>
     /// (optional) keeps only hits it accepts - applied BEFORE the <paramref name="max"/> cut, so a session focus
     /// can't have its in-scope hits crowded out by out-of-scope ones.</summary>
@@ -99,10 +106,24 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         // references collected, so searching it again only repeats the work: with every `override Equals` linked through
         // object.Equals, one search per declaration was quadratic (EF Core's 547 Equals ran 20+ minutes).
         var covered = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-        foreach (var symbol in FindDeclarations(project, name, ct).Concat(PositionalRecordProperties(project, name, ct)))
+        var declarations = FindDeclarations(project, name, ct).Concat(PositionalRecordProperties(project, name, ct)).ToList();
+
+        // Roslyn keeps a document's SemanticModel - and the binding done through it - only weakly, so between two searches
+        // the GC takes it and the next search re-binds every candidate document from scratch. With several searches (Roslyn's
+        // ~100 unrelated GetEnumerator, each re-binding every foreach) the repeat was about half of a 514 s query; held for
+        // the call, later searches reuse the binding (514 s -> 278 s, peak memory unchanged). Held whenever more than one
+        // declaration (source or framework) is found - cheap, as binding stays lazy; a lone declaration has nothing to share.
+        var pinned = declarations.Count > 1
+            ? project.Documents.Select(d => d.GetSemanticModelAsync(ct).GetAwaiter().GetResult()).ToList()
+            : null;
+        LastPinnedModels = pinned?.Count ?? 0;
+
+        foreach (var symbol in declarations)
         {
             if (covered.Contains(symbol)) continue;
-            Interlocked.Increment(ref _referenceSearches);            var referenced = SymbolFinder.FindReferencesAsync(symbol, solution, ct).GetAwaiter().GetResult();
+            Interlocked.Increment(ref _referenceSearches);
+            var referenced = SymbolFinder.FindReferencesAsync(symbol, solution, ct).GetAwaiter().GetResult();
+            AfterSearch?.Invoke(solution);
             foreach (var r in referenced)
             {
                 covered.Add(r.Definition);
@@ -117,6 +138,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                 }
             }
         }
+        GC.KeepAlive(pinned);
         return Canonical(all, max, include);
     }
 

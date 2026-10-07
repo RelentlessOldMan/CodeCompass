@@ -301,6 +301,57 @@ public class RoslynSemanticTests
         Assert.Equal(fewSearches, manySearches);
     }
 
+    // `refs GetEnumerator` on Roslyn took 514 s: ~100 unrelated declarations, each a whole-solution search, and Roslyn holds
+    // a document's SemanticModel (with the binding it has done) only weakly - so between searches the GC took the models
+    // and every search re-bound every candidate document (for GetEnumerator, every foreach). When one call runs several
+    // searches it must keep the models alive across them; a single search has nothing to share and must not pay for it.
+    [Fact]
+    public void FindReferences_SeveralSearches_ShareSemanticModels()
+    {
+        using var repo = new TempRepo();
+        foreach (var type in new[] { "Bag", "Ring" })
+            repo.Write($"{type}.cs", $$"""
+            namespace App;
+            public class {{type}}
+            {
+                public System.Collections.Generic.List<int>.Enumerator GetEnumerator() => new System.Collections.Generic.List<int>().GetEnumerator();
+            }
+            """);
+        repo.Write("Use.cs", """
+        namespace App;
+        public static class Use
+        {
+            public static void Run(Bag b, Ring r)
+            {
+                var e1 = b.GetEnumerator(); // CALL
+                var e2 = r.GetEnumerator(); // CALL
+            }
+            public static int OnceOnlyZq() => 1;
+            public static int Twice() => OnceOnlyZq(); // ONCE
+        }
+        """);
+
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var searches = 0;
+        var survivedEveryGc = true;
+        analyzer.AfterSearch = solution =>
+        {
+            searches++;
+            GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+            survivedEveryGc &= solution.Projects.SelectMany(p => p.Documents).All(d => d.TryGetSemanticModel(out _));
+        };
+        var several = analyzer.FindReferences("GetEnumerator", max: 1000);
+        Assert.Equal(2, several.Count(r => r.LineText.Contains("// CALL")));
+        Assert.True(searches > 1);
+        Assert.True(survivedEveryGc, "a document's SemanticModel was collected between searches - the next search re-binds it");
+        Assert.Equal(3, analyzer.LastPinnedModels); // Bag.cs, Ring.cs, Use.cs
+
+        analyzer.AfterSearch = null;
+        var single = analyzer.FindReferences("OnceOnlyZq");
+        Assert.Single(single, r => r.LineText.Contains("// ONCE"));
+        Assert.Equal(0, analyzer.LastPinnedModels);
+    }
+
     private static (int CallSites, int Searches) EqualsRefs(int classes)
     {
         using var repo = new TempRepo();
