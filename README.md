@@ -467,7 +467,7 @@ The command is fast, never errors out loudly, and publishing is off via `statusL
 ## Performance
 
 Measured on an **Intel Core i7-8700** (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro,
-.NET 8, with the EcoQoS / E-core throttling opt-out in effect. A modern many-core machine builds
+.NET 10, with the EcoQoS / E-core throttling opt-out in effect. A modern many-core machine builds
 substantially faster.
 
 ### Per-tool latency by repo (cold vs. warm)
@@ -489,15 +489,18 @@ median and the max; **refs 1st-call** is the one-time analyzer build paid on the
 
 | Repo | Lang | Files | Size | Build | search_code | find_definition | search_symbols | find_references (med) | find_references (max) | refs 1st-call |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| requests | Python | 118 | 4.9 MB | 1.3 s | 199 / 3 | 202 / 1 | 202 / 1 | 1014 / 6 | 1023 / 12 | 0.7 s |
-| fmt | C++ | 207 | 3.2 MB | 0.8 s | 213 / 3 | 202 / 1 | 202 / 1 | 27830 / 18937 | 32938 / 39873 | 50 s |
-| EF Core | C# | 5,002 | 82 MB | 4.2 s | 208 / 6 | 202 / 1 | 202 / 6 | 14252 / 900 | 18896 / 5644 | 13 s |
-| TypeScript | TS | 72,171 | 349 MB | 18.6 s | 404 / 25 | 229 / 1 | 257 / 13 | 1484 / 96 | 1649 / 109 | 0.8 s |
-| Godot | C++ | 9,937 | 196 MB | 8.7 s | 402 / 7 | 202 / 1 | 202 / 9 | 16452 / 14559 | 22382 / 21090 | 20 s |
-| Roslyn | C# | 19,980 | 372 MB | 12.2 s | 245 / 18 | 202 / 2 | 238 / 32 | 34139 / 1652 | 69523 / 10316 | 31 s |
-| LLVM | C/C++ | 132,213 | 1.5 GB | 41.4 s | 420 / 36 | 406 / 3 | 405 / 3 | 2228 / 700 | 104204 / 96073 | 105 s |
-| generated C/C++ — **local** | C/C++ | 66,337 | 88 GB | 16m 22s | 811 / 4 | 627 / 21 | 605 / 2 | 1826 / 251 | 1888 / 256 | 1.0 s |
-| generated C/C++ — **SMB/UNC** | C/C++ | 66,337 | 88 GB | 20m 38s | 2139 / 9 | 1868 / 13 | 1862 / 2 | 5858 / 344 | 6525 / 402 | 4.1 s |
+| requests | Python | 118 | 4.9 MB | 2.1 s | 218 / 3 | 220 / 1 | 206 / 1 | 868 / 3 | 1445 / 30 | 0.7 s |
+| fmt | C++ | 207 | 3.2 MB | 1.6 s | 205 / 3 | 215 / 1 | 206 / 2 | 1041 / 18 | 1061 / 29 | 0.7 s |
+| EF Core ¹ | C# | 5,002 | 82 MB | 4.2 s | 208 / 6 | 202 / 1 | 202 / 6 | 14252 / 900 | 18896 / 5644 | 13 s |
+| TypeScript | TS | 72,171 | 349 MB | 28.0 s | 425 / 26 | 411 / 2 | 411 / 12 | 1438 / 69 | 1662 / 381 | 0.9 s |
+| Godot | C++ | 9,937 | 196 MB | 10.4 s | 424 / 14 | 410 / 2 | 424 / 26 | 2689 / 181 | 3802 / 827 | 2.1 s |
+| Roslyn ¹ | C# | 19,980 | 372 MB | 12.2 s | 245 / 18 | 202 / 2 | 238 / 32 | 34139 / 1652 | 69523 / 10316 | 31 s |
+| LLVM | C/C++ | 132,213 | 1.5 GB | 61.6 s | 630 / 60 | 616 / 5 | 630 / 13 | 2480 / 41 | 5236 / 249 | 1.3 s |
+| generated C/C++ — **local** | C/C++ | 66,337 | 88 GB | 17m 45s | 864 / 8 | 830 / 15 | 837 / 3 | 5180 / 3253 | 5378 / 3516 | 4.6 s |
+| generated C/C++ — **SMB/UNC** | C/C++ | 66,337 | 88 GB | 25m 2s | 2307 / 10 | 2102 / 11 | 2077 / 3 | 12746 / 6366 | 14348 / 7637 | 10.8 s |
+
+¹ **Re-measure pending:** the EF Core and Roslyn rows are from an earlier version. C# `find_references`
+changed since (names declared many times are searched faster), so these two rows will be re-measured.
 
 The **generated C/C++** corpus is a synthetic stress tree — **66,337 files / ~88 GB**, with single
 source files up to **1.4 GB** — indexed once on local disk and once over an SMB/UNC share, to show
@@ -506,14 +509,16 @@ behaviour at extreme scale and across a network.
 **How to read it:**
 
 - **`search_code` / `find_definition` / `search_symbols`** are index-backed: warm they answer in
-  **~1–36 ms** on every repo (even 132 k files, even over SMB). Cold is dominated by process start +
+  **~1–60 ms** on every repo (even 132 k files, even over SMB). Cold is dominated by process start +
   map-open (~0.2–2 s), which is exactly what the persistent MCP server exists to amortize away.
-- **`find_references` on C#** warms up dramatically — Roslyn's workspace is built once (the 13–31 s
-  *refs 1st-call*), then resident, so subsequent calls drop from tens of seconds cold to
-  **sub-second–few-seconds** warm (EF Core 900 ms, Roslyn 1.7 s).
-- **`find_references` on C/C++** is a name search over the index (see *C/C++ references*), so it costs
-  about what `search_code` does plus reading the matched files to skip comments and strings: around a
-  second, on any repo.
+- **`find_references` on C#** builds Roslyn's workspace once (the *refs 1st-call*), then keeps it
+  resident. Its cost then depends on the name: one with a single declaration answers in about a
+  second warm, while a name declared many times over (`Equals`, `GetEnumerator`) runs one
+  whole-solution search per unrelated declaration and can take tens of seconds — the *max* column.
+- **`find_references` on C/C++** (and Python, TypeScript, …) is a name search over the index (see
+  *C/C++ references*), so it costs about what `search_code` does plus reading the matched files to
+  skip comments and strings: well under a second warm on the public repos. On the generated corpus,
+  whose matched files run to gigabytes, that reading dominates — a few seconds.
 
 **Scale check:** an aggregated **10.4 GB / ~1.1 million file** corpus indexed in **7m48s** (22 MB/s)
 using **792 MB heap / 2.2 GB peak working set**, with queries still ~1 ms (p95 7.9 ms). Memory stays

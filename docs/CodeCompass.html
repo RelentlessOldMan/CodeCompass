@@ -208,7 +208,7 @@ paths-free bundle). Safe to run on someone else's proprietary code.</p>
 </ul>
 
 <h2>Performance</h2>
-<p class="muted">Measured on: <b>Intel Core i7-8700</b> (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro, .NET 8,
+<p class="muted">Measured on: <b>Intel Core i7-8700</b> (6 cores / 12 threads, ~2018), 32 GB RAM, Windows 11 Pro, .NET 10,
 with the EcoQoS / E-core throttling opt-out in effect. A modern many-core machine will be substantially faster to build.</p>
 
 <h3>Per-tool latency by repo (cold vs. warm)</h3>
@@ -226,28 +226,33 @@ analyzer build paid on the session's first <code>find_references</code>.</p>
 <table>
 <thead><tr><th>Repo</th><th>Lang</th><th>Files</th><th>Size</th><th>Build</th><th>search_code</th><th>find_definition</th><th>search_symbols</th><th>find_references (med)</th><th>find_references (max)</th><th>refs 1st-call</th></tr></thead>
 <tbody>
-<tr><td>requests</td><td>Python</td><td class="num">118</td><td class="num">4.9 MB</td><td class="num">1.3 s</td><td class="num">199 / 3</td><td class="num">202 / 1</td><td class="num">202 / 1</td><td class="num">1014 / 6</td><td class="num">1023 / 12</td><td class="num">0.7 s</td></tr>
-<tr><td>fmt</td><td>C++</td><td class="num">207</td><td class="num">3.2 MB</td><td class="num">0.8 s</td><td class="num">213 / 3</td><td class="num">202 / 1</td><td class="num">202 / 1</td><td class="num">27830 / 18937</td><td class="num">32938 / 39873</td><td class="num">50 s</td></tr>
-<tr><td>EF Core</td><td>C#</td><td class="num">5,002</td><td class="num">82 MB</td><td class="num">4.2 s</td><td class="num">208 / 6</td><td class="num">202 / 1</td><td class="num">202 / 6</td><td class="num">14252 / 900</td><td class="num">18896 / 5644</td><td class="num">13 s</td></tr>
-<tr><td>TypeScript</td><td>TS</td><td class="num">72,171</td><td class="num">349 MB</td><td class="num">18.6 s</td><td class="num">404 / 25</td><td class="num">229 / 1</td><td class="num">257 / 13</td><td class="num">1484 / 96</td><td class="num">1649 / 109</td><td class="num">0.8 s</td></tr>
-<tr><td>Godot</td><td>C++</td><td class="num">9,937</td><td class="num">196 MB</td><td class="num">8.7 s</td><td class="num">402 / 7</td><td class="num">202 / 1</td><td class="num">202 / 9</td><td class="num">16452 / 14559</td><td class="num">22382 / 21090</td><td class="num">20 s</td></tr>
-<tr><td>Roslyn</td><td>C#</td><td class="num">19,980</td><td class="num">372 MB</td><td class="num">12.2 s</td><td class="num">245 / 18</td><td class="num">202 / 2</td><td class="num">238 / 32</td><td class="num">34139 / 1652</td><td class="num">69523 / 10316</td><td class="num">31 s</td></tr>
-<tr><td>LLVM</td><td>C/C++</td><td class="num">132,213</td><td class="num">1.5 GB</td><td class="num">41.4 s</td><td class="num">420 / 36</td><td class="num">406 / 3</td><td class="num">405 / 3</td><td class="num">2228 / 700</td><td class="num">104204 / 96073</td><td class="num">105 s</td></tr>
-<tr><td>generated C/C++ &mdash; <b>local</b></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">16m 22s</td><td class="num">811 / 4</td><td class="num">627 / 21</td><td class="num">605 / 2</td><td class="num">1826 / 251</td><td class="num">1888 / 256</td><td class="num">1.0 s</td></tr>
-<tr><td>generated C/C++ &mdash; <b>SMB/UNC</b></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">20m 38s</td><td class="num">2139 / 9</td><td class="num">1868 / 13</td><td class="num">1862 / 2</td><td class="num">5858 / 344</td><td class="num">6525 / 402</td><td class="num">4.1 s</td></tr>
+<tr><td>requests</td><td>Python</td><td class="num">118</td><td class="num">4.9 MB</td><td class="num">2.1 s</td><td class="num">218 / 3</td><td class="num">220 / 1</td><td class="num">206 / 1</td><td class="num">868 / 3</td><td class="num">1445 / 30</td><td class="num">0.7 s</td></tr>
+<tr><td>fmt</td><td>C++</td><td class="num">207</td><td class="num">3.2 MB</td><td class="num">1.6 s</td><td class="num">205 / 3</td><td class="num">215 / 1</td><td class="num">206 / 2</td><td class="num">1041 / 18</td><td class="num">1061 / 29</td><td class="num">0.7 s</td></tr>
+<tr><td>EF Core <sup>1</sup></td><td>C#</td><td class="num">5,002</td><td class="num">82 MB</td><td class="num">4.2 s</td><td class="num">208 / 6</td><td class="num">202 / 1</td><td class="num">202 / 6</td><td class="num">14252 / 900</td><td class="num">18896 / 5644</td><td class="num">13 s</td></tr>
+<tr><td>TypeScript</td><td>TS</td><td class="num">72,171</td><td class="num">349 MB</td><td class="num">28.0 s</td><td class="num">425 / 26</td><td class="num">411 / 2</td><td class="num">411 / 12</td><td class="num">1438 / 69</td><td class="num">1662 / 381</td><td class="num">0.9 s</td></tr>
+<tr><td>Godot</td><td>C++</td><td class="num">9,937</td><td class="num">196 MB</td><td class="num">10.4 s</td><td class="num">424 / 14</td><td class="num">410 / 2</td><td class="num">424 / 26</td><td class="num">2689 / 181</td><td class="num">3802 / 827</td><td class="num">2.1 s</td></tr>
+<tr><td>Roslyn <sup>1</sup></td><td>C#</td><td class="num">19,980</td><td class="num">372 MB</td><td class="num">12.2 s</td><td class="num">245 / 18</td><td class="num">202 / 2</td><td class="num">238 / 32</td><td class="num">34139 / 1652</td><td class="num">69523 / 10316</td><td class="num">31 s</td></tr>
+<tr><td>LLVM</td><td>C/C++</td><td class="num">132,213</td><td class="num">1.5 GB</td><td class="num">61.6 s</td><td class="num">630 / 60</td><td class="num">616 / 5</td><td class="num">630 / 13</td><td class="num">2480 / 41</td><td class="num">5236 / 249</td><td class="num">1.3 s</td></tr>
+<tr><td>generated C/C++ &mdash; <b>local</b></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">17m 45s</td><td class="num">864 / 8</td><td class="num">830 / 15</td><td class="num">837 / 3</td><td class="num">5180 / 3253</td><td class="num">5378 / 3516</td><td class="num">4.6 s</td></tr>
+<tr><td>generated C/C++ &mdash; <b>SMB/UNC</b></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">25m 2s</td><td class="num">2307 / 10</td><td class="num">2102 / 11</td><td class="num">2077 / 3</td><td class="num">12746 / 6366</td><td class="num">14348 / 7637</td><td class="num">10.8 s</td></tr>
 </tbody>
 </table>
+<p class="muted"><sup>1</sup> <b>Re-measure pending:</b> the EF Core and Roslyn rows are from an earlier version. C#
+<code>find_references</code> changed since (names declared many times are searched faster), so these two rows will be re-measured.</p>
 <p>The <b>generated C/C++</b> corpus is a synthetic stress tree &mdash; <b>66,337 files / ~88 GB</b>, single source files up to
 <b>1.4 GB</b> &mdash; indexed once on local disk and once over an SMB/UNC share, to show behaviour at extreme scale and across a network.</p>
 <p><b>How to read it:</b></p>
 <ul>
 <li><code>search_code</code> / <code>find_definition</code> / <code>search_symbols</code> are index-backed: warm they answer in
-<b>~1&ndash;36 ms</b> on every repo (even 132 k files, even over SMB). Cold is dominated by process start + map-open (~0.2&ndash;2 s)
+<b>~1&ndash;60 ms</b> on every repo (even 132 k files, even over SMB). Cold is dominated by process start + map-open (~0.2&ndash;2 s)
 &mdash; exactly what the persistent MCP server amortizes away.</li>
-<li><code>find_references</code> on <b>C#</b> warms up dramatically: Roslyn's workspace is built once (the 13&ndash;31 s
-<i>refs 1st-call</i>), then resident, so calls drop from tens of seconds cold to <b>sub-second&ndash;few-seconds</b> warm.</li>
-<li><code>find_references</code> on <b>C/C++</b> is a name search over the index, so it costs about what <code>search_code</code>
-does plus reading the matched files to skip comments and strings: around a second, on any repo.</li>
+<li><code>find_references</code> on <b>C#</b> builds Roslyn's workspace once (the <i>refs 1st-call</i>), then keeps it resident.
+Its cost then depends on the name: one with a single declaration answers in about a second warm, while a name declared many
+times over (<code>Equals</code>, <code>GetEnumerator</code>) runs one whole-solution search per unrelated declaration and can
+take tens of seconds &mdash; the <i>max</i> column.</li>
+<li><code>find_references</code> on <b>C/C++</b> (and Python, TypeScript, &hellip;) is a name search over the index, so it costs about
+what <code>search_code</code> does plus reading the matched files to skip comments and strings: well under a second warm on the
+public repos. On the generated corpus, whose matched files run to gigabytes, that reading dominates &mdash; a few seconds.</li>
 </ul>
 <p>At ~25 MB/s a first index of a <b>dozens-of-GB</b> repo is on the order of minutes-to-tens-of-minutes (less on a many-core
 machine), and searching it afterward uses only a few hundred MB of RAM &mdash; comfortably within a 16 GB laptop.</p>
@@ -268,15 +273,16 @@ share</b> &mdash; the SMB/UNC row above, broken out per operation (cold CLI; war
 <table>
 <thead><tr><th>Operation</th><th>Over UNC (cold)</th><th style="text-align:left">Why</th></tr></thead>
 <tbody>
-<tr><td>First index</td><td class="num">~20.6 min</td><td style="text-align:left">read-bound over the wire; 3.8&nbsp;GB peak working set, 0 files dropped.</td></tr>
-<tr><td><code>search_code</code></td><td class="num">~2.1 s</td><td style="text-align:left">Trigram candidates + the block/positional sidecar &mdash; reads only candidate blocks, not whole files. (~9 ms warm.)</td></tr>
-<tr><td><code>find_definition</code></td><td class="num">~1.9 s</td><td style="text-align:left">Memory-mapped symbol index. (~13 ms warm.)</td></tr>
-<tr><td><code>search_symbols</code></td><td class="num">~1.9 s</td><td style="text-align:left">Memory-mapped symbol index. (~2 ms warm.)</td></tr>
-<tr><td><code>find_references</code></td><td class="num">~5.9 s</td><td style="text-align:left">Broad symbol &mdash; short-circuited to lexical (~0.3 s warm); see below.</td></tr>
+<tr><td>First index</td><td class="num">~25 min</td><td style="text-align:left">read-bound over the wire.</td></tr>
+<tr><td><code>search_code</code></td><td class="num">~2.3 s</td><td style="text-align:left">Trigram candidates + the block/positional sidecar &mdash; reads only candidate blocks, not whole files. (~10 ms warm.)</td></tr>
+<tr><td><code>find_definition</code></td><td class="num">~2.1 s</td><td style="text-align:left">Memory-mapped symbol index. (~11 ms warm.)</td></tr>
+<tr><td><code>search_symbols</code></td><td class="num">~2.1 s</td><td style="text-align:left">Memory-mapped symbol index. (~3 ms warm.)</td></tr>
+<tr><td><code>find_references</code></td><td class="num">~12.7 s</td><td style="text-align:left">Name search: reads the matched files over the wire to skip comments and strings (~6.4 s warm); see below.</td></tr>
 </tbody>
 </table>
 <p><b>Why <code>find_references</code> takes longer than the others:</b> for C# it builds Roslyn's model of the code
-on first use (then keeps it warm); for C/C++ and other languages it reads each matched file to skip comments and strings.
+on first use (then keeps it warm); for C/C++ and other languages it reads each matched file to skip comments and strings
+&mdash; over a network share, that read crosses the wire.
 The text and symbol lookups only read memory-mapped indexes.</p>
 
 <h2>Logs &amp; troubleshooting</h2>
