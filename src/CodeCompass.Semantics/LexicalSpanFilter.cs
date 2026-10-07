@@ -44,6 +44,11 @@ public sealed class LexicalSpanFilter
     /// <summary>Files this filter had to read itself (test hook): a file whose text was <see cref="Offer"/>ed isn't one.</summary>
     internal int FilesReadFromDisk { get; private set; }
 
+    // Process-wide twins of the counters above (test hook): the MCP tool builds its filter inside the call, out of reach.
+    private static int s_classified, s_readFromDisk;
+    internal static int AllFilesClassified => System.Threading.Volatile.Read(ref s_classified);
+    internal static int AllFilesReadFromDisk => System.Threading.Volatile.Read(ref s_readFromDisk);
+
     /// <summary>Hand over a file's text that the caller already read (the name search reads each candidate whole), so
     /// classifying a hit in it doesn't read the file a second time. Only the latest offer is held; a null text withdraws it.</summary>
     public void Offer(string path, string? text) => _offered = text is null ? null : (path, text);
@@ -89,7 +94,7 @@ public sealed class LexicalSpanFilter
         {
             string text;
             if (_offered is { } o && string.Equals(o.Path, path, StringComparison.Ordinal)) text = o.Text;
-            else { text = File.ReadAllText(path); FilesReadFromDisk++; }
+            else { text = File.ReadAllText(path); FilesReadFromDisk++; System.Threading.Interlocked.Increment(ref s_readFromDisk); }
             spans = SemanticCoverage.IsCSharp(path) ? CSharpSpans(text) : CFamilySpans(text);
             if (_token is not null) _occurrences[path] = Occurrences(text, _token);
         }
@@ -99,6 +104,7 @@ public sealed class LexicalSpanFilter
         }
         if (_offered is { } done && string.Equals(done.Path, path, StringComparison.Ordinal)) _offered = null; // classified: drop it
         _cache[path] = spans;
+        System.Threading.Interlocked.Increment(ref s_classified);
         return spans;
     }
 

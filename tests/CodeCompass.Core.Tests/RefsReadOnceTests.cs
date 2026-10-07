@@ -85,6 +85,31 @@ public class RefsReadOnceTests
     }
 
     [Fact]
+    public void Mcp_FindReferences_ClassifiesFromTheTextItAlreadyRead()
+    {
+        // The MCP tool wires the hand-off itself (CodeCompassTools, not the CLI), and agents use that path.
+        using var repo = CFiles();
+        CodeCompass.Mcp.ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompass.Mcp.CodeCompassTools.Reindex();
+            int classified = LexicalSpanFilter.AllFilesClassified, fromDisk = LexicalSpanFilter.AllFilesReadFromDisk;
+
+            var r = CodeCompass.Mcp.CodeCompassTools.FindReferences("hot_name");
+
+            for (int i = 0; i < 6; i++)
+            {
+                Assert.Contains($"use{i}.c:2:", r);                // the real use...
+                Assert.DoesNotContain($"use{i}.c:1:", r);          // ...not the comment
+                Assert.DoesNotContain($"use{i}.c:3:", r);          // ...nor the string and line comment
+            }
+            Assert.Equal(6, LexicalSpanFilter.AllFilesClassified - classified);
+            Assert.Equal(0, LexicalSpanFilter.AllFilesReadFromDisk - fromDisk);
+        }
+        finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
     public void HandedOffText_IsNotHeldPastItsFile_WhenNothingClassifiesIt()
     {
         // A file the filter never classifies - not a C-family/C# file, or every hit rejected before the comment check
