@@ -188,6 +188,9 @@ $cliVerRaw = (& $cliExe version)
 if ($LASTEXITCODE -ne 0) { throw "could not run $cliExe to confirm the version" }
 $cliVer = ($cliVerRaw -replace '^CodeCompass\s+', '') -replace '\+.*$', ''
 if ($cliVer -ne $version) { throw "version mismatch: manifest '$version' vs binary '$cliVer' - build is inconsistent, aborting." }
+# The Codex manifest is stamped separately; a Codex install of a mislabeled zip reports the wrong version (field report).
+$codexVersion = (Get-Content (Join-Path $root "plugin/plugin.json") -Raw | ConvertFrom-Json).version
+if ($codexVersion -ne $version) { throw "version mismatch: Codex manifest '$codexVersion' vs Claude manifest '$version' - aborting." }
 
 # 3) Drop a top-level INSTALL.txt into the plugin folder so it's the first thing a zip installer sees.
 #    (gitignored; regenerated each release.) It states the layout that trips people up: the unzipped
@@ -262,7 +265,11 @@ if (-not $Publish) {
 # Validate the artifact BEFORE anyone can install it: it must contain the plugin manifest and both exes,
 # or `/plugin install` fails on the user's machine. Cheap insurance against a silently malformed zip.
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$must = @(".claude-plugin/plugin.json", "bin/CodeCompass.Cli.exe", "bin/CodeCompass.Mcp.exe", "install-codecompass.ps1")
+# Claude Code AND Codex: each host needs its own manifest, MCP config and marketplace (a zip missing the Codex half
+# installs into Claude Code and silently not into Codex), plus the hooks and the Codex steering skill.
+$must = @(".claude-plugin/plugin.json", ".claude-plugin/marketplace.json", ".mcp.json", "hooks/hooks.json",
+          "plugin.json", "mcp.json", ".agents/plugins/marketplace.json", "skills/codecompass/SKILL.md",
+          "bin/CodeCompass.Cli.exe", "bin/CodeCompass.Mcp.exe", "install-codecompass.ps1")
 $zf = [System.IO.Compression.ZipFile]::OpenRead($zip)
 try {
     $entries = $zf.Entries.FullName -replace '\\', '/'
