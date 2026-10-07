@@ -12,6 +12,25 @@ public class SymbolExtractionTests
         return extractor.Extract(relPath, text).Select(s => (s.Name, s.Kind)).ToArray();
     }
 
+    // Design decision from the generated-header field rounds: a firmware header is mostly #defines (register maps run to
+    // hundreds of thousands), and minting each as a symbol bloated the symbol index and buried real definitions. #define
+    // names are found by text search, not as symbols; functions in the same header still are. A silent change to the C
+    // query would bring the bloat back, so it's pinned here.
+    [Theory]
+    [InlineData("regs.c")]     // C grammar
+    [InlineData("regs.h")]     // headers parse with the C++ grammar - a separate query, pinned separately
+    [InlineData("regs.cpp")]
+    public void C_Defines_AreNotSymbols_FunctionsBesideThemAre(string file)
+    {
+        const string src = "#define REG_STATUS 0x40001000\n#define MAX_OF(a, b) ((a) > (b) ? (a) : (b))\n" +
+                           "int real_fn(int x);\nint real_fn(int x) { return MAX_OF(x, REG_STATUS); }\n";
+        var names = Extract(file, src).Select(s => s.Item1).ToArray();
+
+        Assert.Contains("real_fn", names);
+        Assert.DoesNotContain("REG_STATUS", names);
+        Assert.DoesNotContain("MAX_OF", names);
+    }
+
     [Fact]
     public void CSharp_Definitions()
     {
