@@ -224,6 +224,12 @@ public class McpToolsTests
             var full = CodeCompassTools.SearchCode("FOObar", maxResults: 50);
             Assert.DoesNotContain("MORE EXIST", full); // all 10 fit -> exact count, no truncation
             Assert.Contains("(10 matches)", full);
+
+            // The boundary the field review flagged: a cap EXACTLY equal to the count is complete, not truncated.
+            var exact = CodeCompassTools.SearchCode("FOObar", maxResults: 10);
+            Assert.Equal(10, System.Text.RegularExpressions.Regex.Matches(exact, "regs.cs:").Count);
+            Assert.DoesNotContain("MORE EXIST", exact);
+            Assert.Contains("(10 matches)", exact);
         }
         finally { ServerContext.Init(repo.Root); } // reset shared static state
     }
@@ -723,6 +729,13 @@ public class McpToolsTests
             var full = CodeCompassTools.FindReferences("handler", maxResults: 50);
             Assert.DoesNotContain("MORE EXIST", full);
             Assert.DoesNotContain("MAY EXIST", full);
+
+            // Cap EXACTLY the true count - the reported off-by-one: a `>= maxResults` threshold claimed more existed when
+            // the count landed on the limit. All six are shown and nothing is claimed beyond them.
+            var exact = CodeCompassTools.FindReferences("handler", maxResults: 6);
+            Assert.Equal(6, System.Text.RegularExpressions.Regex.Matches(exact, "\\.py:").Count);
+            Assert.DoesNotContain("MORE EXIST", exact);
+            Assert.DoesNotContain("MAY EXIST", exact);
         }
         finally { ServerContext.Init(repo.Root); }
     }
