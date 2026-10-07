@@ -41,6 +41,29 @@ public class LinkManagerTests
         Assert.Equal(LinkManager.RemoveStatus.NotLinked, LinkManager.Remove(project.Root, lib.Root, _ => true).Status);
     }
 
+    // Field reports: linking a root that already has an index must REUSE it - re-indexing a 90 GB linked tree on every link
+    // was the reported cost (the round trip above accepts either outcome, so a silent re-index would pass it). And
+    // `link list` must say how current that index is: "as of <now>; built by <version> at <time>".
+    [Fact]
+    public void Add_AlreadyIndexedRoot_ReusesIt_AndListSaysWhatBuiltIt()
+    {
+        using var project = new TempRepo();
+        using var lib = new TempRepo();
+        lib.Write("lib.c", "int lib_fn(int x){ return x; }\n");
+        var (t, s, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(lib.Root); t.Dispose(); s.Dispose();
+        IndexMetaFile.Write(lib.Root, 1);
+        try
+        {
+            var add = LinkManager.Add(project.Root, lib.Root);
+            Assert.Equal(LinkManager.AddStatus.ReusedIndex, add.Status);
+
+            var item = Assert.Single(LinkManager.List(project.Root));
+            Assert.Contains("as of ", item.Status);
+            Assert.Contains("built by " + CodeCompass.Core.Diagnostics.BuildInfo.Version, item.Status);
+        }
+        finally { LinkManager.Remove(project.Root, lib.Root, _ => true); }
+    }
+
     [Fact]
     public void Add_NestedOrSelf_Rejected()
     {

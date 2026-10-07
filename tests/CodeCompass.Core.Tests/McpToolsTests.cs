@@ -234,6 +234,32 @@ public class McpToolsTests
         finally { ServerContext.Init(repo.Root); } // reset shared static state
     }
 
+    // QSPR field report: a JIRA CSV row was counted as a reference, so find_references now reads code files only. That
+    // exclusion must not leak into search_code - literal search is exactly how you find a name in a CSV, JSON or log.
+    [Fact]
+    public void SearchCode_StillFindsDataFiles_ThatFindReferencesSkips()
+    {
+        using var repo = new TempRepo();
+        repo.Write("src/app.c", "int main(void){ return reset_vector_zq(); }\n");
+        repo.Write("docs/issues.csv", "id,summary\nPROJ-1,reset_vector_zq crashes on boot\n");
+        repo.Write("cfg/map.json", "{ \"entry\": \"reset_vector_zq\" }\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            var search = CodeCompassTools.SearchCode("reset_vector_zq");
+            Assert.Contains("docs/issues.csv", search);
+            Assert.Contains("cfg/map.json", search);
+            Assert.Contains("src/app.c", search);
+
+            var refs = CodeCompassTools.FindReferences("reset_vector_zq");
+            Assert.Contains("src/app.c", refs);
+            Assert.DoesNotContain("issues.csv", refs);
+            Assert.DoesNotContain("map.json", refs);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
     [Fact]
     public void SearchCode_CaseInsensitive_FindsAllCases_ButCaseSensitiveDoesNot()
     {

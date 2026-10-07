@@ -9,6 +9,66 @@ namespace CodeCompass.Core.Tests;
 
 public class DiagnosticsTests
 {
+    // Field report: repeat broad queries over a share weren't getting faster because the block-index (sidecar) set was
+    // bigger than the in-process cache - invisible until doctor started comparing the two. It must say whether the set
+    // fits, and when it doesn't, name the setting and the size that would.
+    [Fact]
+    public void Report_SidecarCacheLine_SaysFitsOrExceeds_WithTheSettingToRaise()
+    {
+        using var repo = new TempRepo();
+        var big = new System.Text.StringBuilder();
+        while (big.Length < (int)LargeFileIndexer.SidecarThresholdBytes + (1 << 20)) big.Append("int filler_line_for_blocks = 1;\n");
+        repo.Write("gen/big.c", big.ToString());
+        var (t, s, _) = RepositoryIndexer.Build(repo.Root); t.Dispose(); s.Dispose();
+        IndexMetaFile.Write(repo.Root, 1);
+
+        string Report() { var sw = new StringWriter(); RepoDiagnostics.WriteReport(sw, repo.Root); return sw.ToString(); }
+        try
+        {
+            SidecarCache.ResetForTest(1L << 30);
+            var fits = Report().Split('\n').Single(l => l.StartsWith("sidecar cache:"));
+            Assert.Contains("1 file(s)", fits);
+            Assert.Contains("fits", fits);
+
+            SidecarCache.ResetForTest(1);
+            var over = Report().Split('\n').Single(l => l.StartsWith("sidecar cache:"));
+            Assert.Contains("EXCEEDS budget", over);
+            Assert.Matches(@"CODECOMPASS_SIDECAR_CACHE_MB >= [1-9]\d*", over);
+        }
+        finally { SidecarCache.ResetForTest(256L * 1024 * 1024); }
+    }
+
+    // Field reports (UNC rounds): "why did this query read N GB?" was answered with CODECOMPASS_SEARCH_TRACE - per-candidate
+    // bytes split into block reads, whole-file reads and sidecar overhead. It's the tool the field uses to localize I/O,
+    // so its output must keep working: a candidate total, the breakdown, and each file marked sidecar yes/no.
+    [Fact]
+    public void Cli_SearchTrace_BreaksDownWhereTheBytesWent()
+    {
+        using var repo = new TempRepo();
+        var big = new System.Text.StringBuilder();
+        while (big.Length < (int)LargeFileIndexer.SidecarThresholdBytes + (1 << 20)) big.Append("int filler_line = 1;\n");
+        big.Append("int traced_token_zq = 2;\n");
+        repo.Write("gen/big.c", big.ToString());
+        repo.Write("src/small.c", "int x = traced_token_zq;\n");
+        var cli = TestCli.Find();
+        Assert.Equal(0, TestCli.Run(cli, "index", repo.Root).Exit);
+
+        var prior = System.Environment.GetEnvironmentVariable("CODECOMPASS_SEARCH_TRACE");
+        System.Environment.SetEnvironmentVariable("CODECOMPASS_SEARCH_TRACE", "1");
+        try
+        {
+            var (exit, stdout, stderr) = TestCli.Run(cli, "search", repo.Root, "traced_token_zq");
+            Assert.Equal(0, exit);
+            Assert.Contains("gen/big.c", stdout);
+            Assert.Contains("src/small.c", stdout);
+            Assert.Contains("-- search trace: 2 candidate(s)", stderr);
+            Assert.Contains("breakdown:", stderr);
+            Assert.Contains("sidecar=yes", stderr);
+            Assert.Contains("sidecar=no", stderr);
+        }
+        finally { System.Environment.SetEnvironmentVariable("CODECOMPASS_SEARCH_TRACE", prior); }
+    }
+
     [Fact]
     public void Report_And_HealthChecks_Reflect_A_Built_Index()
     {
