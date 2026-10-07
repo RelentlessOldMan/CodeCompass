@@ -113,6 +113,26 @@ public class CppNameRefsTests
         Assert.DoesNotContain("reached its budget", all);
     }
 
+    // Qualifiers on the answer go to STDOUT with the hits (field report: on stderr, `refs ... > out.txt` silently dropped
+    // the C/C++ coverage note). A file past the per-file cap must also say so there - a cut-off list must never read as
+    // complete. Checked on the two streams separately; the other CLI tests merge them.
+    [Fact]
+    public void Cli_Refs_Notes_AreOnStdout()
+    {
+        var cli = TestCli.Find();
+        using var repo = new TempRepo();
+        int uses = ReferenceMerge.MaxLexicalHitsPerFile + 6;
+        repo.Write("busy.c", string.Concat(Enumerable.Range(0, uses).Select(i => $"int f{i}(void) {{ return tick_zq(); }}\n")));
+
+        Assert.Equal(0, TestCli.Run(cli, "index", repo.Root).Exit);
+        var (exit, stdout, _) = TestCli.Run(cli, "refs", repo.Root, "tick_zq");
+
+        Assert.Equal(0, exit);
+        Assert.Contains("matched by NAME", stdout);
+        Assert.Contains("reached its budget", stdout);
+        Assert.Equal(ReferenceMerge.MaxLexicalHitsPerFile, Lines(stdout).Count(l => l.StartsWith("busy.c:")));
+    }
+
     // Build logs and disassembly are not code: they never appear, and never use up the result budget.
     [Fact]
     public void Cli_Refs_NonCodeFiles_Excluded()

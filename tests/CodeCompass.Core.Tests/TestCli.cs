@@ -47,6 +47,18 @@ internal static class TestCli
         return SHA256.HashData(sa).AsSpan().SequenceEqual(SHA256.HashData(sb));
     }
 
+    /// <summary>Run the CLI to completion and return its exit code and its two streams SEPARATELY - qualifiers on an answer
+    /// belong on stdout (a redirected answer must keep them), and a test can only check that if it doesn't merge them.</summary>
+    public static (int Exit, string Stdout, string Stderr) Run(string exe, params string[] args)
+    {
+        using var p = Start(exe, args);
+        var o = p.StandardOutput.ReadToEndAsync();
+        var e = p.StandardError.ReadToEndAsync();
+        if (!p.WaitForExit(120_000)) { try { p.Kill(entireProcessTree: true); } catch { } throw new TimeoutException("CLI did not exit"); }
+        p.WaitForExit();
+        return (p.ExitCode, o.GetAwaiter().GetResult(), e.GetAwaiter().GetResult());
+    }
+
     /// <summary>Start the CLI with the given arguments, stdout/stderr redirected. Caller owns the process.</summary>
     public static Process Start(string exe, params string[] args)
     {

@@ -60,8 +60,9 @@ public class CSharpConditionalRefsTests
         Assert.Equal(0, RunCli(cli, "refs", repo.Root, out var stdout, out var stderr, "Ping"));
         var all = stdout + "\n" + stderr;
 
-        Assert.Contains("caller.cs", all);                         // the #if-guarded use is recovered
-        Assert.Contains("C# coverage INCOMPLETE", all);            // ...and the incompleteness is disclosed
+        Assert.Contains("caller.cs", stdout);                      // the #if-guarded use is recovered
+        Assert.Contains("C# coverage INCOMPLETE", stdout);         // ...and disclosed WITH the answer (stdout), so
+                                                                   // `refs ... > out.txt` keeps it (field report)
         var m = System.Text.RegularExpressions.Regex.Match(all, @"(\d+)\s+name-matched reference");
         Assert.True(m.Success && int.Parse(m.Groups[1].Value) > 0, $"expected a lexical backfill for the guarded ref:\n{all}");
     }

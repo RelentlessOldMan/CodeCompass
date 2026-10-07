@@ -934,23 +934,25 @@ static int CmdWatch(string[] args)
 }
 
 // CLI queries operate on a SINGLE root; only the MCP server federates a project's linked roots. If this
-// project has links, say so on stderr so a CLI "0 results" isn't mistaken for "not found anywhere" - that
-// linked-root false-negative is the first thing that looks like a federation bug but isn't.
+// project has links, say so so a CLI "0 results" isn't mistaken for "not found anywhere" - that linked-root
+// false-negative is the first thing that looks like a federation bug but isn't. On STDOUT, like every qualifier
+// on an answer, so a redirected answer (`> out.txt`) keeps it.
 static void NoteLinkedRootsNotSearched(string root)
 {
     int n = LinkStore.Read(root).Count;
     if (n > 0)
-        Console.Error.WriteLine($"note: {n} linked root(s) are NOT searched by CLI queries (project-root only); " +
-                                "use the CodeCompass MCP tools for federated search across linked roots.");
+        Console.Out.WriteLine($"note: {n} linked root(s) are NOT searched by CLI queries (project-root only); " +
+                              "use the CodeCompass MCP tools for federated search across linked roots.");
 }
 
 // Actionable staleness, disclosed at QUERY time (not only via doctor): the loaded index's OUTPUT logic is behind
 // this binary, so a rebuild would change results. This is exactly what a benchmarker running an old-built index
-// under a new binary needs to see. Content-version keyed, so a mere product-version difference stays silent.
+// under a new binary needs to see. Content-version keyed, so a mere product-version difference stays silent. On
+// STDOUT with the answer (field report: on stderr, a redirected answer silently lost it).
 static void WarnIfIndexerBehind(string root)
 {
     var note = IndexMetaFile.BehindNote(IndexMetaFile.Read(root), root);
-    if (note.Length > 0) Console.Error.WriteLine("-- NOTE: " + note);
+    if (note.Length > 0) Console.Out.WriteLine("-- NOTE: " + note);
 }
 
 static int CmdSearch(string[] args)

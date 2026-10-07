@@ -33,9 +33,10 @@ public class IndexStalenessTests
         Assert.Equal("", IndexMetaFile.BehindNote(null, "C:\\repo"));
     }
 
-    // End-to-end: a query over an index whose meta says it was built by an older indexer must DISCLOSE it on
-    // stderr. Builds the index, then rewrites meta.json's content version to a stale value (the public Write API
-    // always stamps the current one, so we edit the record directly) and runs `def`. Skips softly without the CLI.
+    // End-to-end: a query over an index whose meta says it was built by an older indexer must DISCLOSE it - on
+    // STDOUT, with the answer, so a `def ... > out.txt` keeps it (the co-worker's v2/v3 finding: on stderr, a redirected
+    // answer lost the warning). Builds the index, then rewrites meta.json's content version to a stale value (the public
+    // Write API always stamps the current one, so we edit the record directly) and runs `def`.
     [Fact]
     public void Cli_Query_StaleIndex_DisclosesRebuildNeeded()
     {
@@ -51,10 +52,34 @@ public class IndexStalenessTests
         var meta = JsonSerializer.Deserialize<IndexMeta>(File.ReadAllText(metaPath))!;
         File.WriteAllText(metaPath, JsonSerializer.Serialize(meta with { ContentVersion = 0 }));
 
-        Assert.Equal(0, RunCli(cli, "def", repo.Root, out var stdout, out var stderr, "C"));
-        var all = stdout + "\n" + stderr;
-        Assert.Contains("older indexer", all);                      // staleness disclosed at query time
-        Assert.Contains("codecompass index", all);
+        Assert.Equal(0, RunCli(cli, "def", repo.Root, out var stdout, out _, "C"));
+        Assert.Contains("older indexer", stdout);                   // staleness disclosed at query time, with the answer
+        Assert.Contains("codecompass index", stdout);
+    }
+
+    // CLI queries search the project root only; the MCP server federates linked roots. A CLI zero must say the linked
+    // roots weren't searched (field report: a confident empty answer read as "not found anywhere") - on STDOUT, so a
+    // redirected answer keeps it.
+    [Fact]
+    public void Cli_Query_WithLinkedRoots_SaysTheyWereNotSearched()
+    {
+        var cli = TestCli.Find();
+
+        using var project = new TempRepo();
+        project.Write("app.c", "int app(void){ return 0; }\n");
+        using var lib = new TempRepo();
+        lib.Write("lib.c", "int only_in_lib_zq(void){ return 1; }\n");
+        Assert.Equal(0, RunCli(cli, "index", project.Root, out _, out _));
+        LinkStore.Add(project.Root, lib.Root);
+        try
+        {
+            foreach (var cmd in new[] { "search", "def", "symbols", "refs" })
+            {
+                RunCli(cli, cmd, project.Root, out var stdout, out _, "only_in_lib_zq");
+                Assert.Contains("1 linked root(s) are NOT searched", stdout);
+            }
+        }
+        finally { LinkStore.Remove(project.Root, lib.Root); }
     }
 
     [Fact]
