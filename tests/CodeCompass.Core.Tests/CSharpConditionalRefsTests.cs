@@ -222,6 +222,85 @@ public class CSharpConditionalRefsTests
         Assert.DoesNotContain("public KernelZq()", all);
     }
 
+    // MCP twins of the CLI tests above. The MCP tools merge semantic and name results with their OWN code
+    // (CodeCompassTools), so the CLI tests don't protect them - and the MCP surface is what agents use.
+    private static string Mcp(TempRepo repo, Func<string> query)
+    {
+        CodeCompass.Mcp.ServerContext.Init(repo.Root);
+        try { CodeCompass.Mcp.CodeCompassTools.Reindex(); return query(); }
+        finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
+    }
+
+    [Fact]
+    public void Mcp_FindReferences_DocCommentHit_NotReturned_EvenWhenIncomplete()
+    {
+        using var repo = new TempRepo();
+        repo.Write("kernel.cs", "namespace N { public class KernelMgrXyz { } }\n");
+        repo.Write("caller.cs",
+            "namespace N {\n public class User {\n  /// Sends work to <see cref=\"KernelMgrXyz\"/>.\n  public void B() { }\n" +
+            "#if DEBUG\n  public object A() { return new KernelMgrXyz(); }\n#endif\n }\n}\n");
+
+        var r = Mcp(repo, () => CodeCompass.Mcp.CodeCompassTools.FindReferences("KernelMgrXyz"));
+        Assert.Contains("C# coverage INCOMPLETE", r);
+        Assert.Contains("return new KernelMgrXyz()", r);
+        Assert.DoesNotContain("see cref", r);
+    }
+
+    [Fact]
+    public void Mcp_FindReferences_IfDisclosure_NamesTheConditionalFile()
+    {
+        using var repo = new TempRepo();
+        repo.Write("widget.cs", "namespace N { public class WidgetZzz { public static int Use() => new WidgetZzz().GetHashCode(); } }\n");
+        repo.Write("guarded.cs", "namespace N { public class GuardConsumer {\n#if DEBUG\n  WidgetZzz w;\n#endif\n } }\n");
+
+        var r = Mcp(repo, () => CodeCompass.Mcp.CodeCompassTools.FindReferences("WidgetZzz"));
+        var at = r.IndexOf("C# coverage INCOMPLETE", StringComparison.Ordinal);
+        Assert.True(at >= 0, r);
+        var end = r.IndexOf("hides inactive-branch", at, StringComparison.Ordinal);
+        Assert.True(end > at, r);
+        Assert.Contains("guarded.cs", r[at..end]);                          // the disclosure itself names the #if file
+    }
+
+    [Fact]
+    public void Mcp_FindReferences_CleanCSharp_NoDisclosure()
+    {
+        using var repo = new TempRepo();
+        repo.Write("m.cs", "namespace N { public static class H2 {\n public static int Pong() => 1;\n public static int Use() => Pong();\n } }\n");
+
+        var r = Mcp(repo, () => CodeCompass.Mcp.CodeCompassTools.FindReferences("Pong"));
+        Assert.Contains("m.cs:3:", r);
+        Assert.DoesNotContain("C# coverage INCOMPLETE", r);
+    }
+
+    [Fact]
+    public void Mcp_FindCallees_IfGuardedCall_RecoveredByName_AndDisclosed()
+    {
+        using var repo = new TempRepo();
+        repo.Write("lib.cs", "namespace N { public static class Lib { public static int Helper() => 1; } }\n");
+        repo.Write("caller.cs",
+            "namespace N {\n public static class C {\n  public static int Entry() {\n#if DEBUG\n" +
+            "    return Lib.Helper();\n#endif\n    return 0;\n  }\n }\n}\n");
+
+        var r = Mcp(repo, () => CodeCompass.Mcp.CodeCompassTools.FindCallees("Entry"));
+        Assert.Contains("C# coverage INCOMPLETE", r);
+        Assert.Contains("caller.cs", r);
+        Assert.Contains("resolved by NAME", r);
+        Assert.Contains("lib.cs", r);
+        Assert.Contains("Helper", r);
+    }
+
+    [Fact]
+    public void Mcp_FindCallees_CleanMethod_NoRecoverySection_NoDisclosure()
+    {
+        using var repo = new TempRepo();
+        repo.Write("m.cs", "namespace N { public static class H3 {\n public static int Leaf() => 1;\n public static int Top() => Leaf();\n } }\n");
+
+        var r = Mcp(repo, () => CodeCompass.Mcp.CodeCompassTools.FindCallees("Top"));
+        Assert.Contains("Leaf", r);
+        Assert.DoesNotContain("C# coverage INCOMPLETE", r);
+        Assert.DoesNotContain("resolved by NAME", r);
+    }
+
     [Fact]
     public void Mcp_FindReferences_Backfill_DoesNotCountDeclarations()
     {
