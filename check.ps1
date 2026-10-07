@@ -15,7 +15,7 @@
                    still indexes (pre-scan skipped) and the positional search still finds the marker.
                  * the nested-template "pathological" files index without hanging at the default cap.
                  * a broad C/C++ find_references (CodeSpawner broad-token, ~1 GB) is right against the
-                   manifest, peaks under 768 MB, and stays under 6x the index time of the same corpus.
+                   manifest, peaks under 768 MB, and stays under 2x the index time of the same corpus.
                  * a 10-edit CodeSpawner churn through `update` matches the composed ground truth.
     -Fetch     + real-repo bench  - fetch-corpus + `bench verify` (needs network; large).
 
@@ -252,7 +252,8 @@ if ($Big -and (Test-Path $cli)) {
     # for it. Checks the answer against the manifest's ground truth, the process's peak memory, and its time
     # against indexing the same bytes on the same machine (a ratio, so the gate holds on any runner; a field build
     # once made refs 2.5x slower with every other check passing). Measured 2026-10-07 on 12 threads: index 5.7 s
-    # 608 MB, refs 14 s 250 MB (refs runs the comment/string filter over every hit file, one at a time).
+    # 608 MB; refs 14 s 250 MB before the read-once fix, 4.6-6.3 s 350 MB after (0.8-1.1x). The 2x limit fails if
+    # the filter goes back to re-reading each hit file (2.5-2.8x).
     Section "broad C/C++ find_references: right answer, bounded memory, no latency regression"
     $spawner = Join-Path $root "tools/codespawner/codespawner.exe"
     $broad = Join-Path $root ".corpus/_broadcheck"
@@ -276,7 +277,7 @@ if ($Big -and (Test-Path $cli)) {
     $peakMb = [math]::Round($bRefs.PeakBytes / 1MB)
     Check "refs peak memory ${peakMb} MB stays under 768 MB" ($bRefs.PeakBytes -gt 0 -and $bRefs.PeakBytes -lt 768MB)
     $ratio = [math]::Round($bRefs.Ms / [math]::Max(1, $bIdx.Ms), 2)
-    Check "refs time $($bRefs.Ms) ms is under 6x the index time $($bIdx.Ms) ms (now $ratio x)" ($ratio -le 6)
+    Check "refs time $($bRefs.Ms) ms is under 2x the index time $($bIdx.Ms) ms (now $ratio x)" ($ratio -le 2)
 
     # Long churn through `codecompass update` against CodeSpawner's composed ground truth (removes, line shifts,
     # adds, and grow/shrink across the sidecar cutoff so sidecars are created and orphan-cleaned). 10 edits cycle

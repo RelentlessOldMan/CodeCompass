@@ -41,6 +41,18 @@ public sealed class LexicalSpanFilter
     /// <summary>Files read and classified so far (test hook: each one is a whole-file read plus a lex).</summary>
     internal int FilesClassified => _cache.Count;
 
+    /// <summary>Files this filter had to read itself (test hook): a file whose text was <see cref="Offer"/>ed isn't one.</summary>
+    internal int FilesReadFromDisk { get; private set; }
+
+    /// <summary>Hand over a file's text that the caller already read (the name search reads each candidate whole), so
+    /// classifying a hit in it doesn't read the file a second time. Only the latest offer is held; a null text withdraws it.</summary>
+    public void Offer(string path, string? text) => _offered = text is null ? null : (path, text);
+
+    private (string Path, string Text)? _offered;
+
+    /// <summary>Whether an offered text is still held (test hook).</summary>
+    internal bool HoldsOfferedText => _offered is not null;
+
     /// <summary>True if the match at (1-based line, 1-based column) in <paramref name="path"/> falls inside a
     /// comment or string/char literal - i.e. it is NOT a real code reference and the lexical backfill should skip
     /// it. Non-covered languages (no semantic promise about comments) and any file we can't classify return
@@ -75,7 +87,9 @@ public sealed class LexicalSpanFilter
         (int, int, int, int)[] spans;
         try
         {
-            string text = File.ReadAllText(path);
+            string text;
+            if (_offered is { } o && string.Equals(o.Path, path, StringComparison.Ordinal)) text = o.Text;
+            else { text = File.ReadAllText(path); FilesReadFromDisk++; }
             spans = SemanticCoverage.IsCSharp(path) ? CSharpSpans(text) : CFamilySpans(text);
             if (_token is not null) _occurrences[path] = Occurrences(text, _token);
         }
@@ -83,6 +97,7 @@ public sealed class LexicalSpanFilter
         {
             spans = System.Array.Empty<(int, int, int, int)>();   // unreadable/unparsable -> suppress nothing
         }
+        if (_offered is { } done && string.Equals(done.Path, path, StringComparison.Ordinal)) _offered = null; // classified: drop it
         _cache[path] = spans;
         return spans;
     }
@@ -93,7 +108,9 @@ public sealed class LexicalSpanFilter
         int line = 0, lineStart = 0, scanned = 0, idx;
         while ((idx = text.IndexOf(token, scanned, StringComparison.Ordinal)) >= 0)
         {
-            for (int k = scanned; k < idx; k++) if (text[k] == '\n') { line++; lineStart = k + 1; }
+            var seg = text.AsSpan(scanned, idx - scanned);
+            int lf = seg.LastIndexOf('\n');
+            if (lf >= 0) { line += seg.Count('\n'); lineStart = scanned + lf + 1; }
             set.Add((line, idx - lineStart));
             scanned = idx + 1;
         }
@@ -155,7 +172,7 @@ public sealed class LexicalSpanFilter
     // into a region that might hold a real reference. A string/char literal that hits end-of-line without closing
     // is treated as ending there (an unterminated literal is almost always a mis-scan; stopping keeps later code
     // on that line eligible).
-    private static (int, int, int, int)[] CFamilySpans(string text)
+    internal static (int, int, int, int)[] CFamilySpans(string text)
     {
         var list = new List<(int, int, int, int)>();
         int n = text.Length, i = 0, line = 0, col = 0;
@@ -169,7 +186,9 @@ public sealed class LexicalSpanFilter
             {
                 int sl = line, sc = col;
                 // Ends at LF or CR: a CR-only (classic Mac) file has no LF at all, and the comment must not swallow it.
-                while (i < n && text[i] != '\n' && text[i] != '\r') { i++; col++; }
+                int eol = text.AsSpan(i).IndexOfAny('\n', '\r');
+                int stop = eol < 0 ? n : i + eol;
+                col += stop - i; i = stop;
                 list.Add((sl, sc, line, col));
                 continue;
             }
@@ -177,11 +196,10 @@ public sealed class LexicalSpanFilter
             {
                 int sl = line, sc = col;
                 i += 2; col += 2;
-                while (i < n && !(text[i] == '*' && i + 1 < n && text[i + 1] == '/'))
-                {
-                    if (text[i] == '\n') { line++; col = 0; } else col++;
-                    i++;
-                }
+                int close = text.AsSpan(i).IndexOf("*/".AsSpan());
+                int end = close < 0 ? n : i + close;
+                Advance(text, i, end, ref line, ref col);
+                i = end;
                 if (i < n) { i += 2; col += 2; }   // consume the closing */
                 list.Add((sl, sc, line, col));
                 continue;
@@ -232,16 +250,32 @@ public sealed class LexicalSpanFilter
                 continue;
             }
             if (c == '\n') { line++; col = 0; i++; continue; }
-            i++; col++;
+            // Plain code: nothing can open a comment or literal, or end the line, before the next / " ' or newline - jump
+            // there (a vectorized search) instead of stepping one char at a time. No newline in between, so only col moves.
+            int next = text.AsSpan(i + 1).IndexOfAny(CodeStops);
+            int to = next < 0 ? n : i + 1 + next;
+            col += to - i; i = to;
         }
         return list.ToArray();   // produced left-to-right, so already sorted
+    }
+
+    private static readonly System.Buffers.SearchValues<char> CodeStops = System.Buffers.SearchValues.Create("/\"'\n");
+
+    // Move (line, col) over text[from..to) exactly as stepping one char at a time does: a newline starts col over at 0.
+    private static void Advance(string text, int from, int to, ref int line, ref int col)
+    {
+        var seg = text.AsSpan(from, to - from);
+        int lf = seg.LastIndexOf('\n');
+        if (lf < 0) { col += seg.Length; return; }
+        line += seg.Count('\n');
+        col = seg.Length - lf - 1;
     }
 
     // A '"' is a raw-string opener only when the preceding 'R' is a standalone string prefix - i.e. the chars
     // immediately before R form a valid (possibly empty) encoding prefix (u8/u/U/L), NOT the tail of an ordinary
     // identifier. Without this guard, FOOR"..." is misread as a raw string whose fake delimiter never closes and
     // swallows real code to EOL - dropping a reference. Fail closed to "not raw" on anything unexpected.
-    private static bool IsRawStringOpen(string text, int quote)
+    internal static bool IsRawStringOpen(string text, int quote)
     {
         int p = quote - 1;
         if (p < 0 || text[p] != 'R') return false;
@@ -251,10 +285,10 @@ public sealed class LexicalSpanFilter
         return prefix.Length == 0 || prefix == "u8" || prefix == "u" || prefix == "U" || prefix == "L";
     }
 
-    private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+    internal static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 
     // Is the identifier run immediately before the quote at `quote` exactly a character-literal encoding prefix?
-    private static bool HasEncodingPrefix(string text, int quote)
+    internal static bool HasEncodingPrefix(string text, int quote)
     {
         int q = quote - 1;
         while (q >= 0 && IsIdentifierChar(text[q])) q--;
@@ -262,7 +296,7 @@ public sealed class LexicalSpanFilter
         return prefix is "L" or "u" or "U" or "u8";
     }
 
-    private static void ScanRawString(string text, List<(int, int, int, int)> list, ref int i, ref int line, ref int col)
+    internal static void ScanRawString(string text, List<(int, int, int, int)> list, ref int i, ref int line, ref int col)
     {
         int n = text.Length, sl = line, sc = col;
         i++; col++;                                      // past the opening quote

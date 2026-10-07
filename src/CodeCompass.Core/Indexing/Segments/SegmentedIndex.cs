@@ -205,7 +205,7 @@ public sealed class SegmentedIndex : IDisposable
                                              List<CandidateTrace>? trace = null, int maxPerFile = 0,
                                              bool orderByPath = false, SearchLimits? limits = null,
                                              Func<string, bool>? pathFilter = null, Func<SearchMatch, bool>? accept = null,
-                                             System.Threading.CancellationToken ct = default)
+                                             System.Threading.CancellationToken ct = default, Action<string, string?>? textSink = null)
     {
         // Whitespace-only queries have no meaningful trigrams: under 3 chars they produce no trigram groups,
         // so every file becomes a candidate and the verify step matches almost every line that contains a
@@ -247,8 +247,8 @@ public sealed class SegmentedIndex : IDisposable
         // with a bounded-parallel verify (SMB2 credits let many reads share one connection). Locally,
         // reads are fast and the serial early-exit is already optimal, so keep the simple path.
         var found = _rootIsNetwork
-            ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile, limits, accept, ct)
-            : VerifySerial(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile, limits, accept, ct);
+            ? VerifyParallel(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile, limits, accept, textSink, ct)
+            : VerifySerial(candidates, query, comparison, caseSensitive, maxResults, trace, maxPerFile, limits, accept, textSink, ct);
         if (limits is not null && found.Count >= maxResults) limits.HitTotalCap = true;
         return found;
     }
@@ -346,28 +346,37 @@ public sealed class SegmentedIndex : IDisposable
     private static int RawCap(int perFile) => (int)Math.Min(int.MaxValue, Math.Max((long)perFile * RawPerAccepted, RawFloor));
 
     // One file's contribution: its accepted matches, up to perFile. Runs on the caller's thread (never inside the parallel
-    // scan), so `accept` may use non-thread-safe state.
+    // scan), so `accept` - and `textSink`, which hands `accept`'s comment/string filter the text the scan already read, so
+    // it doesn't read the file again - may use non-thread-safe state. The text is offered for this file's hits only, then
+    // withdrawn (null), so a file nothing classified doesn't stay held for the rest of the query.
     private static List<SearchMatch> TakeAccepted(List<SearchMatch> hits, Func<SearchMatch, bool>? accept, int perFile, int rawCap,
-                                                  int maxPerFile, SearchLimits? limits)
+                                                  int maxPerFile, SearchLimits? limits, string rel, string? text,
+                                                  Action<string, string?>? textSink)
     {
         if (accept is null)
         {
             if (limits is not null && maxPerFile > 0 && hits.Count >= perFile) limits.HitPerFileCap = true;
             return hits;
         }
-        var kept = new List<SearchMatch>(Math.Min(hits.Count, perFile));
-        foreach (var m in hits)
+        bool offered = textSink is not null && text is not null && hits.Count > 0;
+        if (offered) textSink!(rel, text);
+        try
         {
-            if (!accept(m)) continue;
-            if (kept.Count >= perFile) { if (limits is not null && maxPerFile > 0) limits.HitPerFileCap = true; break; }
-            kept.Add(m);
+            var kept = new List<SearchMatch>(Math.Min(hits.Count, perFile));
+            foreach (var m in hits)
+            {
+                if (!accept(m)) continue;
+                if (kept.Count >= perFile) { if (limits is not null && maxPerFile > 0) limits.HitPerFileCap = true; break; }
+                kept.Add(m);
+            }
+            if (limits is not null && hits.Count >= rawCap) limits.HitPerFileCap = true; // the raw scan of this file was cut
+            return kept;
         }
-        if (limits is not null && hits.Count >= rawCap) limits.HitPerFileCap = true; // the raw scan of this file was cut
-        return kept;
+        finally { if (offered) textSink!(rel, null); }
     }
 
     // Serial verify (local repos): read candidates in order, stopping the instant we have enough.
-    private List<SearchMatch> VerifySerial(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile, SearchLimits? limits, Func<SearchMatch, bool>? accept, System.Threading.CancellationToken ct)
+    private List<SearchMatch> VerifySerial(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile, SearchLimits? limits, Func<SearchMatch, bool>? accept, Action<string, string?>? textSink, System.Threading.CancellationToken ct)
     {
         var results = new List<SearchMatch>();
         int perFile = PerFileCap(maxResults, maxPerFile);
@@ -375,9 +384,10 @@ public sealed class SegmentedIndex : IDisposable
         foreach (var rel in candidates)
         {
             ct.ThrowIfCancellationRequested(); // between files: a cancelled query stops reading
-            var (hits, unreadable) = ScanCandidate(rel, query, comparison, caseSensitive, scanCap, network: false, trace);
+            var (hits, unreadable, text) = ScanCandidate(rel, query, comparison, caseSensitive, scanCap, network: false, trace,
+                                                         keepTextChars: textSink is null ? 0 : int.MaxValue);
             if (unreadable) ReportUnreadable(limits, rel);
-            results.AddRange(TakeAccepted(hits, accept, perFile, scanCap, maxPerFile, limits));
+            results.AddRange(TakeAccepted(hits, accept, perFile, scanCap, maxPerFile, limits, rel, text, textSink));
             if (results.Count >= maxResults) return Cap(results, maxResults);
         }
         return Cap(results, maxResults);
@@ -387,7 +397,7 @@ public sealed class SegmentedIndex : IDisposable
     // without speculatively reading the whole candidate set. Results are merged in candidate order, so
     // the output is byte-identical to the serial path; we just reach it faster. A window's worth of
     // reads may be wasted once we have enough matches - a good trade when latency dwarfs a few reads.
-    private List<SearchMatch> VerifyParallel(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile, SearchLimits? limits, Func<SearchMatch, bool>? accept, System.Threading.CancellationToken ct)
+    private List<SearchMatch> VerifyParallel(List<string> candidates, string query, StringComparison comparison, bool caseSensitive, int maxResults, List<CandidateTrace>? trace, int maxPerFile, SearchLimits? limits, Func<SearchMatch, bool>? accept, Action<string, string?>? textSink, System.Threading.CancellationToken ct)
     {
         var results = new List<SearchMatch>();
         int perFile = PerFileCap(maxResults, maxPerFile);
@@ -399,17 +409,32 @@ public sealed class SegmentedIndex : IDisposable
         for (int start = 0; start < candidates.Count && results.Count < maxResults; start += window)
         {
             int count = Math.Min(window, candidates.Count - start);
-            var perFileHits = new (List<SearchMatch> Hits, bool Unreadable)[count];
-            Parallel.For(0, count, opts, j =>
-                perFileHits[j] = ScanCandidate(candidates[start + j], query, comparison, caseSensitive, scanCap, network: true, trace));
-
-            // Only files the answer actually consumed count: one read ahead, past the point we had enough, wasn't needed.
-            for (int j = 0; j < count; j++)
+            // A whole window of texts is alive at once here, so only small ones are kept for the hand-off (over a share,
+            // files above the 2 MB sidecar cutoff are block-read and have no whole text anyway).
+            // The kept texts sit outside the read budget (it is released when the read ends), so they share a cap of their
+            // own; past it a file's text just isn't kept and the filter reads that file itself.
+            var perFileHits = new (List<SearchMatch> Hits, bool Unreadable, string? Text)[count];
+            try
             {
-                if (perFileHits[j].Unreadable) ReportUnreadable(limits, candidates[start + j]);
-                results.AddRange(TakeAccepted(perFileHits[j].Hits, accept, perFile, scanCap, maxPerFile, limits));
-                if (results.Count >= maxResults) break;
+                Parallel.For(0, count, opts, j =>
+                {
+                    var r = ScanCandidate(candidates[start + j], query, comparison, caseSensitive, scanCap, network: true, trace,
+                                          keepTextChars: textSink is null ? 0 : ParallelKeepTextChars);
+                    if (r.Text is not null && !TryKeepText(r.Text.Length)) r.Text = null;
+                    perFileHits[j] = r;
+                });
+
+                // Only files the answer actually consumed count: one read ahead, past the point we had enough, wasn't needed.
+                for (int j = 0; j < count; j++)
+                {
+                    if (perFileHits[j].Unreadable) ReportUnreadable(limits, candidates[start + j]);
+                    results.AddRange(TakeAccepted(perFileHits[j].Hits, accept, perFile, scanCap, maxPerFile, limits,
+                                                  candidates[start + j], perFileHits[j].Text, textSink));
+                    DropKeptText(ref perFileHits[j].Text);
+                    if (results.Count >= maxResults) break;
+                }
             }
+            finally { for (int j = 0; j < count; j++) DropKeptText(ref perFileHits[j].Text); }
         }
         return Cap(results, maxResults);
     }
@@ -436,7 +461,28 @@ public sealed class SegmentedIndex : IDisposable
     // (up to maxResults) and whether a read failed (see IsUnreadable). Reads are network-aware and avoid a
     // per-candidate stat: a file is known to be "large" from its LOCAL sidecar, and otherwise we read the size
     // off the already-open handle rather than paying a separate round-trip. Never throws.
-    private (List<SearchMatch> Hits, bool Unreadable) ScanCandidate(string rel, string query, StringComparison comparison, bool caseSensitive, int maxResults, bool network, List<CandidateTrace>? trace = null)
+    private const int ParallelKeepTextChars = 1 << 20;
+    // Process-wide cap on texts the parallel verify holds for the hand-off (64 MB of chars), across concurrent queries.
+    internal static long KeptTextCharsCap = 32L << 20;
+    private static long s_keptTextChars;
+    internal static long KeptTextCharsInFlight => Interlocked.Read(ref s_keptTextChars);
+
+    private static bool TryKeepText(int chars)
+    {
+        if (Interlocked.Add(ref s_keptTextChars, chars) <= KeptTextCharsCap) return true;
+        Interlocked.Add(ref s_keptTextChars, -chars);
+        return false;
+    }
+
+    private static void DropKeptText(ref string? text)
+    {
+        if (text is null) return;
+        Interlocked.Add(ref s_keptTextChars, -text.Length);
+        text = null;
+    }
+
+    // keepTextChars: return the file's text (when it was read whole and is at most this long) for the caller's textSink.
+    private (List<SearchMatch> Hits, bool Unreadable, string? Text) ScanCandidate(string rel, string query, StringComparison comparison, bool caseSensitive, int maxResults, bool network, List<CandidateTrace>? trace = null, int keepTextChars = 0)
     {
         var results = new List<SearchMatch>();
         var full = Path.Combine(_root, rel.Replace('/', Path.DirectorySeparatorChar));
@@ -463,9 +509,10 @@ public sealed class SegmentedIndex : IDisposable
             // the TRUE I/O this query paid (the field report's ~695 MB residual was this re-read every call).
             if (trace != null) AddTrace(trace, rel, true, handled ? srcBytes : TryFileLength(full),
                                         scBytesRead, results.Count);
-            return (results, IsUnreadable(lineError));
+            return (results, IsUnreadable(lineError), null);
         }
 
+        string? kept = null;
         // No sidecar: normally a small file. Open once (network-tuned) and read the size off the open
         // handle - no separate stat round-trip. A large non-UTF-8 file (no block index) is rare; scan
         // it line by line so we never materialize a multi-GB string.
@@ -483,10 +530,11 @@ public sealed class SegmentedIndex : IDisposable
                 {
                     var text = Storage.SourceFile.ReadAllText(fs);
                     FileScanner.ScanText(rel, text, query, results, maxResults, 0, comparison);
+                    kept = text.Length <= keepTextChars ? text : null;
                 }
                 finally { if (footprint > 0) QueryReadBudget.Release(footprint); }
                 if (trace != null) AddTrace(trace, rel, false, size, 0, results.Count);
-                return (results, false);
+                return (results, false, kept);
             }
         }
         catch (Exception ex)
@@ -495,14 +543,14 @@ public sealed class SegmentedIndex : IDisposable
             // reports the file as unreadable. Details under the debug flag.
             if (RefsDebug.On) RefsDebug.Log($"scan READ ERROR rel='{rel}' network={network} query='{query}': {ex.GetType().Name}: {ex.Message}");
             if (trace != null) AddTrace(trace, rel, false, 0, 0, results.Count);
-            return (results, IsUnreadable(ex));
+            return (results, IsUnreadable(ex), null);
         }
 
         var error = FileScanner.ScanByLine(rel, full, query, results, maxResults, comparison, network); // rare: large, no sidecar
         if (network && results.Count == 0 && RefsDebug.On)
             RefsDebug.Log($"scan EMPTY (network large no-sidecar) rel='{rel}' query='{query}'");
         if (trace != null) AddTrace(trace, rel, false, TryFileLength(full), 0, results.Count); // whole-file read (the residual-cost shape)
-        return (results, IsUnreadable(error));
+        return (results, IsUnreadable(error), null);
     }
 
     // Record one candidate's verify cost for the opt-in search trace. Thread-safe: the parallel verify path

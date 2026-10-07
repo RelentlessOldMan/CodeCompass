@@ -1137,7 +1137,8 @@ static int CmdRefs(string[] args)
         // Filters run DURING the scan (only real references count toward the budget) - shared with the MCP tool.
         var accept = ReferenceMerge.ReferenceAccept(root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => rel);
         foreach (var m in index!.Search(name, 1000, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
-                                        limits: limits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete), accept: accept))
+                                        limits: limits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete), accept: accept,
+                                        textSink: ReferenceMerge.ReferenceTextSink(root, spanFilter)))
         {
             // Absolute path for the span filter (it reads the file to classify comments/strings); display + dedup stay
             // on the repo-relative m.Path.

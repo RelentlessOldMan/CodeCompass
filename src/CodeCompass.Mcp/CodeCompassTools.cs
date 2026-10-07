@@ -269,7 +269,8 @@ public static class CodeCompassTools
         // .cs files the semantic model couldn't read are absent from it - incomplete, so backfill + name them.
         var csUnreadable = csharp.UnreadableFiles;
         bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0;
-        // Per-query comment/string classifier for C#/C/C++ name matches; reads + caches each file once.
+        // Per-query comment/string classifier for C#/C/C++ name matches; classifies each file once, from the text the name
+        // search already read when it read the file whole (ReferenceTextSink), so the file isn't read twice.
         var spanFilter = new LexicalSpanFilter(name);
         var seenKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
@@ -291,7 +292,8 @@ public static class CodeCompassTools
                 // identifiers containing the name, comments, .cs files Roslyn already answered - can't crowd out a real use.
                 var accept = ReferenceMerge.ReferenceAccept(h.Root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => DisplayPath(h, rel));
                 foreach (var m in h.Text.Search(name, probe, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
-                                                limits: lexLimits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete), accept: accept, ct: ct))
+                                                limits: lexLimits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete), accept: accept, ct: ct,
+                                                textSink: ReferenceMerge.ReferenceTextSink(h.Root, spanFilter)))
                 {
                     // Shared filter (same as the CLI). The span filter reads the file, so give it the absolute path;
                     // display/dedup keep the relative one.

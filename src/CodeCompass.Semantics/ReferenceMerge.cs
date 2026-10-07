@@ -49,6 +49,11 @@ public static class ReferenceMerge
             return IsLexicalReference(full, m.LineText, m.Column, nameLength, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset);
         };
 
+    /// <summary>The name search's text hand-off (SegmentedIndex.Search's <c>textSink</c>): each candidate file it read whole
+    /// is offered to <paramref name="spanFilter"/>, so classifying that file's hits doesn't read it again; null withdraws it.</summary>
+    public static Action<string, string?> ReferenceTextSink(string root, LexicalSpanFilter spanFilter) =>
+        (rel, text) => spanFilter.Offer(Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar))), text);
+
     /// <summary>Files the name search could not read just now (locked by an editor or another program, an ACL, a network
     /// error): references in them are missing, so the answer must not read as complete. Empty when none.</summary>
     public static string UnreadableCandidatesNote(IReadOnlyCollection<string> displayPaths) =>
