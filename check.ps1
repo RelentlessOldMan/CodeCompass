@@ -14,6 +14,9 @@
                  * the SAME big file, with the network path FAKED ON (CODECOMPASS_FORCE_NETWORK=1),
                    still indexes (pre-scan skipped) and the positional search still finds the marker.
                  * the nested-template "pathological" files index without hanging at the default cap.
+                 * a broad C/C++ find_references (CodeSpawner broad-token, ~1 GB) is right against the
+                   manifest, peaks under 768 MB, and stays under 6x the index time of the same corpus.
+                 * a 10-edit CodeSpawner churn through `update` matches the composed ground truth.
     -Fetch     + real-repo bench  - fetch-corpus + `bench verify` (needs network; large).
 
   Exits non-zero if anything fails, so it's usable as a pre-push check:  ./check.ps1 -Big
@@ -78,6 +81,27 @@ function Invoke-Cli([string[]]$CliArgs, [int]$TimeoutSec = 600) {
     if (-not $exited) { try { $p.Kill() } catch {}; return @{ Out=""; Err="TIMEOUT"; Code=-1; TimedOut=$true } }
     $p.WaitForExit() # ensure redirected output is fully flushed to the files before we read them
     $res = @{ Out = ([string](Get-Content $o -Raw)); Err = ([string](Get-Content $e -Raw)); Code = $p.ExitCode; TimedOut=$false }
+    Remove-Item $o, $e -Force
+    return $res
+}
+
+# Invoke-Cli plus wall time and the process's peak working set. PeakWorkingSet64 is the OS's running maximum, so
+# sampling it every 50 ms until exit misses at most the last 50 ms of growth.
+function Invoke-CliMeasured([string[]]$CliArgs, [int]$TimeoutSec = 600) {
+    $o = (New-TemporaryFile).FullName; $e = (New-TemporaryFile).FullName
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $p = Start-Process -FilePath $cli -ArgumentList $CliArgs -NoNewWindow -PassThru `
+                       -RedirectStandardOutput $o -RedirectStandardError $e
+    $null = $p.Handle
+    $peak = 0
+    while (-not $p.HasExited) {
+        try { $p.Refresh(); $peak = [math]::Max($peak, $p.PeakWorkingSet64) } catch {}
+        if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) { try { $p.Kill() } catch {}; break }
+        Start-Sleep -Milliseconds 50
+    }
+    $p.WaitForExit(); $sw.Stop()
+    $res = @{ Out = ([string](Get-Content $o -Raw)); Err = ([string](Get-Content $e -Raw)); Code = $p.ExitCode
+              Ms = [long]$sw.ElapsedMilliseconds; PeakBytes = [long]$peak }
     Remove-Item $o, $e -Force
     return $res
 }
@@ -222,6 +246,48 @@ if ($Big -and (Test-Path $cli)) {
     $rW = Invoke-Cli @("refs", $refDir, "widget_reset")
     Check "calls through a missing header are still found" (([regex]::Matches($rW.Out, '(?m)^mod\d\.c:2:')).Count -eq 3)
     Remove-Item $refDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    # A broad C/C++ find_references once took a machine to 9-11 GB and OOM. The name search has to stay bounded:
+    # a CodeSpawner broad-token corpus (~1 GB: 200 files of 2-8 MB, one hot name in every one) is the worst shape
+    # for it. Checks the answer against the manifest's ground truth, the process's peak memory, and its time
+    # against indexing the same bytes on the same machine (a ratio, so the gate holds on any runner; a field build
+    # once made refs 2.5x slower with every other check passing). Measured 2026-10-07 on 12 threads: index 5.7 s
+    # 608 MB, refs 14 s 250 MB (refs runs the comment/string filter over every hit file, one at a time).
+    Section "broad C/C++ find_references: right answer, bounded memory, no latency regression"
+    $spawner = Join-Path $root "tools/codespawner/codespawner.exe"
+    $broad = Join-Path $root ".corpus/_broadcheck"
+    & $spawner gen --out $broad --preset broad-token --giant-headers 0 --force | Out-Null
+    $bm = Get-Content "$broad-manifest.json" -Raw | ConvertFrom-Json
+    Check "broad-token corpus generated" ($LASTEXITCODE -eq 0 -and @($bm.symbols.broad_hot.refs).Count -ge 100)
+
+    $bIdx = Invoke-CliMeasured @("index", $broad)
+    Check "broad-token corpus indexes" ($bIdx.Code -eq 0)
+    $bRefs = Invoke-CliMeasured @("refs", $broad, "broad_hot")
+    $sites = @{}
+    foreach ($ln in ($bRefs.Out -split "`r?`n")) {
+        $mm = [regex]::Match($ln, '^(?<p>.+?):(?<l>\d+):\d+:(?<t>.*)$')
+        if ($mm.Success) { $sites[($mm.Groups['p'].Value -replace '\\', '/') + ":" + $mm.Groups['l'].Value] = $mm.Groups['t'].Value }
+    }
+    $missing = @($bm.symbols.broad_hot.refs | Where-Object { -not $sites.ContainsKey($_) })
+    # Beyond the manifest's call sites, a name search may only add each carrier's prototype "int broad_hot(int x);".
+    $odd = @($sites.Keys | Where-Object { ($bm.symbols.broad_hot.refs -notcontains $_) -and ($sites[$_] -notmatch '^\s*int broad_hot\(int x\);') })
+    Check "refs finds every call site ($(@($bm.symbols.broad_hot.refs).Count)), nothing unexpected" ($bRefs.Code -eq 0 -and $missing.Count -eq 0 -and $odd.Count -eq 0)
+    Check "refs leaves out the definition" (-not $sites.ContainsKey($bm.symbols.broad_hot.def))
+    $peakMb = [math]::Round($bRefs.PeakBytes / 1MB)
+    Check "refs peak memory ${peakMb} MB stays under 768 MB" ($bRefs.PeakBytes -gt 0 -and $bRefs.PeakBytes -lt 768MB)
+    $ratio = [math]::Round($bRefs.Ms / [math]::Max(1, $bIdx.Ms), 2)
+    Check "refs time $($bRefs.Ms) ms is under 6x the index time $($bIdx.Ms) ms (now $ratio x)" ($ratio -le 6)
+
+    # Long churn through `codecompass update` against CodeSpawner's composed ground truth (removes, line shifts,
+    # adds, and grow/shrink across the sidecar cutoff so sidecars are created and orphan-cleaned). 10 edits cycle
+    # every edit type twice; that needs 2 shrink seeds (with 1, mutate crashes on the second Shrink).
+    Section "churn: incremental update matches composed ground truth (10 edits)"
+    $churn = Join-Path $root ".corpus/_churncheck"
+    Remove-Item "$churn-delta*.json" -Force -ErrorAction SilentlyContinue
+    & $spawner gen --out $churn --giant-headers 0 --shrink-seeds 2 --force | Out-Null
+    Check "churn corpus generated" ($LASTEXITCODE -eq 0 -and (Test-Path "$churn-manifest.json"))
+    & (Join-Path $root "verify-churn-codecompass.ps1") -Corpus $churn -Edits 10 -Cli $cli | Out-Host
+    Check "churn oracle passes (10 steps)" ($LASTEXITCODE -eq 0)
 }
 
 # ---- Tier 3: real-repo correctness bench --------------------------------------------------------

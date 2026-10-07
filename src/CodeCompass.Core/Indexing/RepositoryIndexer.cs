@@ -74,7 +74,7 @@ public static class RepositoryIndexer
         // the whole build and never fires (this is why the earlier Timer watchdog stayed silent under
         // load). A dedicated thread checks on schedule regardless of pool pressure.
         int stallSec = StallWarnSeconds();
-        long stallMs = stallSec * 1000L;
+        long stallMs = StallWarnMsForTests ?? stallSec * 1000L;
         var buildDone = new ManualResetEventSlim(false);
         var watchdog = new Thread(() =>
         {
@@ -94,24 +94,13 @@ public static class RepositoryIndexer
                 dumps++;
 
                 var log = Log.For(root);
-                // Over a share, a worker "held" on a big file is usually just slow TRANSFER, not slow parse -
-                // and if the overall byte counter is still climbing (no hard stall) it will finish on its own.
-                // Excluding it / lowering caps (the local advice) is the wrong fix there, so word it differently.
-                bool onNetwork = NetworkPath.IsNetwork(root);
-                bool progressing = !hardStall;
-                string headline = stuck.Length > 0
-                    ? (onNetwork
-                        ? $"indexing slow: {stuck.Length} worker(s) held one large file >{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB) over a network share - likely slow transfer, not a stuck build."
-                        : $"indexing slow: {stuck.Length} worker(s) held one file >{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB) - a slow-to-parse file is grinding a worker while others may idle.")
-                    : $"indexing made no progress for ~{stallSec}s at {curFiles:N0} files ({curBytes / 1048576.0:F0} MB).";
+                var (headline, advice) = StallReport(stuck.Length, NetworkPath.IsNetwork(root), hardStall, stallSec, curFiles, curBytes);
                 log.Warn(headline);
                 if (held.Length == 0)
                     log.Warn("  (no files in flight - the stall is in a post-parse/finalize step, not a single file)");
                 foreach (var kv in held.OrderByDescending(k => now - k.Value.StartMs))
                     log.Warn($"  worker {kv.Key}: {kv.Value.Path} ({kv.Value.Size / 1048576.0:F1} MB) held {(now - kv.Value.StartMs) / 1000.0:F0}s");
-                log.Warn(onNetwork && progressing
-                    ? "Over a network share this is normal for large files while overall progress continues - it should finish. Exclude it (CODECOMPASS_IGNORE) only if the build never completes."
-                    : "If a file has been held many seconds it is the culprit: exclude it (CODECOMPASS_IGNORE) or lower CODECOMPASS_MAX_SYMBOL_MB / CODECOMPASS_MAX_FILE_MB.");
+                log.Warn(advice);
 
                 // Also surface on-screen (stderr) once, so a stall isn't a silent frozen progress bar.
                 // stderr is safe for the MCP server too (stdout is its protocol channel, stderr is logs).
@@ -253,6 +242,7 @@ public static class RepositoryIndexer
                 inFlight[tid] = (file.RelativePath, file.Size, clock.ElapsedMilliseconds); // for the watchdog
                 try
                 {
+                    OnFileStartForTests?.Invoke(file.RelativePath);
                     byte[] bytes;
                     Storage.FileIdentity before = default, after = default;
                     // OutOfMemory here is NOT an I/O error: it means the machine can't commit the read.
@@ -455,6 +445,30 @@ public static class RepositoryIndexer
     private static int CompactSegmentThreshold() => CodeCompassConfig.CompactSegments();
 
     private static int StallWarnSeconds() => CodeCompassConfig.StallWarnSec();
+
+    // Test seams (null in production). OnFileStartForTests runs on the worker as it starts a whole-read file,
+    // after the file is registered with the watchdog - a test holds a file there (to trip the watchdog) or
+    // throws OutOfMemoryException (to hit the per-file memory backstop). StallWarnMsForTests shortens the
+    // watchdog window below the 5 s config floor so those tests run in well under a second.
+    internal static Action<string>? OnFileStartForTests;
+    internal static long? StallWarnMsForTests;
+
+    /// <summary>The stall watchdog's headline and advice. Over a share, a worker "held" on a big file is usually
+    /// slow TRANSFER, not slow parse - and if the byte counter is still climbing (no hard stall) it finishes on its
+    /// own, so "exclude it / lower the caps" (the local advice) is the wrong fix there and is worded differently.</summary>
+    internal static (string Headline, string Advice) StallReport(int stuck, bool onNetwork, bool hardStall,
+                                                                  int stallSec, int files, long bytes)
+    {
+        string headline = stuck > 0
+            ? (onNetwork
+                ? $"indexing slow: {stuck} worker(s) held one large file >{stallSec}s at {files:N0} files ({bytes / 1048576.0:F0} MB) over a network share - likely slow transfer, not a stuck build."
+                : $"indexing slow: {stuck} worker(s) held one file >{stallSec}s at {files:N0} files ({bytes / 1048576.0:F0} MB) - a slow-to-parse file is grinding a worker while others may idle.")
+            : $"indexing made no progress for ~{stallSec}s at {files:N0} files ({bytes / 1048576.0:F0} MB).";
+        string advice = onNetwork && !hardStall
+            ? "Over a network share this is normal for large files while overall progress continues - it should finish. Exclude it (CODECOMPASS_IGNORE) only if the build never completes."
+            : "If a file has been held many seconds it is the culprit: exclude it (CODECOMPASS_IGNORE) or lower CODECOMPASS_MAX_SYMBOL_MB / CODECOMPASS_MAX_FILE_MB.";
+        return (headline, advice);
+    }
 
     // Read-budget reservation for a streamed (large) file. Streaming never holds the whole file - only
     // ~1 MB byte chunks, a char buffer, and the distinct-trigram set - so a fixed, modest reservation
