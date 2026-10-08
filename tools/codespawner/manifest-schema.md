@@ -96,14 +96,16 @@ A map keyed by **symbol name**. The symbol name — not the path — is the **se
 reachable set purely from `edges` without resolving a single path (paths are only needed for the
 build/precision-reporting step).
 
-- **Linear default** (no `--oracle-fanout`): the chain `func_i → func_{i-1}`; `func_0`, `hot_shared`, and
-  `vendor_gated` have empty `edges`. Byte-identical to earlier releases.
+- **Linear default** (no `--oracle-fanout`): the chain `func_i → func_{i-1}`; `func_0` has no `func_*`
+  edge, and `hot_shared` and `vendor_gated` have empty `edges`. Byte-identical to earlier releases.
 - **DAG** (`--oracle-fanout k` [+ `--oracle-depth`, `--oracle-shared-leaves`]): each node has up to `k`
   out-edges; shared leaves give multiple callers a common sink (diamonds). Every `edges` target is still a
   declared symbol. Reachability is `BFS(_meta.roots)` — see below.
 
-Every function also carries an edge to `hot_shared` (the universal hot symbol); exclude it when testing for
-"real" branching.
+Edges to `hot_shared` (the hot symbol) depend on the mode. In an oracle overlay (`--with-oracle`) every
+`func_i`, `func_0` included, also carries an edge to it. In a plain `gen` only the giant-including files'
+`func_i` do (the first N, N = the giant-includer count), and with no giant headers (`--giant-headers 0`) there
+is no `hot_shared` symbol at all. Exclude `hot_shared` when testing for "real" branching.
 
 ### `unreachableRefs` — the negative case (dual semantics)
 
