@@ -277,6 +277,15 @@ if ($Big -and (Test-Path $cli)) {
     $peakMb = [math]::Round($bRefs.PeakBytes / 1MB)
     Check "refs peak memory ${peakMb} MB stays under 768 MB" ($bRefs.PeakBytes -gt 0 -and $bRefs.PeakBytes -lt 768MB)
     $ratio = [math]::Round($bRefs.Ms / [math]::Max(1, $bIdx.Ms), 2)
+    # One slow sample isn't a regression: a GitHub runner once measured this at 2.46x (14 s) and 1.18x on a rerun of the
+    # same commit, which is a steady 0.9x locally. Re-measure once and keep the faster run - a real regression (the filter
+    # re-reading each hit file) is slow both times.
+    if ($ratio -gt 2) {
+        Write-Host "  refs took ${ratio}x the index time; re-measuring once"
+        $again = Invoke-CliMeasured @("refs", $broad, "broad_hot")
+        if ($again.Code -eq 0 -and $again.Ms -lt $bRefs.Ms) { $bRefs = $again }
+        $ratio = [math]::Round($bRefs.Ms / [math]::Max(1, $bIdx.Ms), 2)
+    }
     Check "refs time $($bRefs.Ms) ms is under 2x the index time $($bIdx.Ms) ms (now $ratio x)" ($ratio -le 2)
 
     # Long churn through `codecompass update` against CodeSpawner's composed ground truth (removes, line shifts,
