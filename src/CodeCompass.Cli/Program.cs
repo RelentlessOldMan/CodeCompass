@@ -53,7 +53,7 @@ return args.Length == 0
         "logs" => CmdLogs(),
         "version" or "--version" or "-v" => CmdVersion(),
         "help" or "--help" or "-h" or "-?" or "/?" => Help(),
-        "hook-block" => CmdHookBlock(),     // PreToolUse hook: deny Grep/Glob
+        "hook-block" => CmdHookBlock(),     // PreToolUse hook: redirect literal in-workspace Grep
         "hook-context" => CmdHookContext(), // SessionStart hook: inject guidance
         _ => Usage(),
     };
@@ -1226,11 +1226,14 @@ static int CmdCallees(string[] args)
 // enforcement is on. Set CODECOMPASS_ENFORCE=0 to disable (grep fallback).
 static int CmdHookBlock()
 {
-    try { _ = Console.In.ReadToEnd(); } catch { /* consume hook stdin */ }
+    string input = "";
+    try { input = Console.In.ReadToEnd(); } catch { /* no hook stdin: keep the redirect */ }
 
     var enforce = Environment.GetEnvironmentVariable("CODECOMPASS_ENFORCE");
     if (enforce is "0" || string.Equals(enforce, "off", StringComparison.OrdinalIgnoreCase))
         return 0; // enforcement disabled: let the normal permission flow proceed
+    if (!HookPayloads.ShouldRedirectGrep(input))
+        return 0; // a regex or an out-of-workspace path: CodeCompass has no equivalent, so Grep runs
 
     Console.WriteLine(HookPayloads.DenySearch());
     return 0;
