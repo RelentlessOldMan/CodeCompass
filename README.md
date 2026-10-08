@@ -102,6 +102,9 @@ file, a path outside the project, a `glob`/`type`/context/count option, or a pro
 and symbols, not file *names*. Large workspaces aren't auto-indexed inside a tool
 call — CodeCompass tells you to build the index once from a terminal, then serves it and keeps it fresh.
 
+To check it's working on your own repo, run through the [manual test prompts](docs/manual-test-prompts.md):
+prompts to give a session for every tool, and what each answer should look like.
+
 ## Quick start (first run)
 
 1. **Install** the plugin (above) and open Claude Code in your repo.
