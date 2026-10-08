@@ -268,7 +268,12 @@ public static class CodeCompassTools
         var csConditional = SemanticCoverage.CSharpConditionalFiles(csCandidates);
         // .cs files the semantic model couldn't read are absent from it - incomplete, so backfill + name them.
         var csUnreadable = csharp.UnreadableFiles;
-        bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0;
+        // A legacy project (no ImplicitUsings) next to SDK ones: the injected global usings can make a name ambiguous in
+        // its files. A clash in a declaration reaches other files (the whole C# pass is incomplete); one only in a
+        // candidate's code is backfilled in that file alone.
+        var csClash = csharp.UsingsClash(csCandidates, ct);
+        var csBackfill = new System.Collections.Generic.HashSet<string>(csClash.Files, System.StringComparer.OrdinalIgnoreCase);
+        bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0 || csClash.Declarations.Count > 0;
         // Per-query comment/string classifier for C#/C/C++ name matches; classifies each file once, from the text the name
         // search already read when it read the file whole (ReferenceTextSink), so the file isn't read twice.
         var spanFilter = new LexicalSpanFilter(name);
@@ -276,7 +281,8 @@ public static class CodeCompassTools
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.Ordinal); // exact: on a case-sensitive tree Reg.h and reg.h are different files
         foreach (var h in handles)
-            seenKeys.UnionWith(ReferenceMerge.DefinitionKeys(h.Symbols.FindByName(name), rel => DisplayPath(h, rel)));
+            seenKeys.UnionWith(ReferenceMerge.DefinitionKeys(h.Symbols.FindByName(name), rel => DisplayPath(h, rel),
+                                                             IndexMetaFile.Read(h.Root)?.ContentVersion ?? 0));
 
         var lexLimits = new CodeCompass.Core.Indexing.Segments.SegmentedIndex.SearchLimits();
         int namedCFamily = 0;
@@ -290,15 +296,13 @@ public static class CodeCompassTools
                 // can't fill the whole answer.
                 // Filters run DURING the scan (only real references count toward the budget), so noisy files - longer
                 // identifiers containing the name, comments, .cs files Roslyn already answered - can't crowd out a real use.
-                var accept = ReferenceMerge.ReferenceAccept(h.Root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => DisplayPath(h, rel));
+                var accept = ReferenceMerge.ReferenceAccept(h.Root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => DisplayPath(h, rel),
+                                                            csBackfill);
                 foreach (var m in h.Text.Search(name, probe, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
-                                                limits: lexLimits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete), accept: accept, ct: ct,
+                                                limits: lexLimits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete, h.Root, csBackfill), accept: accept, ct: ct,
                                                 textSink: ReferenceMerge.ReferenceTextSink(h.Root, spanFilter)))
                 {
-                    // Shared filter (same as the CLI). The span filter reads the file, so give it the absolute path;
-                    // display/dedup keep the relative one.
-                    var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, m.Path.Replace('/', System.IO.Path.DirectorySeparatorChar)));
-                    if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset)) continue;
+                    // `accept` (shared with the CLI) already applied the reference filter during the scan.
                     var key = $"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}";
                     if (!seenKeys.Add(key)) continue;                            // already listed (semantic hit / definition)
                     hits.Add(($"{key}: {m.LineText}", 'l'));
@@ -327,6 +331,12 @@ public static class CodeCompassTools
                 csConditional.Select(f => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f)).ToList()) + ")");
         if (csUnreadable.Count > 0)
             notes.Append(" (Note: " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(System.IO.Path.GetFileName).ToList()!) + ")");
+        if (csClash.Declarations.Count > 0 || csClash.Files.Count > 0)
+        {
+            string Disp(string f) => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f);
+            notes.Append(" (Note: " + ReferenceMerge.CSharpUsingsClashNote(csClash.Declarations.Select(Disp).ToList(),
+                                                                            csClash.Files.Select(Disp).ToList()) + ")");
+        }
         if (unreadable.Count > 0) notes.Append(" (Note: " + ReferenceMerge.UnreadableCandidatesNote(unreadable) + ".)");
         // The name search's raw scan budget (or a file's per-file cap) ran out before the filtered list did: the count
         // may be incomplete, so say so rather than presenting it (or a zero) as exact.

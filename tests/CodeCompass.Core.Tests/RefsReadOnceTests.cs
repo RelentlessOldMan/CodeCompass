@@ -157,6 +157,27 @@ public class RefsReadOnceTests
         }
     }
 
+    // A trigram candidate with no line-level hit (all of the name's trigrams, never the name) is never offered to the filter,
+    // so keeping its text only used up the shared cap - and pushed a later file with real hits back to a disk re-read.
+    [Fact]
+    public void ParallelVerify_KeepsTextOnlyForFilesWithHits()
+    {
+        using var repo = new TempRepo();
+        for (int i = 0; i < 8; i++)
+            repo.Write($"a{i}.c", $"int hot_x{i} = 1;\nint x_name{i} = 2;\nint ot_na{i} = 3;\n"); // hot_ / ot_n / _name trigrams, no "hot_name"
+        repo.Write("z.c", "int z = hot_name(1);\n");
+        var prevNet = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+            long before = SegmentedIndex.TextsKept;
+            var got = RunRefs(repo, "hot_name", new LexicalSpanFilter("hot_name"), handOffText: true);
+            Assert.Equal(new[] { "z.c:1:9" }, got);
+            Assert.Equal(1, SegmentedIndex.TextsKept - before);
+        }
+        finally { Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prevNet); }
+    }
+
     // --- SourceFile.ReadAllText == StreamReader ----------------------------------------------------------------
 
     private static string ViaStreamReader(byte[] bytes)

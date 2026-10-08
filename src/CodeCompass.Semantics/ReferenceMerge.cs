@@ -27,7 +27,19 @@ public static class ReferenceMerge
     /// Exact name-token position, so a real use that merely shares the definition's line is still counted. This relies
     /// on the symbol queries capturing definitions ONLY (see LanguageRegistry) - a captured use would be dropped.</summary>
     public static IEnumerable<string> DefinitionKeys(IEnumerable<CodeCompass.Core.Symbols.Symbol> definitions, Func<string, string> display) =>
-        definitions.Select(s => $"{display(s.RelativePath)}:{s.Line}:{s.Column}");
+        DefinitionKeys(definitions, display, CFamilyDefinitionsOnlySince);
+
+    /// <summary>The index content version from which C/C++ symbols are definitions only (BuildInfo history, v4).</summary>
+    public const int CFamilyDefinitionsOnlySince = 4;
+
+    /// <summary><see cref="DefinitionKeys(IEnumerable{CodeCompass.Core.Symbols.Symbol}, Func{string, string})"/> for an
+    /// index built at <paramref name="indexContentVersion"/>. An index from before C/C++ symbols became definitions-only
+    /// also recorded type uses (<c>struct node *n</c>) and macro calls (<c>list_for_each(...) {</c>) as symbols, so its
+    /// C/C++ positions are left out: the definition may then be listed as a use, but a real use is never dropped.</summary>
+    public static IEnumerable<string> DefinitionKeys(IEnumerable<CodeCompass.Core.Symbols.Symbol> definitions, Func<string, string> display,
+                                                     int indexContentVersion) =>
+        definitions.Where(s => indexContentVersion >= CFamilyDefinitionsOnlySince || !SemanticCoverage.IsCFamily(s.RelativePath))
+                   .Select(s => $"{display(s.RelativePath)}:{s.Line}:{s.Column}");
 
     /// <summary>Which files a reference name search reads: code only (never logs/docs/data), and .cs only when the C#
     /// semantic pass couldn't see everything - otherwise Roslyn already answered for C# and those files would only use up
@@ -35,19 +47,44 @@ public static class ReferenceMerge
     public static Func<string, bool> ReferencePathFilter(bool csharpIncomplete) =>
         p => ReferenceFileFilter.IsCodeReference(p) && (csharpIncomplete || !SemanticCoverage.IsCSharp(p));
 
+    /// <summary><see cref="ReferencePathFilter(bool)"/>, plus the .cs files in <paramref name="csBackfill"/> (absolute paths)
+    /// even when the C# pass is otherwise complete: files it couldn't fully see on their own (see
+    /// RoslynCSharpAnalyzer.UsingsClash). Paths the search passes are relative to <paramref name="root"/>.</summary>
+    public static Func<string, bool> ReferencePathFilter(bool csharpIncomplete, string root, ISet<string>? csBackfill)
+    {
+        if (csBackfill is null || csBackfill.Count == 0) return ReferencePathFilter(csharpIncomplete);
+        return p => ReferenceFileFilter.IsCodeReference(p) &&
+                    (csharpIncomplete || !SemanticCoverage.IsCSharp(p) || csBackfill.Contains(FullPath(root, p)));
+    }
+
+    private static string FullPath(string root, string rel) => Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)));
+
     /// <summary>The per-match test a reference name search applies DURING the scan, so only real references count toward
     /// its budget (see SegmentedIndex.Search's <c>accept</c>): whole word, not in a comment/string, and not already listed
     /// (a semantic hit or a definition, keyed by <paramref name="displayKey"/>:line:col). Shared by the CLI and MCP.</summary>
     public static Func<CodeCompass.Core.Indexing.SearchMatch, bool> ReferenceAccept(string root, int nameLength, bool csharpIncomplete,
-        LexicalSpanFilter spanFilter, ISet<string> alreadyListed, Func<string, string> displayKey) =>
-        m =>
+        LexicalSpanFilter spanFilter, ISet<string> alreadyListed, Func<string, string> displayKey, ISet<string>? csBackfill = null)
+    {
+        // Runs on the caller's thread, a file's hits at a time (SegmentedIndex.TakeAccepted), so the per-file path and
+        // display prefix are computed once per file, not once per raw hit.
+        string? lastRel = null, lastFull = null, lastDisplay = null;
+        return m =>
         {
-            // Already-listed first: it's a set lookup, while IsLexicalReference may read and lex the whole file - which,
-            // for a name defined in thousands of generated files, was over a second of reading only to drop definitions.
-            if (alreadyListed.Contains($"{displayKey(m.Path)}:{m.Line}:{m.Column}")) return false;
-            var full = Path.GetFullPath(Path.Combine(root, m.Path.Replace('/', Path.DirectorySeparatorChar)));
-            return IsLexicalReference(full, m.LineText, m.Column, nameLength, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset);
+            // Cheapest first: most raw hits of a broad name are inside longer identifiers (GetFoo for Get), rejected here
+            // with no allocation. Then already-listed (a set lookup), and only then IsLexicalReference, which may read and
+            // lex the whole file - for a name defined in thousands of generated files, over a second only to drop definitions.
+            if (!WordBoundary.IsWholeWord(m.LineText, m.Column - 1 - m.LineTextOffset, nameLength)) return false;
+            if (!string.Equals(m.Path, lastRel, StringComparison.Ordinal))
+            {
+                lastRel = m.Path;
+                lastFull = FullPath(root, m.Path);
+                lastDisplay = displayKey(m.Path);
+            }
+            if (alreadyListed.Contains($"{lastDisplay}:{m.Line}:{m.Column}")) return false;
+            return IsLexicalReference(lastFull!, m.LineText, m.Column, nameLength, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset,
+                                      csBackfill);
         };
+    }
 
     /// <summary>The name search's text hand-off (SegmentedIndex.Search's <c>textSink</c>): each candidate file it read whole
     /// is offered to <paramref name="spanFilter"/>, so classifying that file's hits doesn't read it again; null withdraws it.</summary>
@@ -109,9 +146,9 @@ public static class ReferenceMerge
     /// everything (#if-guarded code, unreadable files), so .cs name matches backfill it. Callers dedup by their own
     /// display key and emit.</summary>
     public static bool IsLexicalReference(string path, string lineText, int column1Based, int nameLength, bool csharpIncomplete,
-        LexicalSpanFilter? spanFilter = null, int line1Based = 0, int lineTextOffset = 0)
+        LexicalSpanFilter? spanFilter = null, int line1Based = 0, int lineTextOffset = 0, ISet<string>? csBackfill = null)
     {
-        return !(SemanticCoverage.IsCSharp(path) && !csharpIncomplete)
+        return !(SemanticCoverage.IsCSharp(path) && !csharpIncomplete && csBackfill?.Contains(path) != true)
            && ReferenceFileFilter.IsCodeReference(path)
            // lineText may be a window of a very long line (SearchMatch.LineTextOffset): index the match within it.
            && WordBoundary.IsWholeWord(lineText, column1Based - 1 - lineTextOffset, nameLength)
@@ -158,6 +195,18 @@ public static class ReferenceMerge
         unreadableFilesDisplay.Count == 0 ? "" :
         "C# coverage INCOMPLETE - " + FileList(unreadableFilesDisplay) + " could not be read when the semantic model was built, " +
         "so references in them are shown lexically (they'll be picked up after the next edit/reindex).";
+
+    /// <summary>The C# global-usings clash caveat (see RoslynCSharpAnalyzer.UsingsClash), or empty when there is none.
+    /// <paramref name="declarationClash"/>: a clash in a declaration, whose effect reaches other files - the whole C# pass is
+    /// backfilled by name. Otherwise only <paramref name="fileClash"/> (candidate files with a clash) are.</summary>
+    public static string CSharpUsingsClashNote(IReadOnlyList<string> declarationClash, IReadOnlyList<string> fileClash)
+    {
+        if (declarationClash.Count == 0 && fileClash.Count == 0) return "";
+        var files = declarationClash.Concat(fileClash).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return "C# coverage INCOMPLETE - " + FileList(files) + " belong" + (files.Count == 1 ? "s" : "") + " to a project without " +
+               "ImplicitUsings, and the SDK projects' global usings make a name there ambiguous, so references through it are " +
+               (declarationClash.Count > 0 ? "shown by name across the C# files" : "shown by name in " + (files.Count == 1 ? "that file" : "those files")) + ".";
+    }
 
     private static string FileList(IReadOnlyList<string> files)
     {

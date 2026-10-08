@@ -88,6 +88,10 @@ public sealed class DiskSnapshot : IDisposable
 
     private long _lastSetTicks;
 
+    /// <summary>Our-clock time of this instance's latest in-memory upsert (0 = none): the part of
+    /// <see cref="RecordedByUtcTicks"/> that moves during a batch, cheap to read per file.</summary>
+    public long LastUpsertUtcTicks => _lastSetTicks;
+
     /// <summary>An upper bound, on our clock, on when every entry now in this ledger was recorded: the latest write of its
     /// files or the latest in-memory upsert. <see cref="LedgerTrust"/>'s second look measures its margin from here, so a
     /// later bound only delays trust; 0 = no bound (the second look doesn't trust). File write times are our clock only on

@@ -47,6 +47,26 @@ public class LinkStoreTests
         Assert.Equal(2, LinkStore.ProjectsLinking(shared.Root).Count);
     }
 
+    // `cache clear` moves a cache aside (<key>.clearing-xxxx) before deleting it; if the delete can't finish, the leftover
+    // still holds the project's links.json. That is not a project linking anything - counting it refused a purge of a
+    // linked root's index ("another project links it"), naming a project whose cache was already cleared.
+    [Fact]
+    public void ProjectsLinking_IgnoresACacheMovedAsideForDeletion()
+    {
+        using var shared = new TempRepo();
+        using var p1 = new TempRepo();
+        LinkStore.Add(p1.Root, shared.Root);
+        var dir = IndexStore.CacheDirPath(p1.Root);
+        var aside = dir + ".clearing-test1234";
+        Directory.Move(dir, aside);
+        try
+        {
+            Assert.True(IndexStore.IsClearingLeftover(aside));
+            Assert.Empty(LinkStore.ProjectsLinking(shared.Root));
+        }
+        finally { Directory.Delete(aside, recursive: true); }
+    }
+
     [Theory]
     [InlineData(@"C:\A\B", @"C:\A", true)]    // child inside parent
     [InlineData(@"C:\A", @"C:\A", true)]      // same directory

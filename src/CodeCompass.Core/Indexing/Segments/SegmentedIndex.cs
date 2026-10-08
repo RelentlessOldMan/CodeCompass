@@ -420,7 +420,8 @@ public sealed class SegmentedIndex : IDisposable
                 {
                     var r = ScanCandidate(candidates[start + j], query, comparison, caseSensitive, scanCap, network: true, trace,
                                           keepTextChars: textSink is null ? 0 : ParallelKeepTextChars);
-                    if (r.Text is not null && !TryKeepText(r.Text.Length)) r.Text = null;
+                    // Only a file with hits is ever offered (TakeAccepted), so a hitless one's text isn't kept at all.
+                    if (r.Text is not null && (r.Hits.Count == 0 || !TryKeepText(r.Text.Length))) r.Text = null;
                     perFileHits[j] = r;
                 });
 
@@ -467,9 +468,13 @@ public sealed class SegmentedIndex : IDisposable
     private static long s_keptTextChars;
     internal static long KeptTextCharsInFlight => Interlocked.Read(ref s_keptTextChars);
 
+    private static long s_textsKept;
+    /// <summary>How many texts the parallel verify has kept for the hand-off, process lifetime (a test observation).</summary>
+    internal static long TextsKept => Interlocked.Read(ref s_textsKept);
+
     private static bool TryKeepText(int chars)
     {
-        if (Interlocked.Add(ref s_keptTextChars, chars) <= KeptTextCharsCap) return true;
+        if (Interlocked.Add(ref s_keptTextChars, chars) <= KeptTextCharsCap) { Interlocked.Increment(ref s_textsKept); return true; }
         Interlocked.Add(ref s_keptTextChars, -chars);
         return false;
     }

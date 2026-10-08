@@ -1122,12 +1122,16 @@ static int CmdRefs(string[] args)
     // pass as incomplete: let .cs name matches backfill it (deduped) and disclose.
     var csConditional = SemanticCoverage.CSharpConditionalFiles(csCandidates);
     var csUnreadable = csAnalyzer.UnreadableFiles; // absent from the semantic model -> incomplete, backfill + name them
-    bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0;
+    // Global usings injected for SDK projects can make a name ambiguous in a legacy project's file (same rule as MCP).
+    var csClash = csAnalyzer.UsingsClash(csCandidates);
+    var csBackfill = new HashSet<string>(csClash.Files, StringComparer.OrdinalIgnoreCase);
+    bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0 || csClash.Declarations.Count > 0;
     // Classifies comment/string spans in C#/C/C++ candidate files so the name search skips hits inside them.
     var spanFilter = new LexicalSpanFilter(name);
     var seenKeys = new HashSet<string>(StringComparer.Ordinal); // exact: on a case-sensitive tree Reg.h and reg.h differ
     foreach (var s in cs) seenKeys.Add($"{s.RelativePath}:{s.Line}:{s.Column}");
-    if (haveIndex) seenKeys.UnionWith(ReferenceMerge.DefinitionKeys(refSymbols!.FindByName(name), rel => rel));
+    if (haveIndex) seenKeys.UnionWith(ReferenceMerge.DefinitionKeys(refSymbols!.FindByName(name), rel => rel,
+                                                                    IndexMetaFile.Read(root)?.ContentVersion ?? 0));
     int named = 0, namedCFamily = 0;
     var limits = new CodeCompass.Core.Indexing.Segments.SegmentedIndex.SearchLimits();
     if (haveIndex)
@@ -1135,15 +1139,12 @@ static int CmdRefs(string[] args)
         // Reference mode: canonical candidate order (build-order-independent, so a local and a UNC index return the
         // same set), code files only, and a per-file cap so one huge generated file can't fill the whole answer.
         // Filters run DURING the scan (only real references count toward the budget) - shared with the MCP tool.
-        var accept = ReferenceMerge.ReferenceAccept(root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => rel);
+        var accept = ReferenceMerge.ReferenceAccept(root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => rel, csBackfill);
         foreach (var m in index!.Search(name, 1000, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
-                                        limits: limits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete), accept: accept,
+                                        limits: limits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete, root, csBackfill), accept: accept,
                                         textSink: ReferenceMerge.ReferenceTextSink(root, spanFilter)))
         {
-            // Absolute path for the span filter (it reads the file to classify comments/strings); display + dedup stay
-            // on the repo-relative m.Path.
-            var full = Path.GetFullPath(Path.Combine(root, m.Path.Replace('/', Path.DirectorySeparatorChar)));
-            if (!ReferenceMerge.IsLexicalReference(full, m.LineText, m.Column, name.Length, csharpIncomplete, spanFilter, m.Line, m.LineTextOffset)) continue;
+            // `accept` (shared with the MCP tool) already applied the reference filter during the scan.
             if (!seenKeys.Add($"{m.Path}:{m.Line}:{m.Column}")) continue;              // already listed (semantic hit / definition)
             Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
             named++;
@@ -1163,6 +1164,9 @@ static int CmdRefs(string[] args)
             csConditional.Select(f => Path.GetRelativePath(root, f)).ToList()));
     if (csUnreadable.Count > 0)
         Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(f => Path.GetRelativePath(root, f)).ToList()));
+    if (csClash.Declarations.Count > 0 || csClash.Files.Count > 0)
+        Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUsingsClashNote(
+            csClash.Declarations.Select(f => Path.GetRelativePath(root, f)).ToList(), csClash.Files.Select(f => Path.GetRelativePath(root, f)).ToList()));
     if (limits.UnreadablePaths.Count > 0)
         Console.Out.WriteLine("-- " + ReferenceMerge.UnreadableCandidatesNote(limits.UnreadablePaths) + ".");
     if (limits.HitTotalCap || limits.HitPerFileCap)

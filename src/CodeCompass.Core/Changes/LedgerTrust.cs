@@ -45,6 +45,19 @@ public static class LedgerTrust
     /// <summary>Second look: more than the coarsest tick anywhere (FAT/exFAT 2 s). Both ends are our clock, so no skew.</summary>
     public static readonly TimeSpan SettleMargin = TimeSpan.FromSeconds(3);
 
+    /// <summary>May an update skip this file, its ledger entry standing in for the content? Only a trusted entry (positive
+    /// mtime) whose size and mtime match the listing. An entry loaded from a ledger older than v2 carries no recorded time
+    /// (HashedAt 0) and was never judged by <see cref="Record"/>, so it keeps the old rule: trusted only if the file was
+    /// modified safely - by the same margin as the first look - before <paramref name="ledgerRecordedBy"/> (our-clock
+    /// bound on when the ledger was written; 0 = unknown, so not trusted and the file is re-read once).</summary>
+    public static bool MatchesListing(FileState entry, long listedSize, long listedMTime, long ledgerRecordedBy, bool network)
+    {
+        if (entry.MTimeTicks <= 0 || entry.Size != listedSize || entry.MTimeTicks != listedMTime) return false;
+        if (entry.HashedAtTicks > 0) return true;
+        long margin = (network ? NetworkMargin : LocalMargin).Ticks;
+        return ledgerRecordedBy > 0 && entry.MTimeTicks <= ledgerRecordedBy - margin;
+    }
+
     /// <summary>The mtime to record for a file just hashed: <paramref name="mtimeListed"/> when trusted (see the class
     /// remarks), <c>-mtimeListed</c> when pending, 0 when the listed time is unknown.</summary>
     /// <param name="readStartUtcTicks">When this read began (our clock).</param>

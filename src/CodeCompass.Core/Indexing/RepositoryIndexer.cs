@@ -579,6 +579,8 @@ public static class RepositoryIndexer
             var priorMeta = IndexMetaFile.Read(root);
             long sidecarThreshold = priorMeta?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold;
             long recordedBy = old.RecordedByUtcTicks; // `old` is only read here: every entry was recorded by then
+            bool rootIsNetwork = Storage.NetworkPath.IsNetwork(root);   // once per update, not per file
+            bool cacheDirIsNetwork = Storage.NetworkPath.IsNetwork(dir);
 
             using (var extractor = new TreeSitterSymbolExtractor())
             {
@@ -600,14 +602,16 @@ public static class RepositoryIndexer
                     FileState? oldState = old.TryGetValue(rel, out var os) ? os : (FileState?)null;
 
                     // Cheap size+mtime pre-filter: unchanged -> keep the old state, no read. An entry recorded pending
-                    // (negative) or unknown (0) - it could have been racy, see LedgerTrust - never matches.
-                    if (oldState is { } u && u.MTimeTicks > 0 && u.Size == file.Size && u.MTimeTicks == mtime)
+                    // (negative) or unknown (0) - it could have been racy - never matches, nor does an entry from an older
+                    // ledger whose stamp is too close to that ledger's write (LedgerTrust.MatchesListing).
+                    if (oldState is { } u && LedgerTrust.MatchesListing(u, file.Size, mtime, recordedBy, rootIsNetwork))
                     {
                         newSnapshot[rel] = u;
                         continue;
                     }
 
-                    switch (ApplyExistingFile(text, symbols, dir, sidecarThreshold, rel, file.FullPath, file.Size, mtime, oldState, recordedBy, extractor, upsert, drop))
+                    switch (ApplyExistingFile(text, symbols, dir, sidecarThreshold, rel, file.FullPath, file.Size, mtime, oldState, recordedBy,
+                                              rootIsNetwork, cacheDirIsNetwork, extractor, upsert, drop))
                     {
                         case ChangeKind.Added: added++; break;
                         case ChangeKind.Modified: modified++; break;
@@ -774,6 +778,11 @@ public static class RepositoryIndexer
         var ignore = new IgnoreRules();
         using var extractor = new TreeSitterSymbolExtractor();
         int added = 0, modified = 0, removed = 0;
+        // Once per batch, not per changed file: the root's and cache dir's network-ness (each a handle open), the sidecar
+        // cutoff the build recorded, and the ledger files' write-time bound (a stat per ledger file). The bound stays an
+        // upper bound for every entry as the batch upserts: the snapshot's own last-upsert time is folded in per file.
+        var batch = new ApplyBatch(IndexMetaFile.ReadFromCacheDir(dir)?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold,
+                                   Storage.NetworkPath.IsNetwork(root), Storage.NetworkPath.IsNetwork(dir), snapshot.RecordedByUtcTicks);
 
         foreach (var full in changedFullPaths.Select(Path.GetFullPath).Distinct())
         {
@@ -789,13 +798,13 @@ public static class RepositoryIndexer
                 foreach (var f in new FileWalker(ignore).Walk(full))
                 {
                     var childRel = Path.GetRelativePath(root, f.FullPath).Replace('\\', '/');
-                    ApplyFile(text, symbols, snapshot, dir, childRel, f.FullPath, ignore, extractor,
+                    ApplyFile(text, symbols, snapshot, dir, childRel, f.FullPath, ignore, extractor, batch,
                               ref added, ref modified, ref removed);
                 }
             }
             else if (File.Exists(full))
             {
-                ApplyFile(text, symbols, snapshot, dir, rel, full, ignore, extractor,
+                ApplyFile(text, symbols, snapshot, dir, rel, full, ignore, extractor, batch,
                           ref added, ref modified, ref removed);
             }
             else
@@ -814,9 +823,11 @@ public static class RepositoryIndexer
                                DiskSnapshot snapshot) =>
         SaveAll(root, text, symbols, snapshot);
 
+    private readonly record struct ApplyBatch(long SidecarThreshold, bool RootIsNetwork, bool CacheDirIsNetwork, long LedgerFilesRecordedBy);
+
     private static void ApplyFile(
         SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string dir,
-        string rel, string full, IgnoreRules ignore, TreeSitterSymbolExtractor extractor,
+        string rel, string full, IgnoreRules ignore, TreeSitterSymbolExtractor extractor, ApplyBatch batch,
         ref int added, ref int modified, ref int removed)
     {
         FileState? oldState = snapshot.TryGetValue(rel, out var ps) ? ps : (FileState?)null;
@@ -850,9 +861,9 @@ public static class RepositoryIndexer
         }
 
         var mtime = File.GetLastWriteTimeUtc(full).Ticks; // targeted path has no walk record -> stat once
-        // Use the same adaptive sidecar cutoff the build recorded (cheap read; a watch batch is a few files).
-        long sidecarThreshold = IndexMetaFile.ReadFromCacheDir(dir)?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold;
-        switch (ApplyExistingFile(text, symbols, dir, sidecarThreshold, rel, full, size, mtime, oldState, snapshot.RecordedByUtcTicks, extractor,
+        long recordedBy = Math.Max(batch.LedgerFilesRecordedBy, snapshot.LastUpsertUtcTicks);
+        switch (ApplyExistingFile(text, symbols, dir, batch.SidecarThreshold, rel, full, size, mtime, oldState, recordedBy,
+                                  batch.RootIsNetwork, batch.CacheDirIsNetwork, extractor,
                                   (r, s) => snapshot[r] = s, r => snapshot.Remove(r)))
         {
             case ChangeKind.Added: added++; break;
@@ -880,17 +891,16 @@ public static class RepositoryIndexer
     private static ChangeKind ApplyExistingFile(
         SegmentedIndex text, SegmentedSymbolIndex symbols, string dir, long sidecarThreshold,
         string rel, string full, long size, long mtime, FileState? oldState, long priorRecordedBy,
-        TreeSitterSymbolExtractor extractor,
+        bool network, bool cacheDirIsNetwork, TreeSitterSymbolExtractor extractor,
         Action<string, FileState> upsert, Action<string> drop)
     {
         // A binary-sentinel entry is in the ledger but was never a document.
         bool wasPresent = oldState is { IsBinary: false };
         long readStart = DateTime.UtcNow.Ticks;                        // before the bytes are read (LedgerTrust)
-        bool network = Storage.NetworkPath.IsNetwork(full);
         // The read handle's identity just before and after the read (default = unknown): see LedgerTrust.Record.
         Storage.FileIdentity before = default, after = default;
         // A ledger on a share (CODECOMPASS_CACHE_DIR) may hold entries another machine recorded on its own clock.
-        bool entryClockIsOurs = oldState is not { MTimeTicks: < 0 } || !Storage.NetworkPath.IsNetwork(dir);
+        bool entryClockIsOurs = oldState is not { MTimeTicks: < 0 } || !cacheDirIsNetwork;
         FileState Rec(long recordedSize, string hash) => LedgerTrust.Record(
             new ReadStamp(size, mtime, before, after, readStart, DateTime.UtcNow.Ticks), network, oldState, priorRecordedBy, recordedSize, hash,
             entryClockIsOurs);

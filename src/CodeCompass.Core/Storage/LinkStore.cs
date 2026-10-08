@@ -105,6 +105,7 @@ public static class LinkStore
 
         foreach (var cacheDir in Directory.EnumerateDirectories(baseDir))
         {
+            if (IndexStore.IsClearingLeftover(cacheDir)) continue; // a cache moved aside for deletion links nothing
             if (exclKey is not null && string.Equals(Path.GetFileName(cacheDir), exclKey, StringComparison.OrdinalIgnoreCase)) continue;
             if (!ReadFromCacheDir(cacheDir).Any(r => PathsEqual(r, linkedRoot))) continue;
             var meta = IndexMetaFile.ReadFromCacheDir(cacheDir);

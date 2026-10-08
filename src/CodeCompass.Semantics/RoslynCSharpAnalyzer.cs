@@ -81,6 +81,48 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     public IReadOnlyList<string> UnreadableFiles { get { lock (_gate) return _unreadable.ToList(); } }
     private readonly List<string> _unreadable = new();
 
+    // C# files whose own project gets NONE of the global usings injected for the SDK projects (a legacy project with no
+    // ImplicitUsings next to SDK ones - one compilation means the usings apply to every file). Empty when nothing was
+    // injected. See UsingsClash.
+    private readonly HashSet<string> _outsideImplicitUsings = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<string>? _declarationClash;
+
+    /// <summary>Where the injected global usings made a name ambiguous (CS0104) in a file whose own project never had them -
+    /// e.g. a legacy project's own <c>Task</c> class next to SDK projects' <c>System.Threading.Tasks</c>. A use bound to
+    /// the ambiguous name becomes an error type, so references through it are invisible to the semantic pass.
+    /// <c>Declarations</c>: files where the clash is in a declaration (a field, signature or base type) - its effect
+    /// reaches other files, so the whole C# pass is incomplete. <c>Files</c>: of <paramref name="candidateFullPaths"/>,
+    /// those with a clash anywhere - backfill these by name. Both empty unless the repo mixes the two project kinds.</summary>
+    public (IReadOnlyList<string> Declarations, IReadOnlyList<string> Files) UsingsClash(IEnumerable<string> candidateFullPaths,
+        System.Threading.CancellationToken ct = default)
+    {
+        var (solution, _) = EnsureBuilt(ct);
+        List<string> outside;
+        lock (_gate) outside = _outsideImplicitUsings.ToList();
+        if (outside.Count == 0) return (Array.Empty<string>(), Array.Empty<string>());
+
+        bool Clashes(string path, bool declarationsOnly)
+        {
+            var id = solution.GetDocumentIdsWithFilePath(path).FirstOrDefault();
+            var model = id is null ? null : solution.GetDocument(id)?.GetSemanticModelAsync(ct).GetAwaiter().GetResult();
+            if (model is null) return false;
+            var diags = declarationsOnly ? model.GetDeclarationDiagnostics(cancellationToken: ct) : model.GetDiagnostics(cancellationToken: ct);
+            return diags.Any(d => d.Id == "CS0104");
+        }
+
+        IReadOnlyList<string>? declarations;
+        lock (_gate) declarations = _declarationClash;
+        if (declarations is null)
+        {
+            declarations = outside.Where(p => Clashes(p, declarationsOnly: true)).OrderBy(p => p, StringComparer.Ordinal).ToList();
+            lock (_gate) _declarationClash ??= declarations;
+        }
+        var outsideSet = new HashSet<string>(outside, StringComparer.OrdinalIgnoreCase);
+        var files = candidateFullPaths.Where(outsideSet.Contains).Distinct(StringComparer.OrdinalIgnoreCase)
+                                      .Where(p => Clashes(p, declarationsOnly: false)).OrderBy(p => p, StringComparer.Ordinal).ToList();
+        return (declarations, files);
+    }
+
     /// <summary>Whole-solution Roslyn reference searches run so far (test hook: the cost driver of FindReferences).</summary>
     internal int ReferenceSearches => Volatile.Read(ref _referenceSearches);
     private int _referenceSearches;
@@ -313,8 +355,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         foreach (var doc in project.Documents)
         {
             ct.ThrowIfCancellationRequested();
-            var text = doc.GetTextAsync(ct).GetAwaiter().GetResult().ToString();
-            if (!text.Contains(name, StringComparison.Ordinal) || !text.Contains("record", StringComparison.Ordinal)) continue;
+            var text = doc.GetTextAsync(ct).GetAwaiter().GetResult();
+            if (!ContainsBoth(text, name, "record")) continue;
             var root = doc.GetSyntaxRootAsync(ct).GetAwaiter().GetResult();
             if (root is null) continue;
             SemanticModel? model = null;
@@ -327,6 +369,30 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                     yield return p;
             }
         }
+    }
+
+    // Does the document's text contain both strings (ordinal)? Scanned in fixed-size chunks straight from the SourceText -
+    // ToString() on every document copied the whole C# corpus into new strings on every find_references. Consecutive
+    // chunks overlap by the longer needle's length - 1, so a match across a chunk boundary is still seen.
+    internal static bool ContainsBoth(SourceText text, string a, string b)
+    {
+        const int Chunk = 64 * 1024;
+        int overlap = Math.Max(a.Length, b.Length) - 1;
+        var buf = System.Buffers.ArrayPool<char>.Shared.Rent(Chunk + overlap);
+        try
+        {
+            bool hasA = a.Length == 0, hasB = b.Length == 0;
+            for (int start = 0; start < text.Length && !(hasA && hasB); start += Chunk)
+            {
+                int len = Math.Min(Chunk + overlap, text.Length - start);
+                text.CopyTo(start, buf, 0, len);
+                ReadOnlySpan<char> span = buf.AsSpan(0, len);
+                hasA = hasA || span.IndexOf(a.AsSpan(), StringComparison.Ordinal) >= 0;
+                hasB = hasB || span.IndexOf(b.AsSpan(), StringComparison.Ordinal) >= 0;
+            }
+            return hasA && hasB;
+        }
+        finally { System.Buffers.ArrayPool<char>.Shared.Return(buf); }
     }
 
     // Cancellable: the build walks and reads every .cs under every root (minutes over a share) while the caller holds
@@ -352,12 +418,24 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
 
             var walker = new FileWalker(new IgnoreRules());
             var globalUsings = new SortedSet<string>(StringComparer.Ordinal);
+            // Which project dirs (.csproj) and props dirs (.props, applying to every project below) contribute global
+            // usings, and every .cs added - to find the files whose own project gets none (see UsingsClash).
+            var projectDirHasUsings = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            var propsDirsWithUsings = new List<string>();
+            var csFiles = new List<string>();
             foreach (var root in _roots)
             foreach (var file in walker.Walk(root))
             {
                 if (IsMsBuildProjectFile(file.RelativePath))
                 {
-                    try { CollectGlobalUsings(File.ReadAllText(file.FullPath), globalUsings); } catch { /* best effort */ }
+                    var own = new HashSet<string>(StringComparer.Ordinal);
+                    try { CollectGlobalUsings(File.ReadAllText(file.FullPath), own); } catch { /* best effort */ }
+                    globalUsings.UnionWith(own);
+                    var fileDir = Path.GetDirectoryName(file.FullPath)!;
+                    if (file.RelativePath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+                        projectDirHasUsings[fileDir] = (projectDirHasUsings.TryGetValue(fileDir, out var had) && had) || own.Count > 0;
+                    else if (own.Count > 0)
+                        propsDirsWithUsings.Add(fileDir);
                     continue;
                 }
                 if (!file.RelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
@@ -368,6 +446,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
 
                 // Key documents by ABSOLUTE path so two roots with the same relative path (e.g. both have
                 // src/App.cs) don't collide; ToLocation maps the path back to its owning root for display.
+                csFiles.Add(file.FullPath);
                 var documentId = DocumentId.CreateNewId(projectId);
                 solution = solution.AddDocument(DocumentInfo.Create(
                     documentId,
@@ -391,8 +470,24 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _projectId = projectId;
             _unreadable.Clear();
             _unreadable.AddRange(unreadable);
+            _outsideImplicitUsings.Clear();
+            _declarationClash = null;
+            if (globalUsings.Count > 0)
+                foreach (var cs in csFiles)
+                    if (OwnProjectLacksUsings(cs, projectDirHasUsings, propsDirsWithUsings)) _outsideImplicitUsings.Add(cs);
             return (solution, solution.GetProject(projectId)!);
         }
+    }
+
+    // The file's own project is its nearest ancestor dir holding a .csproj. It lacks the injected usings when that project
+    // declares none and no .props at or above the project's dir supplies any. A file under no project is left alone
+    // (nothing says what it would have had).
+    private static bool OwnProjectLacksUsings(string csFile, Dictionary<string, bool> projectDirHasUsings, List<string> propsDirsWithUsings)
+    {
+        for (var d = Path.GetDirectoryName(csFile); !string.IsNullOrEmpty(d); d = Path.GetDirectoryName(d))
+            if (projectDirHasUsings.TryGetValue(d, out var has))
+                return !has && !propsDirsWithUsings.Any(p => CodeCompass.Core.Storage.PathSafety.IsUnderOrEqual(d, p));
+        return false;
     }
 
     private static bool IsMsBuildProjectFile(string relativePath) =>
