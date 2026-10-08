@@ -1221,21 +1221,31 @@ static int CmdCallees(string[] args)
     return 0;
 }
 
-// PreToolUse hook: block Grep/Glob and redirect the agent to CodeCompass.
-// The plugin's matcher already limits this to Grep|Glob, so we always deny when
-// enforcement is on. Set CODECOMPASS_ENFORCE=0 to disable (grep fallback).
+// PreToolUse hook (the plugin's matcher limits it to Grep): redirect a Grep to CodeCompass only when search_code
+// gives the same answer (HookPayloads.ShouldRedirectGrep); every other Grep runs. Set CODECOMPASS_ENFORCE=0 to
+// never redirect. It must never fail a Grep, so any error lets the call through.
 static int CmdHookBlock()
 {
-    string input = "";
-    try { input = Console.In.ReadToEnd(); } catch { /* no hook stdin: keep the redirect */ }
+    try
+    {
+        // Claude Code sends UTF-8; Console.In would decode with the console code page and mangle non-ASCII paths.
+        string input = "";
+        try
+        {
+            using var stdin = new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false));
+            input = stdin.ReadToEnd();
+        }
+        catch { /* no hook stdin: keep the redirect */ }
 
-    var enforce = Environment.GetEnvironmentVariable("CODECOMPASS_ENFORCE");
-    if (enforce is "0" || string.Equals(enforce, "off", StringComparison.OrdinalIgnoreCase))
-        return 0; // enforcement disabled: let the normal permission flow proceed
-    if (!HookPayloads.ShouldRedirectGrep(input))
-        return 0; // a regex or an out-of-workspace path: CodeCompass has no equivalent, so Grep runs
+        var enforce = Environment.GetEnvironmentVariable("CODECOMPASS_ENFORCE");
+        if (enforce is "0" || string.Equals(enforce, "off", StringComparison.OrdinalIgnoreCase))
+            return 0; // enforcement disabled: let the normal permission flow proceed
+        if (!HookPayloads.ShouldRedirectGrep(input, Environment.GetEnvironmentVariable("CLAUDE_PROJECT_DIR")))
+            return 0; // search_code has no equivalent for this Grep, so it runs
 
-    Console.WriteLine(HookPayloads.DenySearch());
+        Console.WriteLine(HookPayloads.DenySearch());
+    }
+    catch { /* never fail the Grep: let it run */ }
     return 0;
 }
 

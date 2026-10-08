@@ -1,4 +1,6 @@
 using System.Text.Json;
+using CodeCompass.Core.Indexing;
+using CodeCompass.Core.Storage;
 
 namespace CodeCompass.Core.Hooks;
 
@@ -9,13 +11,20 @@ namespace CodeCompass.Core.Hooks;
 public static class HookPayloads
 {
     // Only Grep (content search) is redirected: CodeCompass has no file-NAME search, so blocking Glob left the agent
-    // a dead end it had to escape through a shell command. For the same reason a regex or a path outside the
-    // workspace goes through to Grep (see ShouldRedirectGrep).
+    // a dead end it had to escape through a shell command. For the same reason only a Grep search_code can answer
+    // the same way is redirected; everything else goes through to Grep (see ShouldRedirectGrep).
     private const string DenyReason =
         "CodeCompass is the indexed code-search tool for this workspace. Instead of Grep use: search_code " +
         "(literal text), find_definition, find_references (semantic for C#; by name elsewhere), find_callees, search_symbols - " +
         "precise file:line:col results for far fewer tokens. Use Read for a known file and Glob for file-NAME " +
-        "patterns. A regex pattern or a path outside this workspace still goes to Grep. (Disable with CODECOMPASS_ENFORCE=0.)";
+        "patterns. Grep still runs for a regex, a subfolder or file, a path outside this project, or a glob/type/context/count " +
+        "option. (Disable with CODECOMPASS_ENFORCE=0.)";
+
+    // Grep options search_code has an equivalent for (case, line numbers, result paging, the two plain output
+    // modes). Any other option - glob, type, context lines, count, multiline, or one Grep adds later - means
+    // search_code can't give the same answer, so the call goes to Grep.
+    private static readonly HashSet<string> RedirectableOptions = new(StringComparer.Ordinal)
+    { "pattern", "path", "-i", "-n", "head_limit", "offset", "output_mode", "multiline" };
 
     private const string SessionText =
         "CodeCompass is available for this workspace via MCP. For code search and navigation prefer its tools - " +
@@ -24,33 +33,65 @@ public static class HookPayloads
         "other languages (C/C++ included) by name, so same-named symbols are listed together. " +
         "The index auto-updates as files change.";
 
-    /// <summary>Whether a Grep call (the PreToolUse hook's stdin JSON) should be redirected to CodeCompass: only a
-    /// literal pattern searched inside the workspace. A regex, a multiline search or a path outside the workspace has
-    /// no CodeCompass equivalent and goes through. An unreadable payload keeps the redirect.</summary>
-    public static bool ShouldRedirectGrep(string hookInput)
+    /// <summary>Whether a Grep call (the PreToolUse hook's stdin JSON) should be redirected to CodeCompass: only when
+    /// search_code gives the same answer - a non-empty literal pattern, over the whole indexed project, with no Grep
+    /// option search_code lacks. The project is <paramref name="projectDir"/> (CLAUDE_PROJECT_DIR, which the MCP
+    /// server indexes), else the payload's cwd; a Grep with no path searches the cwd. An unreadable payload, or any
+    /// failure deciding, keeps the redirect; this never throws.</summary>
+    public static bool ShouldRedirectGrep(string hookInput, string? projectDir, Func<string, bool>? hasIndex = null)
     {
         try
         {
             using var doc = JsonDocument.Parse(hookInput);
-            if (!doc.RootElement.TryGetProperty("tool_input", out var input) || input.ValueKind != JsonValueKind.Object)
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("tool_input", out var input) || input.ValueKind != JsonValueKind.Object ||
+                !input.TryGetProperty("pattern", out var pat) || pat.ValueKind != JsonValueKind.String)
                 return true;
-            if (input.TryGetProperty("multiline", out var ml) && ml.ValueKind == JsonValueKind.True) return false;
-            if (input.TryGetProperty("pattern", out var pat) && pat.ValueKind == JsonValueKind.String && IsRegex(pat.GetString()!))
-                return false;
-            if (input.TryGetProperty("path", out var path) && path.ValueKind == JsonValueKind.String &&
-                doc.RootElement.TryGetProperty("cwd", out var cwd) && cwd.ValueKind == JsonValueKind.String &&
-                !IsUnder(path.GetString()!, cwd.GetString()!))
-                return false;
-            return true;
+
+            foreach (var opt in input.EnumerateObject())
+            {
+                if (!RedirectableOptions.Contains(opt.Name)) return false;
+                if (opt.Name == "multiline" && opt.Value.ValueKind == JsonValueKind.True) return false;
+                if (opt.Name == "output_mode" && opt.Value.GetString() is not ("content" or "files_with_matches")) return false;
+            }
+
+            var pattern = pat.GetString()!;
+            if (string.IsNullOrWhiteSpace(pattern) || IsRegex(pattern)) return false;
+
+            string? cwd = root.TryGetProperty("cwd", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
+            var project = !string.IsNullOrWhiteSpace(projectDir) ? projectDir! : cwd;
+            if (string.IsNullOrWhiteSpace(project)) return true;
+            var baseDir = string.IsNullOrWhiteSpace(cwd) ? project : cwd!;
+
+            // The scope Grep will search: its path (relative to the cwd, ~ = home), else the cwd itself. search_code
+            // has no folder or file scope, so only the whole project is an equivalent search.
+            string scope = input.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String &&
+                           !string.IsNullOrWhiteSpace(p.GetString())
+                ? Path.Combine(baseDir, ExpandHome(p.GetString()!))
+                : baseDir;
+            if (!PathSafety.SameDir(scope, project)) return false;
+
+            return (hasIndex ?? RepositoryIndexer.HasIndex)(PathSafety.NormalizeDir(project));
         }
-        catch (Exception e) when (e is JsonException or ArgumentException or NotSupportedException or PathTooLongException)
+        catch
         {
             return true;
         }
     }
 
+    // "~" and "~/..." name the home directory (Grep expands them); anything else is returned as-is.
+    private static string ExpandHome(string path)
+    {
+        if (path == "~") return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (path.StartsWith("~/", StringComparison.Ordinal) || path.StartsWith("~\\", StringComparison.Ordinal))
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), path[2..]);
+        return path;
+    }
+
     // A pattern search_code can't express. A bare '.' doesn't count (the literal hit is what was meant), nor does an
-    // escaped punctuation character; a letter escape (\b, \w, \d, \s ...) does.
+    // escaped punctuation character; a letter escape (\b, \w, \d, \s ...), ripgrep's \< \> word boundaries, or a
+    // trailing lone backslash do.
     private static bool IsRegex(string pattern)
     {
         for (int i = 0; i < pattern.Length; i++)
@@ -58,23 +99,15 @@ public static class HookPayloads
             char c = pattern[i];
             if (c == '\\')
             {
-                if (i + 1 < pattern.Length && char.IsLetterOrDigit(pattern[i + 1])) return true;
+                if (i + 1 >= pattern.Length) return true;
+                char next = pattern[i + 1];
+                if (char.IsLetterOrDigit(next) || next is '<' or '>') return true;
                 i++;
                 continue;
             }
             if (c is '|' or '*' or '+' or '?' or '(' or ')' or '[' or ']' or '{' or '}' or '^' or '$') return true;
         }
         return false;
-    }
-
-    private static bool IsUnder(string path, string root)
-    {
-        var full = Path.GetFullPath(Path.Combine(root, path)).TrimEnd('\\', '/');
-        var rootFull = Path.GetFullPath(root).TrimEnd('\\', '/');
-        var cmp = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        return full.Equals(rootFull, cmp) ||
-               full.StartsWith(rootFull + Path.DirectorySeparatorChar, cmp) ||
-               full.StartsWith(rootFull + '/', cmp);
     }
 
     /// <summary>PreToolUse payload that denies the tool call and redirects to CodeCompass.</summary>
