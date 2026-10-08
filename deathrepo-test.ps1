@@ -72,7 +72,7 @@ Say "== fabricating work-shape tree (~$TargetGB GB target): $GiantHeaders giants
 # sibling ground-truth manifest). Same knob semantics; giant headers are still named regmap_block*.h,
 # so the marker-plant glob below is unchanged.
 $spawner = Join-Path $root "tools/codespawner/codespawner.exe"
-if (-not (Test-Path $spawner)) { throw "vendored generator missing: $spawner (run scripts/vendor-codespawner.ps1)" }
+if (-not (Test-Path $spawner)) { throw "vendored generator missing: $spawner (see tools/codespawner/GENERATOR_VERSION)" }
 & $spawner gen --out $genDir --scale $Scale --giant-headers $GiantHeaders --max-header-mb $giantMB --big-headers $bigHeaders --force
 if ($LASTEXITCODE -ne 0) { throw "codespawner gen failed (exit $LASTEXITCODE)" }
 # Resolve to an ABSOLUTE path: index runs via Start-Process, which does NOT inherit this shell's working
