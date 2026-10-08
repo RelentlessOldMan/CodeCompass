@@ -489,18 +489,18 @@ median and the max; **refs 1st-call** is the one-time analyzer build paid on the
 
 | Repo | Lang | Files | Size | Build | search_code | find_definition | search_symbols | find_references (med) | find_references (max) | refs 1st-call |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| requests | Python | 118 | 4.9 MB | 2.1 s | 218 / 3 | 220 / 1 | 206 / 1 | 868 / 3 | 1445 / 30 | 0.7 s |
-| fmt | C++ | 207 | 3.2 MB | 1.6 s | 205 / 3 | 215 / 1 | 206 / 2 | 1041 / 18 | 1061 / 29 | 0.7 s |
-| EF Core ¹ | C# | 5,002 | 82 MB | 4.2 s | 208 / 6 | 202 / 1 | 202 / 6 | 14252 / 900 | 18896 / 5644 | 13 s |
-| TypeScript | TS | 72,171 | 349 MB | 28.0 s | 425 / 26 | 411 / 2 | 411 / 12 | 1438 / 69 | 1662 / 381 | 0.9 s |
-| Godot | C++ | 9,937 | 196 MB | 10.4 s | 424 / 14 | 410 / 2 | 424 / 26 | 2689 / 181 | 3802 / 827 | 2.1 s |
-| Roslyn ¹ | C# | 19,980 | 372 MB | 12.2 s | 245 / 18 | 202 / 2 | 238 / 32 | 34139 / 1652 | 69523 / 10316 | 31 s |
-| LLVM | C/C++ | 132,213 | 1.5 GB | 61.6 s | 630 / 60 | 616 / 5 | 630 / 13 | 2480 / 41 | 5236 / 249 | 1.3 s |
-| generated C/C++ — **local** | C/C++ | 66,337 | 88 GB | 17m 45s | 864 / 8 | 830 / 15 | 837 / 3 | 5180 / 3253 | 5378 / 3516 | 4.6 s |
-| generated C/C++ — **SMB/UNC** | C/C++ | 66,337 | 88 GB | 25m 2s | 2307 / 10 | 2102 / 11 | 2077 / 3 | 12746 / 6366 | 14348 / 7637 | 10.8 s |
+| requests | Python | 118 | 4.9 MB | 1.9 s | 219 / 3 | 219 / 1 | 217 / 1 | 855 / 4 | 1690 / 74 | 0.7 s |
+| fmt | C++ | 207 | 3.2 MB | 1.6 s | 216 / 3 | 217 / 2 | 217 / 2 | 1033 / 11 | 1266 / 19 | 0.7 s |
+| EF Core ¹ | C# | 5,002 | 82 MB | 5.3 s | 423 / 8 | 218 / 2 | 422 / 13 | 18860 / 623 | 44555 / 23991 | 20.5 s |
+| TypeScript | TS | 72,171 | 349 MB | 26.8 s | 424 / 33 | 422 / 3 | 422 / 11 | 1479 / 49 | 1941 / 509 | 1.1 s |
+| Godot | C++ | 9,937 | 196 MB | 12.5 s | 434 / 11 | 226 / 3 | 415 / 22 | 2491 / 43 | 3623 / 113 | 2.2 s |
+| Roslyn ¹ | C# | 19,980 | 372 MB | 16.7 s | 432 / 21 | 434 / 4 | 422 / 30 | 46902 / 1105 | 59792 / 18221 | 34.3 s |
+| LLVM | C/C++ | 132,213 | 1.5 GB | 57.9 s | 872 / 93 | 639 / 7 | 848 / 4 | 3034 / 141 | 4472 / 247 | 2.0 s |
+| generated C/C++ — **local** | C/C++ | 66,337 | 88 GB | 16m 54s | 1018 / 11 | 881 / 8 | 878 / 2 | 2329 / 459 | 3293 / 617 | 1.4 s |
+| generated C/C++ — **SMB/UNC** | C/C++ | 66,337 | 88 GB | 22m 11s | 2259 / 10 | 2053 / 11 | 2063 / 2 | 11600 / 1785 | 13486 / 3945 | 9.6 s |
 
-¹ **Re-measure pending:** the EF Core and Roslyn rows are from an earlier version. C# `find_references`
-changed since (names declared many times are searched faster), so these two rows will be re-measured.
+¹ The broadest names the battery picks in EF Core and Roslyn include ones declared many times over (`Add`,
+`Contains`), so their *max* is the many-declarations case described below, not a typical lookup.
 
 The **generated C/C++** corpus is a synthetic stress tree — **66,337 files / ~88 GB**, with single
 source files up to **1.4 GB** — indexed once on local disk and once over an SMB/UNC share, to show
@@ -509,7 +509,7 @@ behaviour at extreme scale and across a network.
 **How to read it:**
 
 - **`search_code` / `find_definition` / `search_symbols`** are index-backed: warm they answer in
-  **~1–60 ms** on every repo (even 132 k files, even over SMB). Cold is dominated by process start +
+  **~1–100 ms** on every repo (even 132 k files, even over SMB). Cold is dominated by process start +
   map-open (~0.2–2 s), which is exactly what the persistent MCP server exists to amortize away.
 - **`find_references` on C#** builds Roslyn's workspace once (the *refs 1st-call*), then keeps it
   resident. Its cost then depends on the name: one with a single declaration answers in about a
@@ -518,7 +518,8 @@ behaviour at extreme scale and across a network.
 - **`find_references` on C/C++** (and Python, TypeScript, …) is a name search over the index (see
   *C/C++ references*), so it costs about what `search_code` does plus reading the matched files to
   skip comments and strings: well under a second warm on the public repos. On the generated corpus,
-  whose matched files run to gigabytes, that reading dominates — a few seconds.
+  whose matched files run to gigabytes, that reading dominates — about half a second warm on local
+  disk, a couple of seconds over SMB.
 
 **Scale check:** an aggregated **10.4 GB / ~1.1 million file** corpus indexed in **7m48s** (22 MB/s)
 using **792 MB heap / 2.2 GB peak working set**, with queries still ~1 ms (p95 7.9 ms). Memory stays
