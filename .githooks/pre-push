@@ -1,27 +1,24 @@
 #!/bin/sh
-# CodeCompass pre-push gate: build + the xUnit suite (./check.ps1, ~2 min) before a push is allowed. Every push to main
-# is a release, and the GitHub release workflow runs the FULL gate (check.ps1 -Big) itself before publishing - so the
-# heavy large-file scenarios run there, not here. Enable with:  ./check.ps1 -InstallHook   (or: git config core.hooksPath .githooks)
+# CodeCompass pre-push gate: a light Release compile check before a push is allowed. Every push to main is a release,
+# and the GitHub release workflow runs the FULL gate (check.ps1 -Big: build, the xUnit suite, the large-file and
+# generated-corpus scenarios) itself before publishing - a failed gate publishes nothing. So the tests run there, not
+# here: a push no longer pegs this machine for minutes, and needs no quiet box. The build is held to 2 cores so it
+# stays out of the way of whatever else the machine is doing. Run the suite locally by hand with ./check.ps1.
+# Enable with:  ./check.ps1 -InstallHook   (or: git config core.hooksPath .githooks)
 # Bypass one push with:  git push --no-verify
-#
-# Git runs this from the repo root. It shells out to PowerShell (pwsh if present, else Windows
-# PowerShell) to run check.ps1; a non-zero exit aborts the push.
 
-echo "[pre-push] running ./check.ps1 (bypass with 'git push --no-verify') ..."
+echo "[pre-push] compile check (dotnet build -c Release, 2 cores; tests run on GitHub before release) ..."
 
-if command -v pwsh >/dev/null 2>&1; then
-    pwsh -NoProfile -ExecutionPolicy Bypass -File ./check.ps1
-elif command -v powershell >/dev/null 2>&1; then
-    powershell -NoProfile -ExecutionPolicy Bypass -File ./check.ps1
-else
-    echo "[pre-push] PowerShell not found; cannot run checks. Bypass with 'git push --no-verify'." >&2
+if ! command -v dotnet >/dev/null 2>&1; then
+    echo "[pre-push] dotnet not found; cannot build. Bypass with 'git push --no-verify'." >&2
     exit 1
 fi
 
+dotnet build -c Release --nologo -v q -maxcpucount:2
 status=$?
 if [ "$status" -ne 0 ]; then
-    echo "[pre-push] checks FAILED (exit $status) - push aborted. Override with 'git push --no-verify'." >&2
+    echo "[pre-push] build FAILED (exit $status) - push aborted. Override with 'git push --no-verify'." >&2
     exit 1
 fi
-echo "[pre-push] checks passed."
+echo "[pre-push] build passed; the full test gate runs on GitHub before the release publishes."
 exit 0

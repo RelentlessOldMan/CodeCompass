@@ -53,13 +53,13 @@ $root = $PSScriptRoot
 $failures = New-Object System.Collections.Generic.List[string]
 Set-Location $root   # dotnet restore/build/test below resolve the solution from the current directory
 
-# Point git at the tracked hooks dir so .githooks/pre-push runs ./check.ps1 (build + xUnit) before every push;
-# the release workflow runs the full -Big gate on GitHub for every push to main.
+# Point git at the tracked hooks dir so .githooks/pre-push runs a light compile check before every push; the release
+# workflow runs the full -Big gate (build + xUnit + heavy scenarios) on GitHub for every push to main.
 if ($InstallHook) {
     Push-Location $root
     try { git config core.hooksPath .githooks }
     finally { Pop-Location }
-    Write-Host "Installed: git will run '.githooks/pre-push' (=> ./check.ps1) before each push." -ForegroundColor Green
+    Write-Host "Installed: git will run '.githooks/pre-push' (a Release compile check) before each push." -ForegroundColor Green
     Write-Host "Bypass a single push with:  git push --no-verify"
     exit 0
 }
@@ -281,7 +281,7 @@ if ($Big -and (Test-Path $cli)) {
 
     # Long churn through `codecompass update` against CodeSpawner's composed ground truth (removes, line shifts,
     # adds, and grow/shrink across the sidecar cutoff so sidecars are created and orphan-cleaned). 10 edits cycle
-    # every edit type twice; that needs 2 shrink seeds (with 1, mutate crashes on the second Shrink).
+    # every edit type twice; that needs 2 shrink seeds (with 1, mutate refuses the plan).
     Section "churn: incremental update matches composed ground truth (10 edits)"
     $churn = Join-Path $root ".corpus/_churncheck"
     Remove-Item "$churn-delta*.json" -Force -ErrorAction SilentlyContinue

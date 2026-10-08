@@ -14,8 +14,8 @@
   authenticated: `gh auth status`). Without -Publish it only builds the local zip.
 
 .PARAMETER Publish     Also create/update the GitHub Release v<version> and upload the zip (needs `gh`).
-.PARAMETER SkipTests   Skip the pre-publish test gate (check.ps1 -Big). Use only if you JUST ran it; the
-                       push's pre-push hook (if installed) is then the only backstop.
+.PARAMETER SkipTests   Skip the pre-publish test gate (check.ps1 -Big). Use only if you JUST ran it; nothing
+                       else tests this release (the pre-push hook only compiles).
 
 .EXAMPLE
   pwsh ./make-release.ps1              # build the local release zip
@@ -61,9 +61,9 @@ $sha = $null
 if ($Publish) {
     # a) A published release MUST be tested - don't rely on the pre-push hook being installed here. Run the
     #    full gate (unit + big-file/network-sim/pathological/diagnostics); we push --no-verify so it doesn't
-    #    run again via the hook. -SkipTests opts out (with a warning; the hook, if installed, still guards).
+    #    run again via the hook. -SkipTests opts out (with a warning; the pre-push hook only compiles).
     if ($SkipTests) {
-        Write-Warning "SkipTests: NOT running check.ps1 -Big. Only the pre-push hook (if installed) will gate this release."
+        Write-Warning "SkipTests: NOT running check.ps1 -Big. Nothing else tests this release (the pre-push hook only compiles)."
     }
     else {
         Write-Host "Running the release test gate (check.ps1 -Big) ..."
