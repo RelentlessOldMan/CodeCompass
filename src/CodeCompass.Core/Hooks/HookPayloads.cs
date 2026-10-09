@@ -36,9 +36,10 @@ public static class HookPayloads
     /// <summary>Whether a Grep call (the PreToolUse hook's stdin JSON) should be redirected to CodeCompass: only when
     /// search_code gives the same answer - a non-empty literal pattern, over the whole indexed project, with no Grep
     /// option search_code lacks. The project is <paramref name="projectDir"/> (CLAUDE_PROJECT_DIR, which the MCP
-    /// server indexes), else the payload's cwd; a Grep with no path searches the cwd. An unreadable payload, or any
-    /// failure deciding, keeps the redirect; this never throws.</summary>
-    public static bool ShouldRedirectGrep(string hookInput, string? projectDir, Func<string, bool>? hasIndex = null)
+    /// server indexes), else the payload's cwd; a Grep with no path searches the cwd. <paramref name="canServe"/> (default:
+    /// an index exists AND a CodeCompass server is serving the project) - with no server connected the agent has no
+    /// search_code, so Grep runs. An unreadable payload, or any failure deciding, keeps the redirect; this never throws.</summary>
+    public static bool ShouldRedirectGrep(string hookInput, string? projectDir, Func<string, bool>? canServe = null)
     {
         try
         {
@@ -73,13 +74,15 @@ public static class HookPayloads
                 : baseDir;
             if (!PathSafety.SameDir(scope, project)) return false;
 
-            return (hasIndex ?? RepositoryIndexer.HasIndex)(PathSafety.NormalizeDir(project));
+            return (canServe ?? Served)(PathSafety.NormalizeDir(project));
         }
         catch
         {
             return true;
         }
     }
+
+    private static bool Served(string project) => RepositoryIndexer.HasIndex(project) && ServerLiveness.IsServed(project);
 
     // "~" and "~/..." name the home directory (Grep expands them); anything else is returned as-is.
     private static string ExpandHome(string path)

@@ -117,6 +117,9 @@ public static class ServerContext
     internal static bool IsLiveWatchOwnerForTest => _own is not null;
     internal static bool HasWatcherForTest { get { Rw.EnterReadLock(); try { return _watcher is not null; } finally { Rw.ExitReadLock(); } } }
     internal static void OnChangesForTest(ChangeBatch batch) => OnChanges(batch);
+    internal static bool IsLinkedOwnerForTest(string root) => FindLinked(root)?.Own is not null;
+    internal static bool LinkedHasWatcherForTest(string root) => FindLinked(root)?.Watcher is not null;
+    private static LinkedRoot? FindLinked(string root) => _linked.FirstOrDefault(l => PathEq(l.Root, root));
 
     private static IndexState _state = IndexState.NotStarted;
     private static int _progressFiles;
@@ -202,6 +205,12 @@ public static class ServerContext
         oldOwn?.Dispose();
         var own = WriteOwnership.TryAcquire(CacheDir);
         lock (_ownGate) _own = own;
+
+        // Tell the Grep hook a server is serving this root (it redirects only while one is), and stop saying so for
+        // the previous root.
+        // Release the old marker first: on a re-point to the same root the new one is the same file.
+        Interlocked.Exchange(ref _liveness, null)?.Dispose();
+        _liveness = ServerLiveness.Mark(Root);
         _liveRequested = false; // a re-point starts unwatched until EnableLiveIndex (as before the role existed)
         if (own is null)
             Log.For(Root).Info("another CodeCompass session is live-indexing this repo; serving it read-only " +
@@ -230,7 +239,11 @@ public static class ServerContext
         WriteOwnership? own;
         lock (_ownGate) { own = _own; _own = null; }
         own?.Dispose();
+        Interlocked.Exchange(ref _liveness, null)?.Dispose();
     }
+
+    // This process's "serving Root" marker for the Grep hook (see ServerLiveness).
+    private static ServerLiveness? _liveness;
 
     // A read-only session takes over the live-watch role once its holder exits (the cheap probe is a failed exclusive
     // open of a local file). It then starts the watcher it was asked for, and reconciles once to catch the edits made
@@ -266,13 +279,40 @@ public static class ServerContext
             if (gen is null || gen == _loadedGen) return;
             int epoch = Volatile.Read(ref _epoch);
             if (!RepositoryIndexer.TryLoad(Root, out var t, out var s)) return;
-            if (Swap(t, s, epoch, gen))
+            if (Swap(t, s, epoch, gen, sourcesChanged: SourcesMoved(Root, gen)))
             {
                 Log.For(Root).Info("reloaded the index: another CodeCompass process updated it");
                 ClearEventsLostIfRefreshed();
             }
         }
         finally { BuildGate.Release(); }
+    }
+
+    // MaybePromoteToOwner for linked roots: one served read-only takes over writing it once its owner has exited, starts
+    // the watcher an owner runs, and reconciles once (gated like a fresh link) to catch edits made while unwatched.
+    // Without this a linked root was owned only at link time and went silently stale after its owner exited.
+    private static void MaybePromoteLinked()
+    {
+        if (_linked.All(l => l.Own is not null)) return; // the hot path: no lock
+        // Never wait for the gate: a link reconcile holding it may be draining a watcher behind a long build, and
+        // promotion can just as well happen on the next query.
+        if (!Monitor.TryEnter(_linkedGate)) return;
+        try
+        {
+            foreach (var lr in _linked)
+            {
+                if (lr.Own is not null) continue;
+                var won = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(lr.Root));
+                if (won is null) continue; // still owned elsewhere
+                lr.Own = won;
+                var linkedRoot = lr.Root;
+                lr.Watcher = new RepositoryWatcher(linkedRoot, b => OnLinkedChanges(linkedRoot, b), 1000); // off Rw, as in ReconcileTo
+                lr.Watcher.Start();
+                Log.For(linkedRoot).Info("took over live indexing for this linked root (the session that held it ended)");
+                Task.Run(() => ReconcileLinkedOnLoad(linkedRoot));
+            }
+        }
+        finally { Monitor.Exit(_linkedGate); }
     }
 
     // Same freshness rule for linked roots: whoever writes a linked root (its owner here, another session, or the
@@ -289,7 +329,8 @@ public static class ServerContext
             {
                 gen = IndexGeneration.Read(IndexStore.CacheDirPath(lr.Root));
                 if (gen is null || gen == lr.Gen) continue;
-                if (RepositoryIndexer.TryLoad(lr.Root, out var t, out var s)) SwapLinked(lr.Root, t, s, gen);
+                if (RepositoryIndexer.TryLoad(lr.Root, out var t, out var s))
+                    SwapLinked(lr.Root, t, s, gen, sourcesChanged: SourcesMoved(lr.Root, gen));
             }
             catch (Exception ex) { Log.For(lr.Root).Warn($"linked root reload skipped: {ex.Message}"); }
             finally { BuildGate.Release(); }
@@ -344,7 +385,7 @@ public static class ServerContext
         }
         _text?.Dispose(); _symbols?.Dispose(); _snapshot?.Dispose();
         _text = t; _symbols = s; _snapshot = null;
-        _csharp?.Dispose(); _csharp = null;
+        if (SourcesMoved(Root, gen)) { _csharp?.Dispose(); _csharp = null; }
         _loadedGen = gen;
         Log.For(Root).Info("reloaded the index before applying edits (another CodeCompass process had updated it)");
     }
@@ -497,8 +538,9 @@ public static class ServerContext
                 var b = RepositoryIndexer.Build(linkedRoot, ct: ct); nt = b.Text; ns = b.Symbols;
             }
             else { var u = RepositoryIndexer.UpdatePaths(linkedRoot, batch.ChangedFullPaths, ct); nt = u.Text; ns = u.Symbols; }
-            SwapLinked(linkedRoot, nt, ns, wl.Commit(),
-                       sourcesChanged: batch.FullReconcile || RoslynCSharpAnalyzer.MayAffect(batch.ChangedFullPaths));
+            bool affects = batch.FullReconcile || RoslynCSharpAnalyzer.MayAffect(batch.ChangedFullPaths);
+            if (!affects) wl.SourcesUnchanged();
+            SwapLinked(linkedRoot, nt, ns, wl.Commit(), sourcesChanged: affects);
             nt = null; ns = null; // ownership transferred to _linked
         }
         catch (OperationCanceledException) { Log.For(linkedRoot).Info("linked root update canceled (re-point/shutdown)"); }
@@ -524,7 +566,7 @@ public static class ServerContext
         if (!installed) { text.Dispose(); symbols.Dispose(); } // unlinked while updating
         // The C# analyzer spans this linked root too, so if its sources changed, drop the cached model so the next
         // semantic query rebuilds over the fresh sources (lazy, off the query path).
-        if (sourcesChanged) InvalidateSemanticAnalyzers();
+        if (sourcesChanged || SourcesMoved(linkedRoot, gen)) InvalidateSemanticAnalyzers(); // see Swap
     }
 
     // Reconcile a linked root against its current tree on load (out-of-session changes), gated exactly
@@ -552,8 +594,9 @@ public static class ServerContext
         {
             using var wl = IndexWriteLock.Acquire(IndexStore.CacheDirPath(linkedRoot), ct);
             var u = RepositoryIndexer.Update(linkedRoot, ct: ct);
-            SwapLinked(linkedRoot, u.Text, u.Symbols, wl.Commit(),
-                       sourcesChanged: u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild);
+            bool changed = u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild;
+            if (!changed) wl.SourcesUnchanged();
+            SwapLinked(linkedRoot, u.Text, u.Symbols, wl.Commit(), sourcesChanged: changed);
         }
         finally { BuildGate.Release(); }
     }
@@ -627,6 +670,7 @@ public static class ServerContext
         MaybePromoteToOwner();  // take over live indexing if the session that held it has exited
         MaybeReloadExternal();  // another process (session / terminal command) committed a write -> serve it, not a stale copy
         MaybeReconcileLinks(); // cheap stat; picks up a terminal `link add`/`remove` and guarantees the query sees the current set
+        MaybePromoteLinked();  // take over a linked root whose owning session has exited
         MaybeReloadLinked();
         Rw.EnterReadLock();
         try
@@ -764,7 +808,32 @@ public static class ServerContext
     // run inside a Query/QueryAll read lock, so reading _linked here can't race a swap.
     public static RoslynCSharpAnalyzer CSharp
     {
-        get { lock (AnalyzerGate) { TouchSemantic(); return _csharp ??= new RoslynCSharpAnalyzer(AllRootsSnapshot()); } }
+        get
+        {
+            lock (AnalyzerGate)
+            {
+                TouchSemantic();
+                if (_csharp is not null) return _csharp;
+                var roots = AllRootsSnapshot();
+                // Each root's sources token as of this build: another process's write that doesn't move it can't have
+                // changed what this model read (see SourcesMoved).
+                var tokens = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in roots) tokens[r] = IndexGeneration.SourcesOf(IndexGeneration.Read(IndexStore.CacheDirPath(r)));
+                _csharpSources = tokens;
+                return _csharp = new RoslynCSharpAnalyzer(roots);
+            }
+        }
+    }
+
+    // The sources tokens the resident analyzer was built against, per root (see CSharp).
+    private static volatile Dictionary<string, string?> _csharpSources = new(StringComparer.OrdinalIgnoreCase);
+
+    // Did another process's write to <paramref name="root"/>, now at generation <paramref name="gen"/>, possibly change
+    // the sources the resident analyzer read? Only a sources token present in both and equal says no.
+    private static bool SourcesMoved(string root, string? gen)
+    {
+        var now = IndexGeneration.SourcesOf(gen);
+        return now is null || !_csharpSources.TryGetValue(root, out var built) || built != now;
     }
 
     // The project root first (primary, for path display) then every linked root. Call under an Rw read/write
@@ -839,6 +908,9 @@ public static class ServerContext
         finally { Rw.ExitWriteLock(); }
         cs?.Dispose();
     }
+
+    /// <summary>Test seam: run the network/huge-repo startup ignore-prune synchronously.</summary>
+    internal static void RunPruneIgnoredNow() => BackgroundPruneIgnored();
 
     /// <summary>Test seam: run the startup reconcile synchronously (it normally runs in the background after a load).</summary>
     internal static void RunStartupReconcileNow() => BackgroundReconcile();
@@ -922,7 +994,9 @@ public static class ServerContext
                 _text = text;
                 _symbols = symbols;
                 _snapshot = null;
-                if (sourcesChanged)
+                // Also when the root's sources token moved past the one the analyzer was built against: a write that
+                // changed nothing itself carries the current token, which may be another writer's newer one.
+                if (sourcesChanged || SourcesMoved(Root, gen))
                 {
                     oldCs = _csharp; // stale after a rebuild; dispose off-lock to free their model
                     _csharp = null;
@@ -1154,6 +1228,7 @@ public static class ServerContext
             using var wl = IndexWriteLock.Acquire(CacheDir, ct);
             var u = RepositoryIndexer.Update(Root, ct: ct);
             bool changed = u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild;
+            if (!changed) wl.SourcesUnchanged();
             if (Swap(u.Text, u.Symbols, epoch, wl.Commit(), sourcesChanged: changed))
             {
                 _eventsLost = false; // a full walk caught whatever the watcher missed
@@ -1193,15 +1268,17 @@ public static class ServerContext
             var u = RepositoryIndexer.PruneIgnored(Root);
             if (u.Pruned > 0)
             {
-                if (Swap(u.Text, u.Symbols, epoch, wl.Commit())) // Swap disposes the handles itself if the workspace was re-pointed
+                // The analyzer walks with the same ignore rules, so it never read the pruned paths: no source it uses changed.
+                wl.SourcesUnchanged();
+                if (Swap(u.Text, u.Symbols, epoch, wl.Commit(), sourcesChanged: false)) // Swap disposes the handles itself if the workspace was re-pointed
                     Log.For(Root).Info($"pruned {u.Pruned} stale now-ignored path(s) from the index " +
                                        "(an older/looser build had indexed them; query-time filter already hid them)");
             }
             else
             {
-                // Already clean - drop the extra handles and keep serving. PruneIgnored's own (nested) hold still
-                // rewrote nothing, so don't make every other session reload an unchanged index.
-                u.Text.Dispose(); u.Symbols.Dispose();
+                // Already clean, or the load failed (null handles) - drop any extra handles and keep serving. Nothing
+                // was rewritten, so don't make every other session reload an unchanged index.
+                u.Text?.Dispose(); u.Symbols?.Dispose();
                 wl.SkipBump();
             }
         }
@@ -1294,6 +1371,7 @@ public static class ServerContext
                 // Targeted incremental: fast, done under the write lock. If segments have piled up, escalate to a
                 // compaction instead of just returning.
                 bool compact;
+                bool affects = RoslynCSharpAnalyzer.MayAffect(batch.ChangedFullPaths);
                 Rw.EnterWriteLock();
                 try
                 {
@@ -1303,10 +1381,12 @@ public static class ServerContext
                     if (compact) _state = IndexState.Building;
                 }
                 finally { Rw.ExitWriteLock(); }
+                if (!affects) wl.SourcesUnchanged(); // other sessions reload the index but keep their C# model
                 _loadedGen = wl.Commit();
                 if (!compact) return;
                 Log.For(Root).Info("compacting: segment count high after incremental edits; merging segments");
                 var c = RepositoryIndexer.Compact(Root, ct);
+                if (!affects) wl.SourcesUnchanged(); // Compact's nested hold reset it; a merge changes no source
                 ok = Swap(c.Text, c.Symbols, epoch, wl.Commit(), sourcesChanged: false); // a merge of segments; no source changed
             }
             else
@@ -1416,7 +1496,12 @@ public static class ServerContext
                 }
                 finally { Rw.ExitWriteLock(); }
 
-                if (!reconcile) { _loadedGen = wl.Commit(); continue; }
+                if (!reconcile)
+                {
+                    if (!RoslynCSharpAnalyzer.MayAffect(paths)) wl.SourcesUnchanged();
+                    _loadedGen = wl.Commit();
+                    continue;
+                }
 
                 if (!ShouldAutoReconcile())
                 {

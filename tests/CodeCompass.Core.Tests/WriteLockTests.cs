@@ -108,6 +108,23 @@ public class WriteLockTests
         finally { ServerContext.Init(repo.Root); }
     }
 
+    // The startup ignore-prune when its load fails (here: no index at all): it used to dereference the null handles, log
+    // the NullReferenceException as "skipped", and - never reaching SkipBump - bump the generation on release, so every
+    // other session reloaded an index nothing had written.
+    [Fact]
+    public void Server_PruneIgnored_WhenTheLoadFails_WritesNoGeneration()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { }\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            ServerContext.RunPruneIgnoredNow();
+            Assert.Equal("", IndexGeneration.Read(IndexStore.CacheDirPath(repo.Root)));
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
     // The corruption case: a live-watching session applying an edit must not flush its STALE manifest over another
     // writer's newer one (which dropped that writer's segment from the index on disk).
     [Fact]
@@ -165,6 +182,40 @@ public class WriteLockTests
         {
             otherSession?.Dispose();
             ServerContext.Init(repo.Root);
+        }
+    }
+
+    // The same hand-over for a LINKED root: it was only ever owned at link time, so once its owning session exited nobody
+    // watched it - this session's copy went silently stale until a terminal `update` or a re-point.
+    [Fact]
+    public void Server_ReadOnlyLinkedRoot_TakesOverLiveIndexing_WhenItsOwnerExits()
+    {
+        using var project = new TempRepo();
+        using var lib = new TempRepo();
+        project.Write("p.cs", "namespace P { class ProjectProbe { } }");
+        lib.Write("l.cs", "namespace L { class LinkedRoleProbe { } }");
+        var (t0, s0, _) = RepositoryIndexer.Build(lib.Root);
+        t0.Dispose(); s0.Dispose();
+        LinkStore.Add(project.Root, lib.Root);
+
+        var otherSession = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(lib.Root));
+        Assert.NotNull(otherSession);
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.Contains("LinkedRoleProbe", CodeCompassTools.SearchCode("LinkedRoleProbe")); // served read-only
+            Assert.False(ServerContext.IsLinkedOwnerForTest(lib.Root));
+
+            otherSession!.Dispose();                                   // the linked root's owner exits
+            CodeCompassTools.SearchCode("LinkedRoleProbe");            // next query takes over the role
+            Assert.True(ServerContext.IsLinkedOwnerForTest(lib.Root));
+            Assert.True(ServerContext.LinkedHasWatcherForTest(lib.Root));
+        }
+        finally
+        {
+            otherSession?.Dispose();
+            ServerContext.Init(project.Root);
         }
     }
 
