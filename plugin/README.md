@@ -22,11 +22,15 @@ Perforce/git sync with Claude closed) are picked up by a background **reconcile*
 startup — automatic for local repos, deferred to `codecompass update` on network
 shares / huge repos (`autoReconcile` config to force it).
 
+To check it's working on your own repo, run through the
+[manual test prompts](https://github.com/RelentlessOldMan/CodeCompass/blob/main/docs/manual-test-prompts.md):
+prompts to give a session for every tool, and what each answer should look like.
+
 **Linked roots.** A project can federate external directories that can't be nested
 under it (a shared library elsewhere, a sibling repo, a `Z:\` drop): `codecompass
 link add "<external-path>"`. They're searched alongside the project as one result set,
 live-watched for edits like the main repo, and `find_references`/`find_callees`
-resolve **across** the boundary (C#/C++). A root shared by several projects is indexed
+resolve **across** the boundary (C# semantically; other languages, C/C++ included, by name). A root shared by several projects is indexed
 once and reused. Project hits stay repo-relative; linked hits show absolute paths.
 **Multi-repo search is an MCP-server feature only** — these tools federate across a
 project's linked roots; the `codecompass` CLI always searches the single root you give
