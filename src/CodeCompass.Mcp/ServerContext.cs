@@ -497,7 +497,8 @@ public static class ServerContext
                 var b = RepositoryIndexer.Build(linkedRoot, ct: ct); nt = b.Text; ns = b.Symbols;
             }
             else { var u = RepositoryIndexer.UpdatePaths(linkedRoot, batch.ChangedFullPaths, ct); nt = u.Text; ns = u.Symbols; }
-            SwapLinked(linkedRoot, nt, ns, wl.Commit());
+            SwapLinked(linkedRoot, nt, ns, wl.Commit(),
+                       sourcesChanged: batch.FullReconcile || RoslynCSharpAnalyzer.MayAffect(batch.ChangedFullPaths));
             nt = null; ns = null; // ownership transferred to _linked
         }
         catch (OperationCanceledException) { Log.For(linkedRoot).Info("linked root update canceled (re-point/shutdown)"); }
@@ -507,7 +508,9 @@ public static class ServerContext
 
     // Install fresh indexes for a linked root under the write lock (so no in-flight federated read touches
     // a disposed mmap), disposing the old ones. If the root was unlinked meanwhile, the new ones are dropped.
-    private static void SwapLinked(string linkedRoot, SegmentedIndex text, SegmentedSymbolIndex symbols, string? gen)
+    // sourcesChanged false (a reconcile or edit that can't have changed what the C# analyzer read) keeps it - see Swap.
+    private static void SwapLinked(string linkedRoot, SegmentedIndex text, SegmentedSymbolIndex symbols, string? gen,
+                                   bool sourcesChanged = true)
     {
         SegmentedIndex? oldT = null; SegmentedSymbolIndex? oldS = null; bool installed = false;
         Rw.EnterWriteLock();
@@ -519,9 +522,9 @@ public static class ServerContext
         finally { Rw.ExitWriteLock(); }
         oldT?.Dispose(); oldS?.Dispose();
         if (!installed) { text.Dispose(); symbols.Dispose(); } // unlinked while updating
-        // The C#/C++ analyzers span this linked root too, so its content just changed under them - drop the
-        // cached model so the next semantic query rebuilds over the fresh sources (lazy, off the query path).
-        InvalidateSemanticAnalyzers();
+        // The C# analyzer spans this linked root too, so if its sources changed, drop the cached model so the next
+        // semantic query rebuilds over the fresh sources (lazy, off the query path).
+        if (sourcesChanged) InvalidateSemanticAnalyzers();
     }
 
     // Reconcile a linked root against its current tree on load (out-of-session changes), gated exactly
@@ -535,19 +538,28 @@ public static class ServerContext
             // and Update() reloads config for its root internally under BuildGate - so no Load() here, which
             // would race the project root's ambient config from this background thread.
             if (!ShouldAutoReconcile(linkedRoot)) return;
-            var ct = ShutdownToken;
-            BuildGate.Wait(ct);
-            try
-            {
-                using var wl = IndexWriteLock.Acquire(IndexStore.CacheDirPath(linkedRoot), ct);
-                var u = RepositoryIndexer.Update(linkedRoot, ct: ct);
-                SwapLinked(linkedRoot, u.Text, u.Symbols, wl.Commit());
-            }
-            finally { BuildGate.Release(); }
+            ReconcileLinked(linkedRoot);
         }
         catch (OperationCanceledException) { Log.For(linkedRoot).Info("linked root reconcile canceled (re-point/shutdown)"); }
         catch (Exception ex) { Log.For(linkedRoot).Warn($"linked root reconcile skipped: {ex.Message}"); }
     }
+
+    private static void ReconcileLinked(string linkedRoot)
+    {
+        var ct = ShutdownToken;
+        BuildGate.Wait(ct);
+        try
+        {
+            using var wl = IndexWriteLock.Acquire(IndexStore.CacheDirPath(linkedRoot), ct);
+            var u = RepositoryIndexer.Update(linkedRoot, ct: ct);
+            SwapLinked(linkedRoot, u.Text, u.Symbols, wl.Commit(),
+                       sourcesChanged: u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild);
+        }
+        finally { BuildGate.Release(); }
+    }
+
+    /// <summary>Test seam: run a linked root's startup reconcile synchronously, past its auto-reconcile gate.</summary>
+    internal static void RunLinkedStartupReconcileNow(string linkedRoot) => ReconcileLinked(PathSafety.NormalizeDir(linkedRoot));
 
     // Normalize a root path for value comparison against the focus set (absolute, no trailing separator) -
     // identical rule to RootScope.Normalize, which produces the stored focus entries.
@@ -1295,7 +1307,7 @@ public static class ServerContext
                 if (!compact) return;
                 Log.For(Root).Info("compacting: segment count high after incremental edits; merging segments");
                 var c = RepositoryIndexer.Compact(Root, ct);
-                ok = Swap(c.Text, c.Symbols, epoch, wl.Commit());
+                ok = Swap(c.Text, c.Symbols, epoch, wl.Commit(), sourcesChanged: false); // a merge of segments; no source changed
             }
             else
             {
@@ -1355,7 +1367,8 @@ public static class ServerContext
             _snapshot ??= RepositoryIndexer.LoadSnapshot(Root);
             var c = RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, changedFullPaths);
             RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
-            _csharp?.Dispose(); _csharp = null; // stale after an edit; free the model, rebuilds lazily
+            // Stale only if the edit touched what it read (a README or .json edit leaves a ~15 s model valid). Rebuilds lazily.
+            if (RoslynCSharpAnalyzer.MayAffect(changedFullPaths)) { _csharp?.Dispose(); _csharp = null; }
             if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
                 Log.For(Root).Info($"incremental reindex: +{c.Added} ~{c.Modified} -{c.Removed} " +
                                    $"({changedCount} path(s) changed)");

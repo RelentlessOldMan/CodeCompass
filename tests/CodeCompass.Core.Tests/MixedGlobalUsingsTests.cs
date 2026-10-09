@@ -61,6 +61,26 @@ public class MixedGlobalUsingsTests
         finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
     }
 
+    // The per-file clash check binds the file (GetDiagnostics). The analyzer is dropped whenever its sources change, so the
+    // answer is fixed for its lifetime: compute it once per file, not on every find_references.
+    [Fact]
+    public void Analyzer_ChecksEachFileForAClash_OncePerAnalyzer()
+    {
+        using var repo = MixedRepo(clash: true);
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var candidates = new[] { "Legacy/Use.cs", "Legacy/Jobs.cs" }.Select(repo.FullPath).ToList();
+        var first = analyzer.UsingsClash(candidates);
+        int runs = analyzer.ClashFileChecks;
+        Assert.True(runs > 0);
+        var second = analyzer.UsingsClash(candidates);
+        Assert.Equal(runs, analyzer.ClashFileChecks);
+        Assert.Equal(first.Files, second.Files);
+
+        analyzer.Dispose(); // rebuilds lazily on next use: the per-file answers belong to the old model
+        analyzer.UsingsClash(candidates);
+        Assert.Equal(2 * runs, analyzer.ClashFileChecks);
+    }
+
     [Fact]
     public void Analyzer_ReportsACodeClash_InTheLegacyFileOnly()
     {

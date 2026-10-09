@@ -22,6 +22,10 @@ public readonly record struct SearchMatch(string Path, int Line, int Column, str
 /// </summary>
 public sealed class TrigramIndex
 {
+    /// <summary>The shortest query the index can answer (one trigram). The tools refuse shorter ones, and the Grep hook
+    /// leaves them to Grep.</summary>
+    public const int MinQueryLength = 3;
+
     private const uint Magic = 0x49544343; // "CCTI"
     private const int Version = 2;
 

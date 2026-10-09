@@ -987,7 +987,7 @@ static int CmdSearch(string[] args)
     // almost every line. Reject it like the MCP tools do, with a helpful message instead of a noise flood.
     if (string.IsNullOrWhiteSpace(query)) { Console.Error.WriteLine("Provide a non-empty search string."); return 2; }
     // Under one trigram every file is a candidate and would be read in full - refuse, like the MCP tool.
-    if (query.Length < 3)
+    if (query.Length < TrigramIndex.MinQueryLength)
     {
         Console.Error.WriteLine($"\"{query}\" is too short to search: the index matches 3+ characters. Add surrounding text (e.g. \"if (\").");
         return 2;
@@ -1062,10 +1062,13 @@ static int CmdSymbols(string[] args)
 
     if (!RepositoryIndexer.TryLoad(root, out _, out var symbols)) return NoIndex(root);
 
-    var matches = symbols.Find(query);
-    foreach (var symbol in matches)
+    const int max = 200;
+    var matches = symbols.Find(query, max + 1); // one past the cap: a cut-off list must say so, like the MCP tool
+    foreach (var symbol in matches.Take(max))
         Console.WriteLine($"{symbol.RelativePath}:{symbol.Line}:{symbol.Column}: {symbol.Kind} {symbol.Name}");
-    Console.Error.WriteLine($"-- {matches.Count} symbol(s)");
+    // On stdout like the other qualifiers, so a redirected answer keeps it.
+    if (matches.Count > max) Console.WriteLine($"-- showing the first {max} symbols; MORE EXIST: narrow the query");
+    Console.Error.WriteLine($"-- {Math.Min(matches.Count, max)} symbol(s)");
     WarnIfIndexerBehind(root);
     return 0;
 }

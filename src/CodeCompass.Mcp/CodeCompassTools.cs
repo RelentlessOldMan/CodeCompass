@@ -59,7 +59,7 @@ public static class CodeCompassTools
     // The trigram index can't narrow a query shorter than one trigram: every file becomes a candidate and is READ
     // (hours over a large share, under the read lock). search_code refuses such queries; the reference tools skip the
     // index-backed passes for them and say so.
-    private const int MinIndexedQuery = 3;
+    private const int MinIndexedQuery = CodeCompass.Core.Indexing.TrigramIndex.MinQueryLength;
 
     private static string ShortQueryMessage(string query) =>
         $"\"{query}\" is too short to search: the index matches 3+ characters, and a shorter query would read every " +
@@ -265,7 +265,7 @@ public static class CodeCompassTools
         // Roslyn parses with an empty preprocessor set, so it silently misses references in inactive #if/#elif
         // branches. When any candidate .cs uses conditional compilation, treat the C# pass as incomplete so .cs name
         // matches backfill it (deduped) and we disclose it.
-        var csConditional = SemanticCoverage.CSharpConditionalFiles(csCandidates);
+        var csConditional = csharp.ConditionalFiles(csCandidates, ct); // from the analyzer's text: no per-query disk re-read
         // .cs files the semantic model couldn't read are absent from it - incomplete, so backfill + name them.
         var csUnreadable = csharp.UnreadableFiles;
         // A legacy project (no ImplicitUsings) next to SDK ones: the injected global usings can make a name ambiguous in
@@ -401,7 +401,7 @@ public static class CodeCompassTools
                     var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
                     calleeCsCands.Add(full); calleeCsDisplay[full] = DisplayPath(h, rel);
                 }
-        var calleeCond = SemanticCoverage.CSharpConditionalFiles(calleeCsCands);
+        var calleeCond = ServerContext.CSharp.ConditionalFiles(calleeCsCands, ct);
         var recovered = calleeCond.Count > 0
             ? ServerContext.CSharp.FindCalleesInInactiveBranches(name, maxResults + 1, ct, r => InScope(handles, r.Root)).ToList()
             : (IReadOnlyList<SemanticLocation>)System.Array.Empty<SemanticLocation>();

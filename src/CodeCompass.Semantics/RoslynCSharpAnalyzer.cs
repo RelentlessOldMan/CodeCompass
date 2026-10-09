@@ -56,6 +56,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _workspace = null;
             _solution = null;
             _projectId = null;
+            _clashByFile.Clear();       // per-file answers belong to this model; a rebuild recomputes them
+            _conditionalByFile.Clear();
         }
     }
 
@@ -118,9 +120,52 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             lock (_gate) _declarationClash ??= declarations;
         }
         var outsideSet = new HashSet<string>(outside, StringComparer.OrdinalIgnoreCase);
+        bool FileClashes(string p)
+        {
+            lock (_gate) if (_clashByFile.TryGetValue(p, out var known)) return known;
+            Interlocked.Increment(ref _clashFileChecks);
+            bool clash = Clashes(p, declarationsOnly: false);
+            lock (_gate) _clashByFile[p] = clash;
+            return clash;
+        }
         var files = candidateFullPaths.Where(outsideSet.Contains).Distinct(StringComparer.OrdinalIgnoreCase)
-                                      .Where(p => Clashes(p, declarationsOnly: false)).OrderBy(p => p, StringComparer.Ordinal).ToList();
+                                      .Where(FileClashes).OrderBy(p => p, StringComparer.Ordinal).ToList();
         return (declarations, files);
+    }
+
+    /// <summary>Per-file clash checks (a bind + GetDiagnostics each) run so far (test hook).</summary>
+    internal int ClashFileChecks => Volatile.Read(ref _clashFileChecks);
+    private int _clashFileChecks;
+    // Per-file answers for this analyzer's lifetime (it's dropped when its sources change): the clash check binds the file,
+    // and the #if check scans its text, so neither is repeated on every query.
+    private readonly Dictionary<string, bool> _clashByFile = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, bool> _conditionalByFile = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The candidates that use conditional compilation, judged on the text this analyzer parsed (what Roslyn
+    /// can't see into), so no candidate is re-read from disk on each query. A candidate the analyzer doesn't hold (it
+    /// was unreadable at build) is read from disk as <see cref="SemanticCoverage.CSharpConditionalFiles"/> does.</summary>
+    public IReadOnlyList<string> ConditionalFiles(IEnumerable<string> candidateFullPaths, System.Threading.CancellationToken ct = default)
+    {
+        var (solution, _) = EnsureBuilt(ct);
+        var hits = new List<string>();
+        foreach (var p in candidateFullPaths)
+        {
+            if (!SemanticCoverage.IsCSharp(p)) continue;
+            bool conditional;
+            lock (_gate)
+                if (_conditionalByFile.TryGetValue(p, out conditional)) { if (conditional) hits.Add(p); continue; }
+            var id = solution.GetDocumentIdsWithFilePath(p).FirstOrDefault();
+            if (id is null)
+            {
+                hits.AddRange(SemanticCoverage.CSharpConditionalFiles(new[] { p })); // not in the model: disk, uncached
+                continue;
+            }
+            var text = solution.GetDocument(id)!.GetTextAsync(ct).GetAwaiter().GetResult();
+            conditional = SemanticCoverage.HasCSharpConditionalCompilation(text.ToString());
+            lock (_gate) _conditionalByFile[p] = conditional;
+            if (conditional) hits.Add(p);
+        }
+        return hits;
     }
 
     /// <summary>Whole-solution Roslyn reference searches run so far (test hook: the cost driver of FindReferences).</summary>
@@ -472,6 +517,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _unreadable.AddRange(unreadable);
             _outsideImplicitUsings.Clear();
             _declarationClash = null;
+            _clashByFile.Clear();
+            _conditionalByFile.Clear();
             if (globalUsings.Count > 0)
                 foreach (var cs in csFiles)
                     if (OwnProjectLacksUsings(cs, projectDirHasUsings, propsDirsWithUsings)) _outsideImplicitUsings.Add(cs);
@@ -487,6 +534,23 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         for (var d = Path.GetDirectoryName(csFile); !string.IsNullOrEmpty(d); d = Path.GetDirectoryName(d))
             if (projectDirHasUsings.TryGetValue(d, out var has))
                 return !has && !propsDirsWithUsings.Any(p => CodeCompass.Core.Storage.PathSafety.IsUnderOrEqual(d, p));
+        return false;
+    }
+
+    /// <summary>Could a change to any of these paths alter what this analyzer read? It reads <c>.cs</c> sources and the
+    /// <c>.csproj</c>/<c>.props</c> files for global usings. Only an EXISTING file of another type is safe to ignore: a
+    /// directory (a folder rename is one event, with no per-file events, and names like MyApp.Core look like files) or
+    /// a path that's gone (a deleted or renamed-away folder) may have held .cs files, and a dotfile may be config.</summary>
+    public static bool MayAffect(IEnumerable<string> changedPaths)
+    {
+        foreach (var p in changedPaths)
+        {
+            var path = p.TrimEnd('/', '\\');
+            var name = Path.GetFileName(path);
+            if (name.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) || IsMsBuildProjectFile(name) ||
+                name.StartsWith('.') || !File.Exists(path))
+                return true;
+        }
         return false;
     }
 

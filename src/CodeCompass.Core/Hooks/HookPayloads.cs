@@ -17,8 +17,8 @@ public static class HookPayloads
         "CodeCompass is the indexed code-search tool for this workspace. Instead of Grep use: search_code " +
         "(literal text), find_definition, find_references (semantic for C#; by name elsewhere), find_callees, search_symbols - " +
         "precise file:line:col results for far fewer tokens. Use Read for a known file and Glob for file-NAME " +
-        "patterns. Grep still runs for a regex, a subfolder or file, a path outside this project, or a glob/type/context/count " +
-        "option. (Disable with CODECOMPASS_ENFORCE=0.)";
+        "patterns. Grep -i maps to search_code caseSensitive:false. Grep still runs for a regex, a pattern under 3 characters, " +
+        "a subfolder or file, a path outside this project, or a glob/type/context/count option. (Disable with CODECOMPASS_ENFORCE=0.)";
 
     // Grep options search_code has an equivalent for (case, line numbers, result paging, the two plain output
     // modes). Any other option - glob, type, context lines, count, multiline, or one Grep adds later - means
@@ -58,6 +58,7 @@ public static class HookPayloads
 
             var pattern = pat.GetString()!;
             if (string.IsNullOrWhiteSpace(pattern) || IsRegex(pattern)) return false;
+            if (LiteralLength(pattern) < TrigramIndex.MinQueryLength) return false; // search_code refuses it: only Grep can run it
 
             string? cwd = root.TryGetProperty("cwd", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
             var project = !string.IsNullOrWhiteSpace(projectDir) ? projectDir! : cwd;
@@ -108,6 +109,16 @@ public static class HookPayloads
             if (c is '|' or '*' or '+' or '?' or '(' or ')' or '[' or ']' or '{' or '}' or '^' or '$') return true;
         }
         return false;
+    }
+
+    // The length of the literal text a non-regex pattern searches for: an escape (\( \. ...) is one character, the
+    // character search_code would be given.
+    private static int LiteralLength(string pattern)
+    {
+        int n = 0;
+        for (int i = 0; i < pattern.Length; i++, n++)
+            if (pattern[i] == '\\' && i + 1 < pattern.Length) i++;
+        return n;
     }
 
     /// <summary>PreToolUse payload that denies the tool call and redirects to CodeCompass.</summary>

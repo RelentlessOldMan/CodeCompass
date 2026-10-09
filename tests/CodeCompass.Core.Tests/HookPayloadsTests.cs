@@ -175,7 +175,7 @@ public class GrepRedirectTests
     [InlineData("{}")]
     [InlineData("[1,2]")]
     [InlineData("{\"tool_input\":{\"pattern\":5}}")]
-    [InlineData("{\"cwd\":\"C:\\repo\",\"tool_input\":{\"pattern\":\"x\",\"path\":\"C:\\a\u0000b\"}}")]
+    [InlineData("{\"cwd\":\"C:\\repo\",\"tool_input\":{\"pattern\":\"xyz\",\"path\":\"C:\\a\u0000b\"}}")]
     public void UnreadablePayload_KeepsTheRedirect_AndNeverThrows(string payload)
         => Assert.True(Redirect(payload));
 
@@ -190,5 +190,29 @@ public class GrepRedirectTests
         var reason = doc.RootElement.GetProperty("hookSpecificOutput").GetProperty("permissionDecisionReason").GetString()!;
         Assert.Contains("regex", reason);
         Assert.Contains("subfolder", reason);
+    }
+
+    // search_code refuses a query under one trigram, so redirecting it left the agent no in-tool way to search.
+    [Theory]
+    [InlineData("x")]
+    [InlineData("if")]
+    [InlineData("=>")]
+    [InlineData("x\\(")] // escaped punctuation is literal: search_code would get "x(", 2 characters
+    [InlineData("\\(\\)")]
+    public void PatternShorterThanATrigram_PassesThroughToGrep(string pattern)
+        => Assert.False(Redirect(Payload(pattern)));
+
+    [Fact]
+    public void ThreeCharacterPattern_IsStillRedirected()
+        => Assert.True(Redirect(Payload("abc")));
+
+    // Grep -i maps to search_code caseSensitive:false (search_code is case-sensitive by default); say so, or the agent's
+    // retry silently returns exact-case hits only.
+    [Fact]
+    public void DenyReason_MapsCaseInsensitiveToCaseSensitiveFalse()
+    {
+        using var doc = JsonDocument.Parse(HookPayloads.DenySearch());
+        var reason = doc.RootElement.GetProperty("hookSpecificOutput").GetProperty("permissionDecisionReason").GetString()!;
+        Assert.Contains("caseSensitive:false", reason);
     }
 }
