@@ -828,6 +828,40 @@ public class McpToolsTests
         finally { ServerContext.Init(repo.Root); } // reset shared static state
     }
 
+    // The startup reconcile finishes while the session's first find_references is building the C# analyzer. Swapping in
+    // an index that found NO changes used to discard that analyzer anyway, so the second C# query rebuilt it (EF Core:
+    // 15 s, then 0.6 s from the third call). An unchanged tree must keep it; a real external change must still drop it.
+    [Fact]
+    public void StartupReconcile_KeepsCSharpAnalyzer_OnlyWhenNothingChanged()
+    {
+        var old = Environment.GetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE");
+        Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", "false"); // the test runs the reconcile itself
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { void M() { } void N() { M(); } }\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            ServerContext.Init(repo.Root); // new session over the existing index
+
+            Assert.Contains("a.cs", CodeCompassTools.FindReferences("M"));
+            Assert.True(ServerContext.HasResidentSemanticAnalyzers());
+
+            ServerContext.RunStartupReconcileNow(); // nothing changed on disk
+            Assert.True(ServerContext.HasResidentSemanticAnalyzers(), "an unchanged reconcile must keep the C# analyzer");
+
+            repo.Write("b.cs", "class B { void P() { new A(); } }\n"); // an out-of-session change
+            ServerContext.RunStartupReconcileNow();
+            Assert.False(ServerContext.HasResidentSemanticAnalyzers(), "a reconcile that found changes must drop the stale analyzer");
+            Assert.Contains("b.cs", CodeCompassTools.FindReferences("A"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", old);
+            ServerContext.Init(repo.Root);
+        }
+    }
+
     [Fact]
     public void PublishesStatusFile_ReadableByStatuslineCommand()
     {

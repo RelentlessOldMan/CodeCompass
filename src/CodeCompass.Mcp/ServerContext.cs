@@ -828,6 +828,9 @@ public static class ServerContext
         cs?.Dispose();
     }
 
+    /// <summary>Test seam: run the startup reconcile synchronously (it normally runs in the background after a load).</summary>
+    internal static void RunStartupReconcileNow() => BackgroundReconcile();
+
     /// <summary>Force a full rebuild (the reindex tool). Builds off-lock so searches keep
     /// serving the old index, then swaps atomically. On failure the old index is kept. While it
     /// runs, watcher changes are captured (not written) so they don't race the rebuild for the
@@ -889,7 +892,10 @@ public static class ServerContext
     // in-flight search to finish, so a search never touches a disposed mmap). Returns false (and disposes the
     // incoming indexes, leaving current state untouched) if the workspace was re-pointed since the build that
     // produced them started - see _epoch. <paramref name="gen"/> is the IndexGeneration the new handles reflect.
-    private static bool Swap(SegmentedIndex text, SegmentedSymbolIndex symbols, int epoch, string? gen)
+    // <paramref name="sourcesChanged"/> false (a reconcile that found nothing added, modified or removed) keeps the C#
+    // analyzer: it reads the sources, not the index, so it's still current - and on a big solution it may have just been
+    // built by the session's first find_references. Edits made meanwhile are drained after the swap, which drops it.
+    private static bool Swap(SegmentedIndex text, SegmentedSymbolIndex symbols, int epoch, string? gen, bool sourcesChanged = true)
     {
         RoslynCSharpAnalyzer? oldCs = null;
         bool installed = false;
@@ -901,11 +907,14 @@ public static class ServerContext
                 _text?.Dispose();
                 _symbols?.Dispose();
                 _snapshot?.Dispose();
-                oldCs = _csharp; // stale after a rebuild; dispose off-lock to free their model
                 _text = text;
                 _symbols = symbols;
                 _snapshot = null;
-                _csharp = null;
+                if (sourcesChanged)
+                {
+                    oldCs = _csharp; // stale after a rebuild; dispose off-lock to free their model
+                    _csharp = null;
+                }
                 _state = IndexState.Ready;
                 _loadedGen = gen;
                 _statusOverride = null;
@@ -1132,10 +1141,11 @@ public static class ServerContext
             gated = true;
             using var wl = IndexWriteLock.Acquire(CacheDir, ct);
             var u = RepositoryIndexer.Update(Root, ct: ct);
-            if (Swap(u.Text, u.Symbols, epoch, wl.Commit()))
+            bool changed = u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild;
+            if (Swap(u.Text, u.Symbols, epoch, wl.Commit(), sourcesChanged: changed))
             {
                 _eventsLost = false; // a full walk caught whatever the watcher missed
-                if (u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild)
+                if (changed)
                     Log.For(Root).Info($"startup reconcile applied external changes: +{u.Stats.Added} ~{u.Stats.Modified} -{u.Stats.Removed}" +
                                        (u.Stats.FullRebuild ? " (full rebuild)" : ""));
             }
