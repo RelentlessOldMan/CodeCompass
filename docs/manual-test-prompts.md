@@ -205,8 +205,9 @@ session then answers with CodeCompass.
 **Prompt:** `Use the Grep tool to search for the regex "<word1>|<word2>".`
 
 **Expect:** Grep **runs**. CodeCompass's text search is literal-only, so a regex is left to Grep. The same
-applies to a search scoped to a subfolder or one file, to a `glob` or `type` filter, to context lines or
-counts, and to a path outside the project.
+applies to a pattern under 3 characters (`search_code` refuses those), a search scoped to a subfolder or one
+file, a `glob` or `type` filter, context lines or counts, and a path outside the project. If the codecompass
+server isn't connected (check `/mcp`), every Grep runs, since there's no `search_code` to send it to.
 
 Set `CODECOMPASS_ENFORCE=0` in the environment to turn the redirect off completely.
 

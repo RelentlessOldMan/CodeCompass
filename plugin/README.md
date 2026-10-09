@@ -58,8 +58,9 @@ append only the CodeCompass segment. See the main README for details.
 ## Enforcement
 
 A `PreToolUse` hook redirects a plain-text `Grep` over the whole project to the CodeCompass tools.
-A `Grep` CodeCompass can't answer the same way still runs: a regex, a subfolder or single file, a path
-outside the project, a `glob`/`type`/context/count option, or a project with no index yet. (`Glob` stays
+A `Grep` CodeCompass can't answer the same way still runs: a regex, a pattern under 3 characters, a
+subfolder or single file, a path outside the project, a `glob`/`type`/context/count option, a project with
+no index yet, or one no CodeCompass server is running for. (`Glob` stays
 available - CodeCompass searches contents and symbols, not file names.) A
 `SessionStart` hook reminds the agent to prefer them.
 

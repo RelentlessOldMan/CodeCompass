@@ -96,8 +96,9 @@ claude --plugin-dir "<repo>\plugin"                                  # one sessi
 
 In a session, run `/mcp` to confirm the **codecompass** server is connected. A `PreToolUse` hook
 redirects a plain-text `Grep` over the whole project to CodeCompass, so the agent uses the index instead of
-scanning files. A `Grep` CodeCompass can't answer the same way still runs: a regex, a subfolder or single
-file, a path outside the project, a `glob`/`type`/context/count option, or a project with no index yet (set
+scanning files. A `Grep` CodeCompass can't answer the same way still runs: a regex, a pattern under 3
+characters, a subfolder or single file, a path outside the project, a `glob`/`type`/context/count option, a
+project with no index yet, or one no CodeCompass server is running for (set
 `CODECOMPASS_ENFORCE=0` to never redirect). `Glob` is left alone — CodeCompass searches file *contents*
 and symbols, not file *names*. Large workspaces aren't auto-indexed inside a tool
 call — CodeCompass tells you to build the index once from a terminal, then serves it and keeps it fresh.
