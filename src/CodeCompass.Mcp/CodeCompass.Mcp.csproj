@@ -24,6 +24,10 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Dynamic PGO off: its instrumented tier makes the one-time Roslyn build on a session's first C#
+         find_references ~4.5 s slower (EF Core: 24 s vs 19.5 s); warm calls differ by ~10%. Bakes
+         System.Runtime.TieredPGO:false into runtimeconfig.json; RuntimeConfigTests guards it. -->
+    <TieredPGO>false</TieredPGO>
   </PropertyGroup>
 
 </Project>
