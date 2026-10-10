@@ -688,7 +688,7 @@ static int CmdIndex(string[] args)
     IndexStats s;
     try
     {
-        var (ti, sy, st) = RepositoryIndexer.Build(root, Progress);
+        var (ti, sy, st) = RepositoryIndexer.Build(root, Progress, overNewerFormat: true); // deliberate: may replace a newer install's index
         ti.Dispose();
         sy.Dispose();
         s = st;
@@ -813,9 +813,14 @@ static int CmdUpdate(string[] args)
     UpdateStats s;
     try
     {
-        var (idx, _, st) = RepositoryIndexer.Update(root, OnScan);
-        idx.Dispose();
+        // Held around the update so its commit can say whether sources changed: an update that found nothing lets every
+        // session keep its C# model (a ~15 s rebuild on a big solution) instead of dropping it.
+        using var wl = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root));
+        var (idx, sym, st) = RepositoryIndexer.Update(root, OnScan);
+        idx.Dispose(); sym.Dispose();
         s = st;
+        if (st.Added == 0 && st.Modified == 0 && st.Removed == 0 && !st.FullRebuild) wl.SourcesUnchanged();
+        wl.Commit();
     }
     catch (Exception ex)
     {
@@ -881,7 +886,10 @@ static int CmdWatch(string[] args)
 
     // Keep the index in memory and apply targeted changes in place (no reopen per batch). Each batch holds the
     // cross-process write lock, and reloads first if another process (a terminal `update`, an MCP reindex)
-    // committed since we loaded - flushing our stale manifest over theirs would drop their segments.
+    // committed since we loaded - flushing our stale manifest over theirs would drop their segments. If that reload
+    // fails (a transient lock, a newer-format index), the batch is held back for the next one, never applied to the
+    // stale copy.
+    var heldBack = new HashSet<string>(StringComparer.Ordinal);
     using var watcher = new RepositoryWatcher(root, batch =>
     {
         try
@@ -905,16 +913,24 @@ static int CmdWatch(string[] args)
                 var gen = IndexGeneration.Read(cacheDir);
                 if (gen is null || gen != loadedGen)
                 {
-                    if (RepositoryIndexer.TryLoad(root, out var t2, out var s2))
+                    if (!RepositoryIndexer.TryLoad(root, out var t2, out var s2))
                     {
-                        text.Dispose(); symbols.Dispose(); snapshot.Dispose();
-                        text = t2; symbols = s2;
-                        snapshot = RepositoryIndexer.LoadSnapshot(root);
-                        loadedGen = gen;
-                        Log.For(root).Info("watch: reloaded the index (another CodeCompass process updated it)");
+                        heldBack.UnionWith(batch.ChangedFullPaths);
+                        wl.SkipBump();
+                        const string held = "the index changed on disk but could not be reloaded; holding back edits until the next change";
+                        Console.Error.WriteLine(held);
+                        Log.For(root).Warn("watch: " + held);
+                        return;
                     }
+                    text.Dispose(); symbols.Dispose(); snapshot.Dispose();
+                    text = t2; symbols = s2;
+                    snapshot = RepositoryIndexer.LoadSnapshot(root);
+                    loadedGen = gen;
+                    Log.For(root).Info("watch: reloaded the index (another CodeCompass process updated it)");
                 }
-                var c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, batch.ChangedFullPaths);
+                var paths = heldBack.Count == 0 ? batch.ChangedFullPaths : heldBack.Union(batch.ChangedFullPaths).ToList();
+                heldBack.Clear();
+                var c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, paths);
                 RepositoryIndexer.Persist(root, text, symbols, snapshot);
                 if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
                 {
@@ -931,6 +947,9 @@ static int CmdWatch(string[] args)
                     Console.Error.WriteLine("compacted: merged segments");
                     Log.For(root).Info("watch: compacted (merged segments)");
                 }
+                // A README or .json edit (an editor's temp files and folder timestamps included) changes no C# source:
+                // sessions reload the index but keep their C# model (see ServerContext.ApplyIncremental).
+                if (!RoslynCSharpAnalyzer.MayAffect(paths) && !c.CSharpInputsChanged) wl.SourcesUnchanged();
                 loadedGen = wl.Commit();
             }
         }
@@ -938,7 +957,7 @@ static int CmdWatch(string[] args)
         {
             Log.For(root).Error("watch reindex failed", ex);
         }
-    });
+    }, ignore: IgnoreRules.ForRoot(root)); // the repo's own rules: nothing loaded its config for this thread
     watcher.Start();
 
     Log.For(root).Info("cli watch started");
@@ -950,6 +969,8 @@ static int CmdWatch(string[] args)
     text.Dispose();
     symbols.Dispose();
     snapshot.Dispose();
+    if (heldBack.Count > 0)
+        Console.Error.WriteLine($"{heldBack.Count} edit(s) were held back and are NOT in the index - run: codecompass update \"{root}\"");
     return 0;
 }
 
@@ -1008,6 +1029,9 @@ static int CmdSearch(string[] args)
     bool truncated = matches.Count > cap;
     foreach (var m in matches.Take(cap))
         Console.WriteLine($"{m.Path}:{m.Line}:{m.Column}: {m.LineText}");
+    // On stdout too, like every qualifier on an answer, so a redirected answer (`> out.txt`) doesn't read as complete. The
+    // stderr summary stays as it is: scripts read it there.
+    if (truncated) Console.Out.WriteLine($"-- showing the first {cap} matches; MORE EXIST (narrow the query)");
     Console.Error.WriteLine(truncated
         ? $"-- showing first {cap}; MORE EXIST (narrow the query) in {sw.Elapsed.TotalMilliseconds:F0} ms"
         : $"-- {matches.Count} match(es) in {sw.Elapsed.TotalMilliseconds:F0} ms");
@@ -1085,16 +1109,25 @@ static int CmdRefs(string[] args)
     // C# references are semantic (comments/strings excluded). Note: from the CLI the Roslyn model builds fresh each
     // run; the MCP server keeps it warm across calls.
     var csAnalyzer = new RoslynCSharpAnalyzer(root);
-    var cs = csAnalyzer.FindReferences(name);
+    const int maxSemantic = 200;
+    var csProbe = csAnalyzer.FindReferences(name, maxSemantic + 1); // one extra: a cut-off list must say so, not pose as complete
+    var cs = csProbe.Take(maxSemantic).ToList();
     foreach (var s in cs)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
+    if (csProbe.Count > maxSemantic)
+        Console.Out.WriteLine($"-- showing the first {maxSemantic} C# semantic references; MORE EXIST");
 
     // A name under one trigram can't be narrowed by the index: the name search would read every file. Same rule as
     // the MCP tool - only the C# semantic pass (above) runs, and the output says so.
-    if (name.Length < 3)
+    if (name.Length < TrigramIndex.MinQueryLength)
     {
-        Console.Out.WriteLine($"-- \"{name}\" is under 3 characters, too short for the text index: only C# semantic " +
+        Console.Out.WriteLine($"-- \"{name}\" is under {TrigramIndex.MinQueryLength} characters, too short for the text index: only C# semantic " +
                               "references were searched; C/C++ and other languages were NOT (use `search` with surrounding text).");
+        // ...and that pass's own gaps, as below.
+        if (csAnalyzer.UnreadableFiles.Count > 0)
+            Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUnreadableNote(csAnalyzer.UnreadableFiles.Select(f => Path.GetRelativePath(root, f)).ToList()));
+        if (csAnalyzer.DroppedDirs > 0)
+            Console.Out.WriteLine("-- " + ReferenceMerge.CSharpDroppedDirsNote(csAnalyzer.DroppedDirs));
         Console.Error.WriteLine($"-- {cs.Count} C# semantic + 0 name-matched reference(s)");
         return 0;
     }
@@ -1125,10 +1158,11 @@ static int CmdRefs(string[] args)
     // pass as incomplete: let .cs name matches backfill it (deduped) and disclose.
     var csConditional = SemanticCoverage.CSharpConditionalFiles(csCandidates);
     var csUnreadable = csAnalyzer.UnreadableFiles; // absent from the semantic model -> incomplete, backfill + name them
+    int csDroppedDirs = csAnalyzer.DroppedDirs;      // folders the model's walk couldn't list: which files are missing is unknown
     // Global usings injected for SDK projects can make a name ambiguous in a legacy project's file (same rule as MCP).
     var csClash = csAnalyzer.UsingsClash(csCandidates);
     var csBackfill = new HashSet<string>(csClash.Files, StringComparer.OrdinalIgnoreCase);
-    bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0 || csClash.Declarations.Count > 0;
+    bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0 || csDroppedDirs > 0 || csClash.Declarations.Count > 0;
     // Classifies comment/string spans in C#/C/C++ candidate files so the name search skips hits inside them.
     var spanFilter = new LexicalSpanFilter(name);
     var seenKeys = new HashSet<string>(StringComparer.Ordinal); // exact: on a case-sensitive tree Reg.h and reg.h differ
@@ -1167,6 +1201,8 @@ static int CmdRefs(string[] args)
             csConditional.Select(f => Path.GetRelativePath(root, f)).ToList()));
     if (csUnreadable.Count > 0)
         Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(f => Path.GetRelativePath(root, f)).ToList()));
+    if (csDroppedDirs > 0)
+        Console.Out.WriteLine("-- " + ReferenceMerge.CSharpDroppedDirsNote(csDroppedDirs));
     if (csClash.Declarations.Count > 0 || csClash.Files.Count > 0)
         Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUsingsClashNote(
             csClash.Declarations.Select(f => Path.GetRelativePath(root, f)).ToList(), csClash.Files.Select(f => Path.GetRelativePath(root, f)).ToList()));
@@ -1192,15 +1228,23 @@ static int CmdCallees(string[] args)
     // The in-repo methods a C# method calls, resolved semantically (C# only - the MCP find_callees twin).
     // Cold-built each run from the CLI; the MCP server keeps the analyzer warm across calls.
     var analyzer = new RoslynCSharpAnalyzer(root);
-    var callees = analyzer.FindCallees(name);
+    const int maxCallees = 100;
+    var calleeProbe = analyzer.FindCallees(name, maxCallees + 1); // one extra: a cut-off list must say so, not pose as complete
+    var callees = calleeProbe.Take(maxCallees).ToList();
     foreach (var c in callees)
         Console.WriteLine($"{c.RelativePath}:{c.Line}:{c.Column}: {c.LineText}");
+    if (calleeProbe.Count > maxCallees)
+        Console.Out.WriteLine($"-- showing the first {maxCallees} callees; MORE EXIST");
     // Conditional compilation: FindCallees walks the method body via Roslyn, which parses with an empty
     // preprocessor set and can't see inactive #if/#elif branches - so a guarded call is silently missing (refs
     // finds the edge, callees doesn't). When the method's candidate .cs file(s) use it, recover those calls by
     // re-lexing the disabled regions + resolving each name in-repo (segregated + labeled "by name"), and name
-    // the file(s) in the disclosure.
-    var calleeCond = RepositoryIndexer.TryLoad(root, out var cidx, out _)
+    // the file(s) in the disclosure. A name under one trigram can't be narrowed by the index - every file would be a
+    // candidate, each re-read for #if - so it's skipped, and the answer says so (as the MCP tool does).
+    bool indexable = name.Length >= TrigramIndex.MinQueryLength;
+    if (!indexable)
+        Console.Out.WriteLine($"-- \"{name}\" is too short for the text index, so calls inside #if/#elif-guarded branches were not checked.");
+    var calleeCond = indexable && RepositoryIndexer.TryLoad(root, out var cidx, out _)
         ? SemanticCoverage.CSharpConditionalFiles(
             cidx!.CandidateFiles(name)
                 .Where(rel => rel.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
@@ -1230,7 +1274,8 @@ static int CmdCallees(string[] args)
 
 // PreToolUse hook (the plugin's matcher limits it to Grep): redirect a Grep to CodeCompass only when search_code
 // gives the same answer (HookPayloads.ShouldRedirectGrep); every other Grep runs. Set CODECOMPASS_ENFORCE=0 to
-// never redirect. It must never fail a Grep, so any error lets the call through.
+// never redirect. The hook itself must never fail a Grep, so an error out here lets the call through; a payload
+// ShouldRedirectGrep can't make sense of keeps the redirect (its documented policy).
 static int CmdHookBlock()
 {
     try

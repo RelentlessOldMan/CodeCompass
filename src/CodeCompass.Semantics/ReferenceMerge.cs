@@ -194,7 +194,14 @@ public static class ReferenceMerge
     public static string CSharpUnreadableNote(IReadOnlyList<string> unreadableFilesDisplay) =>
         unreadableFilesDisplay.Count == 0 ? "" :
         "C# coverage INCOMPLETE - " + FileList(unreadableFilesDisplay) + " could not be read when the semantic model was built, " +
-        "so references in them are shown lexically (they'll be picked up after the next edit/reindex).";
+        "so references in them are shown lexically (they'll be picked up after a later edit or a reindex).";
+
+    /// <summary>Folders the semantic model's walk couldn't list (a share hiccup): their .cs files are absent from it, and
+    /// which files those are is unknown - so C# references are matched by name across the C# files as well.</summary>
+    public static string CSharpDroppedDirsNote(int droppedDirs) =>
+        droppedDirs <= 0 ? "" :
+        $"C# coverage INCOMPLETE - {droppedDirs} folder(s) could not be listed when the semantic model was built, so C# " +
+        "references are also matched by NAME (they'll be resolved after a later edit or a reindex).";
 
     /// <summary>The C# global-usings clash caveat (see RoslynCSharpAnalyzer.UsingsClash), or empty when there is none.
     /// <paramref name="declarationClash"/>: a clash in a declaration, whose effect reaches other files - the whole C# pass is

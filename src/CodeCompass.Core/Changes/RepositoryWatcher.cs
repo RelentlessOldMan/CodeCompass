@@ -24,7 +24,8 @@ public sealed class RepositoryWatcher : IDisposable
 
     private readonly object _pendingGate = new();
     // Ordinal: a case-only rename (Foo.cs -> foo.cs) must deliver BOTH spellings, or the index keeps the stale casing.
-    private readonly HashSet<string> _pending = new(StringComparer.Ordinal);
+    // The value: did the path get a created/deleted/renamed event, not only Changed (see Flush)?
+    private readonly Dictionary<string, bool> _pending = new(StringComparer.Ordinal);
     private bool _overflow;
 
     private readonly object _timerGate = new();
@@ -53,7 +54,7 @@ public sealed class RepositoryWatcher : IDisposable
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite,
             InternalBufferSize = 64 * 1024, // the 8 KB default overflows on any sizable sync (forcing full reconciles)
         };
-        fsw.Changed += OnEvent;
+        fsw.Changed += OnChanged;
         fsw.Created += OnEvent;
         fsw.Deleted += OnEvent;
         fsw.Renamed += OnRenamed;
@@ -69,9 +70,19 @@ public sealed class RepositoryWatcher : IDisposable
 
     internal void RaiseErrorForTest(Exception ex) => OnError(this, new ErrorEventArgs(ex));
 
+    /// <summary>The rules events are filtered by - the watched root's own, when the caller passed them.</summary>
+    public IgnoreRules Ignore => _ignore;
+
     private void OnEvent(object sender, FileSystemEventArgs e)
     {
-        if (ShouldReact(e.FullPath)) Record(e.FullPath);
+        if (ShouldReact(e.FullPath, gone: e.ChangeType == WatcherChangeTypes.Deleted)) Record(e.FullPath, structural: true);
+    }
+
+    // A file's content changed - or a FOLDER's timestamp moved because an entry in it was added, removed or renamed, which
+    // raises its own event. Flush drops those folders.
+    private void OnChanged(object sender, FileSystemEventArgs e)
+    {
+        if (ShouldReact(e.FullPath, gone: false)) Record(e.FullPath, structural: false);
     }
 
     private void OnRenamed(object sender, RenamedEventArgs e)
@@ -79,8 +90,8 @@ public sealed class RepositoryWatcher : IDisposable
         // Record both sides: old path may be a removed file or vanished directory,
         // new path may be an added file or a directory whose subtree must be indexed.
         bool any = false;
-        if (ShouldReact(e.OldFullPath)) { Record(e.OldFullPath); any = true; }
-        if (ShouldReact(e.FullPath)) { Record(e.FullPath); any = true; }
+        if (ShouldReact(e.OldFullPath, gone: true)) { Record(e.OldFullPath, structural: true); any = true; }
+        if (ShouldReact(e.FullPath, gone: false)) { Record(e.FullPath, structural: true); any = true; }
         if (any) Schedule();
     }
 
@@ -121,13 +132,14 @@ public sealed class RepositoryWatcher : IDisposable
         });
     }
 
-    private void Record(string fullPath)
+    private void Record(string fullPath, bool structural)
     {
-        lock (_pendingGate) _pending.Add(fullPath);
+        lock (_pendingGate) _pending[fullPath] = structural || (_pending.TryGetValue(fullPath, out var was) && was);
         Schedule();
     }
 
-    private bool ShouldReact(string fullPath)
+    // <paramref name="gone"/>: a delete, or the old side of a rename - the path no longer exists.
+    private bool ShouldReact(string fullPath, bool gone)
     {
         string rel;
         try { rel = Path.GetRelativePath(_root, fullPath); }
@@ -140,7 +152,11 @@ public sealed class RepositoryWatcher : IDisposable
                 return false;
 
         var name = parts.Length > 0 ? parts[^1] : "";
-        if (name.Contains('.') && _ignore.IsIgnoredFile(name, 0)) return false;
+        // An ignored file TYPE (.dll, .obj, .png, ...) - judged by name, with no disk access on this thread. Except a path
+        // that's gone: it may have been a FOLDER named like one (Contoso.Lib, Foo.Db), and deleting or moving a folder
+        // raises its own event only, nothing for its files. The indexer tells the two apart from what it holds, without
+        // touching the disk (a build's clean deletes thousands of such files).
+        if (!gone && name.Contains('.') && _ignore.IsIgnoredFile(name, 0)) return false;
         return true;
     }
 
@@ -169,15 +185,22 @@ public sealed class RepositoryWatcher : IDisposable
             if (_disposed) return;
             lock (_timerGate) _firstPendingTick = 0; // start a fresh max-wait window
 
-            List<string> paths;
+            List<KeyValuePair<string, bool>> pending;
             bool overflow;
             lock (_pendingGate)
             {
-                paths = _pending.ToList();
+                pending = _pending.ToList();
                 overflow = _overflow;
                 _pending.Clear();
                 _overflow = false;
             }
+            // Drop a folder that only reported Changed: its timestamp moved because an entry in it was added, removed or
+            // renamed, and that entry has its own event. Passed on, it re-walked the folder's whole subtree under the
+            // index write lock on every atomic save in it (a temp file + rename: Visual Studio, JetBrains, git, Claude
+            // Code's Edit/Write). Checked here, off the event thread, so a slow stat can't overflow the watcher's buffer.
+            // (Not after an overflow: the batch is then a full reconcile, and its paths go unused.)
+            var paths = overflow ? new List<string>()
+                                 : pending.Where(p => p.Value || !Directory.Exists(p.Key)).Select(p => p.Key).ToList();
             if (paths.Count == 0 && !overflow) return;
 
             try { _onFlush(new ChangeBatch(paths, overflow)); }

@@ -1,4 +1,5 @@
 using CodeCompass.Core.Ignore;
+using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Storage;
 using CodeCompass.Core.Walking;
 using Microsoft.CodeAnalysis;
@@ -83,10 +84,24 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     public IReadOnlyList<string> UnreadableFiles { get { lock (_gate) return _unreadable.ToList(); } }
     private readonly List<string> _unreadable = new();
 
+    /// <summary>Folders the build's walk couldn't list (a transient share error) even after a retry: whatever .cs files they
+    /// hold are ABSENT from the compilation, and which files those are is unknown - so the whole C# pass is incomplete.</summary>
+    public int DroppedDirs { get { lock (_gate) return _droppedDirs; } }
+    private int _droppedDirs;
+
+    /// <summary>Is this model missing sources it should hold (<see cref="UnreadableFiles"/>, <see cref="DroppedDirs"/>)? Only
+    /// valid once built. A caller keeping a model across writes must not keep an incomplete one: it was only ever meant to
+    /// last until the next edit or reindex.</summary>
+    public bool IsIncomplete { get { lock (_gate) return _solution is not null && (_unreadable.Count > 0 || _droppedDirs > 0); } }
+
+    /// <summary>When the model was last built (<see cref="Environment.TickCount64"/>); 0 before that.</summary>
+    public long BuiltAtMs { get { lock (_gate) return _builtAtMs; } }
+    private long _builtAtMs;
+
     // C# files whose own project gets NONE of the global usings injected for the SDK projects (a legacy project with no
     // ImplicitUsings next to SDK ones - one compilation means the usings apply to every file). Empty when nothing was
     // injected. See UsingsClash.
-    private readonly HashSet<string> _outsideImplicitUsings = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _outsideImplicitUsings = new(StringComparer.Ordinal); // exact: case twins are different files
     private IReadOnlyList<string>? _declarationClash;
 
     /// <summary>Where the injected global usings made a name ambiguous (CS0104) in a file whose own project never had them -
@@ -105,7 +120,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
 
         bool Clashes(string path, bool declarationsOnly)
         {
-            var id = solution.GetDocumentIdsWithFilePath(path).FirstOrDefault();
+            var id = DocumentIdFor(solution, path);
             var model = id is null ? null : solution.GetDocument(id)?.GetSemanticModelAsync(ct).GetAwaiter().GetResult();
             if (model is null) return false;
             var diags = declarationsOnly ? model.GetDeclarationDiagnostics(cancellationToken: ct) : model.GetDiagnostics(cancellationToken: ct);
@@ -119,7 +134,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             declarations = outside.Where(p => Clashes(p, declarationsOnly: true)).OrderBy(p => p, StringComparer.Ordinal).ToList();
             lock (_gate) _declarationClash ??= declarations;
         }
-        var outsideSet = new HashSet<string>(outside, StringComparer.OrdinalIgnoreCase);
+        var outsideSet = new HashSet<string>(outside, StringComparer.Ordinal);
         bool FileClashes(string p)
         {
             lock (_gate) if (_clashByFile.TryGetValue(p, out var known)) return known;
@@ -128,7 +143,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             lock (_gate) _clashByFile[p] = clash;
             return clash;
         }
-        var files = candidateFullPaths.Where(outsideSet.Contains).Distinct(StringComparer.OrdinalIgnoreCase)
+        var files = candidateFullPaths.Where(outsideSet.Contains).Distinct(StringComparer.Ordinal)
                                       .Where(FileClashes).OrderBy(p => p, StringComparer.Ordinal).ToList();
         return (declarations, files);
     }
@@ -137,9 +152,22 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     internal int ClashFileChecks => Volatile.Read(ref _clashFileChecks);
     private int _clashFileChecks;
     // Per-file answers for this analyzer's lifetime (it's dropped when its sources change): the clash check binds the file,
-    // and the #if check scans its text, so neither is repeated on every query.
-    private readonly Dictionary<string, bool> _clashByFile = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, bool> _conditionalByFile = new(StringComparer.OrdinalIgnoreCase);
+    // and the #if check scans its text, so neither is repeated on every query. Keyed exactly: on a case-sensitive tree
+    // Reg.cs and reg.cs are different files.
+    private readonly Dictionary<string, bool> _clashByFile = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, bool> _conditionalByFile = new(StringComparer.Ordinal);
+
+    /// <summary>Per-file answers cached so far (test hook).</summary>
+    internal int CachedFileAnswers { get { lock (_gate) return _clashByFile.Count + _conditionalByFile.Count; } }
+
+    // The document at exactly this path. Roslyn's path map ignores case on every OS, so on a case-sensitive tree Reg.cs and
+    // reg.cs share one entry - with twins, only an exact match is the file asked about.
+    private static DocumentId? DocumentIdFor(Solution solution, string path)
+    {
+        var ids = solution.GetDocumentIdsWithFilePath(path);
+        if (ids.Length <= 1) return ids.FirstOrDefault();
+        return ids.FirstOrDefault(id => string.Equals(solution.GetDocument(id)?.FilePath, path, StringComparison.Ordinal));
+    }
 
     /// <summary>The candidates that use conditional compilation, judged on the text this analyzer parsed (what Roslyn
     /// can't see into), so no candidate is re-read from disk on each query. A candidate the analyzer doesn't hold (it
@@ -154,7 +182,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             bool conditional;
             lock (_gate)
                 if (_conditionalByFile.TryGetValue(p, out conditional)) { if (conditional) hits.Add(p); continue; }
-            var id = solution.GetDocumentIdsWithFilePath(p).FirstOrDefault();
+            var id = DocumentIdFor(solution, p);
             if (id is null)
             {
                 hits.AddRange(SemanticCoverage.CSharpConditionalFiles(new[] { p })); // not in the model: disk, uncached
@@ -460,8 +488,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
 
             var solution = workspace.CurrentSolution.AddProject(info);
             var unreadable = new List<string>();
+            int droppedDirs = 0;
 
-            var walker = new FileWalker(new IgnoreRules());
             var globalUsings = new SortedSet<string>(StringComparer.Ordinal);
             // Which project dirs (.csproj) and props dirs (.props, applying to every project below) contribute global
             // usings, and every .cs added - to find the files whose own project gets none (see UsingsClash).
@@ -469,36 +497,43 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             var propsDirsWithUsings = new List<string>();
             var csFiles = new List<string>();
             foreach (var root in _roots)
-            foreach (var file in walker.Walk(root))
             {
-                if (IsMsBuildProjectFile(file.RelativePath))
+                // Each root with ITS OWN rules - the ones its index was built with - not the process's ambient config, which
+                // in a server is whichever root was written last.
+                var walker = new FileWalker(IgnoreRules.ForRoot(root));
+                foreach (var file in walker.Walk(root))
                 {
-                    var own = new HashSet<string>(StringComparer.Ordinal);
-                    try { CollectGlobalUsings(File.ReadAllText(file.FullPath), own); } catch { /* best effort */ }
-                    globalUsings.UnionWith(own);
-                    var fileDir = Path.GetDirectoryName(file.FullPath)!;
-                    if (file.RelativePath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
-                        projectDirHasUsings[fileDir] = (projectDirHasUsings.TryGetValue(fileDir, out var had) && had) || own.Count > 0;
-                    else if (own.Count > 0)
-                        propsDirsWithUsings.Add(fileDir);
-                    continue;
-                }
-                if (!file.RelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
-                if (ct.IsCancellationRequested) { workspace.Dispose(); ct.ThrowIfCancellationRequested(); }
-                string text;
-                try { text = File.ReadAllText(file.FullPath); }
-                catch { unreadable.Add(file.FullPath); continue; } // disclosed via UnreadableFiles, never silently "covered"
+                    if (IsMsBuildProjectFile(file.RelativePath))
+                    {
+                        var own = new HashSet<string>(StringComparer.Ordinal);
+                        try { CollectGlobalUsings(File.ReadAllText(file.FullPath), own); } catch { /* best effort */ }
+                        globalUsings.UnionWith(own);
+                        var fileDir = Path.GetDirectoryName(file.FullPath)!;
+                        if (file.RelativePath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+                            projectDirHasUsings[fileDir] = (projectDirHasUsings.TryGetValue(fileDir, out var had) && had) || own.Count > 0;
+                        else if (own.Count > 0)
+                            propsDirsWithUsings.Add(fileDir);
+                        continue;
+                    }
+                    if (!file.RelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (ct.IsCancellationRequested) { workspace.Dispose(); ct.ThrowIfCancellationRequested(); }
+                    string text;
+                    try { text = File.ReadAllText(file.FullPath); }
+                    catch { unreadable.Add(file.FullPath); continue; } // disclosed via UnreadableFiles, never silently "covered"
 
-                // Key documents by ABSOLUTE path so two roots with the same relative path (e.g. both have
-                // src/App.cs) don't collide; ToLocation maps the path back to its owning root for display.
-                csFiles.Add(file.FullPath);
-                var documentId = DocumentId.CreateNewId(projectId);
-                solution = solution.AddDocument(DocumentInfo.Create(
-                    documentId,
-                    name: file.FullPath,
-                    filePath: file.FullPath,
-                    loader: TextLoader.From(TextAndVersion.Create(
-                        SourceText.From(text), VersionStamp.Create(), file.FullPath))));
+                    // Key documents by ABSOLUTE path so two roots with the same relative path (e.g. both have
+                    // src/App.cs) don't collide; ToLocation maps the path back to its owning root for display.
+                    csFiles.Add(file.FullPath);
+                    var documentId = DocumentId.CreateNewId(projectId);
+                    solution = solution.AddDocument(DocumentInfo.Create(
+                        documentId,
+                        name: file.FullPath,
+                        filePath: file.FullPath,
+                        loader: TextLoader.From(TextAndVersion.Create(
+                            SourceText.From(text), VersionStamp.Create(), file.FullPath))));
+                }
+                // A folder the walk couldn't list (a share hiccup): its .cs files are missing from the model (see DroppedDirs).
+                droppedDirs += walker.DroppedDirs;
             }
 
             // The build injects these as an invisible generated file (obj/*.GlobalUsings.g.cs); without them every type
@@ -515,6 +550,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _projectId = projectId;
             _unreadable.Clear();
             _unreadable.AddRange(unreadable);
+            _droppedDirs = droppedDirs;
+            _builtAtMs = Environment.TickCount64;
             _outsideImplicitUsings.Clear();
             _declarationClash = null;
             _clashByFile.Clear();
@@ -537,22 +574,11 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         return false;
     }
 
-    /// <summary>Could a change to any of these paths alter what this analyzer read? It reads <c>.cs</c> sources and the
-    /// <c>.csproj</c>/<c>.props</c> files for global usings. Only an EXISTING file of another type is safe to ignore: a
-    /// directory (a folder rename is one event, with no per-file events, and names like MyApp.Core look like files) or
-    /// a path that's gone (a deleted or renamed-away folder) may have held .cs files, and a dotfile may be config.</summary>
-    public static bool MayAffect(IEnumerable<string> changedPaths)
-    {
-        foreach (var p in changedPaths)
-        {
-            var path = p.TrimEnd('/', '\\');
-            var name = Path.GetFileName(path);
-            if (name.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) || IsMsBuildProjectFile(name) ||
-                name.StartsWith('.') || !File.Exists(path))
-                return true;
-        }
-        return false;
-    }
+    /// <summary>Does any of these paths NAME a file this analyzer reads (<see cref="SemanticInputs"/>)? Judged on the name
+    /// alone, before the change is applied, so a .cs edit drops the model even if indexing it then fails. A folder or a
+    /// path that's gone can't be judged by name - it may have held .cs files, or be an editor's vanished temp file - so the
+    /// caller also asks the index what it actually changed (<see cref="ChangeCounts.CSharpInputsChanged"/>).</summary>
+    public static bool MayAffect(IEnumerable<string> changedPaths) => changedPaths.Any(SemanticInputs.IsCSharpInput);
 
     private static bool IsMsBuildProjectFile(string relativePath) =>
         relativePath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||

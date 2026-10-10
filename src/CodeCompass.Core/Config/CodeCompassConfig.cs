@@ -76,16 +76,31 @@ public static class CodeCompassConfig
 }
 """;
 
-    private static volatile RepoConfig _current = new();
+    // The ambient config, per async flow (a thread and the work it starts), over a process default. Every index write loads
+    // its root's config, and a server writes several roots - its project and its linked roots - from different threads.
+    // One process-wide value let a linked root's write switch the config another thread was using mid-way (a query, the
+    // project's own build), and leave it switched afterwards.
+    private static readonly AsyncLocal<RepoConfig?> _flow = new();
+    private static volatile RepoConfig _process = new();
 
-    /// <summary>The config for the repo currently being indexed (empty if none/invalid).</summary>
-    public static RepoConfig Current => _current;
+    /// <summary>The config for the repo being indexed on this flow (the process default if it loaded none; empty if
+    /// none/invalid).</summary>
+    public static RepoConfig Current => _flow.Value ?? _process;
 
-    /// <summary>Load <c>&lt;root&gt;/.codecompass.json</c> as the active config. Cheap; safe to call
-    /// at every indexing entry point. Env vars still override whatever it contains.</summary>
+    /// <summary>Load <c>&lt;root&gt;/.codecompass.json</c> as the active config for the calling flow: this thread, and work it
+    /// starts from now on. Cheap; safe to call at every indexing entry point. Env vars still override whatever it contains.</summary>
     public static void Load(string root)
     {
-        _current = Read(root) ?? new RepoConfig();
+        _flow.Value = Read(root) ?? new RepoConfig();
+    }
+
+    /// <summary>Load <c>&lt;root&gt;/.codecompass.json</c> as the process default - the config of every flow that hasn't loaded
+    /// its own (a server's project: its queries, timers and watcher callbacks) - and for the calling flow.</summary>
+    public static void LoadDefault(string root)
+    {
+        var cfg = Read(root) ?? new RepoConfig();
+        _process = cfg;
+        _flow.Value = cfg;
     }
 
     /// <summary>Parse <c>&lt;dir&gt;/.codecompass.json</c> without touching the ambient config
@@ -137,13 +152,13 @@ public static class CodeCompassConfig
     /// <summary>Whether the MCP server auto-reconciles the index on startup. Tri-state: null = the
     /// gated default (local + within the auto limit); true = always; false = never. Env
     /// CODECOMPASS_AUTO_RECONCILE / config `autoReconcile`.</summary>
-    public static bool? AutoReconcile() => AutoReconcile(_current);
+    public static bool? AutoReconcile() => AutoReconcile(Current);
     public static bool? AutoReconcile(RepoConfig cfg) => EnvBool("CODECOMPASS_AUTO_RECONCILE") ?? cfg.AutoReconcile;
 
     /// <summary>Whether the server publishes its status to a per-repo status file (for the
     /// `codecompass statusline` command). Default true - cheap, and harmless if unused. Env
     /// CODECOMPASS_STATUS_LINE / config `statusLine`.</summary>
-    public static bool StatusLinePublish() => StatusLinePublish(_current);
+    public static bool StatusLinePublish() => StatusLinePublish(Current);
     public static bool StatusLinePublish(RepoConfig cfg) => EnvBool("CODECOMPASS_STATUS_LINE") ?? cfg.StatusLine ?? true;
 
     /// <summary>Minutes the long-lived server keeps a built semantic analyzer (Roslyn, C#)
@@ -152,7 +167,7 @@ public static class CodeCompassConfig
     /// long session that stops using find_references, eviction reclaims the largest resident chunk.
     /// Default 10; 0 disables eviction (keep resident). Env CODECOMPASS_SEMANTIC_IDLE_MIN / config
     /// `semanticIdleMinutes`.</summary>
-    public static int SemanticIdleMinutes() => SemanticIdleMinutes(_current);
+    public static int SemanticIdleMinutes() => SemanticIdleMinutes(Current);
     public static int SemanticIdleMinutes(RepoConfig cfg)
     {
         int? n = EnvInt("CODECOMPASS_SEMANTIC_IDLE_MIN") ?? cfg.SemanticIdleMinutes;
@@ -171,7 +186,7 @@ public static class CodeCompassConfig
     /// <summary>Per-file indexing size cap in bytes (default 2 GB). Files at/above ~128 MB are indexed
     /// by streaming (bounded memory), so a high cap does not blow up RAM; the cost of a high cap is
     /// read time on a full build (large files are re-read), which is why it can be lowered per-repo.</summary>
-    public static long MaxFileBytes() => MaxFileBytes(_current);
+    public static long MaxFileBytes() => MaxFileBytes(Current);
     public static long MaxFileBytes(RepoConfig cfg)
     {
         long? mb = EnvLong("CODECOMPASS_MAX_FILE_MB") ?? FromRepoFile(cfg.MaxFileMb, 2000);
@@ -179,7 +194,7 @@ public static class CodeCompassConfig
     }
 
     /// <summary>Symbol-extraction size cap in characters (~bytes for ASCII; default 1 MB).</summary>
-    public static int MaxSymbolChars() => MaxSymbolChars(_current);
+    public static int MaxSymbolChars() => MaxSymbolChars(Current);
     public static int MaxSymbolChars(RepoConfig cfg)
     {
         long? mb = EnvLong("CODECOMPASS_MAX_SYMBOL_MB") ?? cfg.MaxSymbolMb;
@@ -188,7 +203,7 @@ public static class CodeCompassConfig
     }
 
     /// <summary>MCP auto-index limit in bytes; larger workspaces are left for a CLI build (default 100 MB).</summary>
-    public static long MaxAutoBytes() => MaxAutoBytes(_current);
+    public static long MaxAutoBytes() => MaxAutoBytes(Current);
     public static long MaxAutoBytes(RepoConfig cfg)
     {
         // 0 is valid here (forces CLI build), so distinguish "set" from "absent".
@@ -197,7 +212,7 @@ public static class CodeCompassConfig
     }
 
     /// <summary>Indexing parallelism (default: all cores).</summary>
-    public static int Threads(int defaultCores) => Threads(_current, defaultCores);
+    public static int Threads(int defaultCores) => Threads(Current, defaultCores);
     public static int Threads(RepoConfig cfg, int defaultCores)
     {
         int? n = EnvInt("CODECOMPASS_THREADS") ?? FromRepoFile(cfg.Threads, 4 * Math.Max(1, defaultCores));
@@ -208,7 +223,7 @@ public static class CodeCompassConfig
     /// min(cores, 8); 1 = serial. Over a latency-bound SMB share, concurrent enumerations overlap the
     /// per-directory round-trips (SMB2 credits allow many in flight); locally it's a wash. Env
     /// CODECOMPASS_WALK_THREADS / config walkThreads.</summary>
-    public static int WalkThreads(int defaultCores) => WalkThreads(_current, defaultCores);
+    public static int WalkThreads(int defaultCores) => WalkThreads(Current, defaultCores);
     public static int WalkThreads(RepoConfig cfg, int defaultCores)
     {
         int? n = EnvInt("CODECOMPASS_WALK_THREADS") ?? FromRepoFile(cfg.WalkThreads, 4 * Math.Max(1, defaultCores));
@@ -216,7 +231,7 @@ public static class CodeCompassConfig
     }
 
     /// <summary>Explicit per-worker text-segment budget in MB, or null to size adaptively.</summary>
-    public static int? SegmentMbOverride() => SegmentMbOverride(_current);
+    public static int? SegmentMbOverride() => SegmentMbOverride(Current);
     public static int? SegmentMbOverride(RepoConfig cfg)
     {
         int? mb = EnvInt("CODECOMPASS_SEGMENT_MB") ?? cfg.SegmentMb;
@@ -224,7 +239,7 @@ public static class CodeCompassConfig
     }
 
     /// <summary>Segment count that triggers compaction on the incremental path (default 64).</summary>
-    public static int CompactSegments() => CompactSegments(_current);
+    public static int CompactSegments() => CompactSegments(Current);
     public static int CompactSegments(RepoConfig cfg)
     {
         int? n = EnvInt("CODECOMPASS_COMPACT_SEGMENTS") ?? cfg.CompactSegments;
@@ -240,7 +255,7 @@ public static class CodeCompassConfig
     /// read into an OutOfMemoryException. A single file bigger than the budget is read alone. Override
     /// with CODECOMPASS_READ_BUDGET_MB / config readBudgetMb (which bypasses the availability cap).
     /// </summary>
-    public static long ReadBudgetBytes() => ReadBudgetBytes(_current);
+    public static long ReadBudgetBytes() => ReadBudgetBytes(Current);
     public static long ReadBudgetBytes(RepoConfig cfg)
     {
         long? mb = EnvLong("CODECOMPASS_READ_BUDGET_MB") ?? cfg.ReadBudgetMb;
@@ -260,7 +275,7 @@ public static class CodeCompassConfig
     }
 
     /// <summary>Seconds of no indexing progress before a stall warning (default 60).</summary>
-    public static int StallWarnSec() => StallWarnSec(_current);
+    public static int StallWarnSec() => StallWarnSec(Current);
     public static int StallWarnSec(RepoConfig cfg)
     {
         int? n = EnvInt("CODECOMPASS_STALL_WARN_SEC") ?? cfg.StallWarnSec;
@@ -268,7 +283,7 @@ public static class CodeCompassConfig
     }
 
     /// <summary>Extra directory names to skip: the union of CODECOMPASS_IGNORE and the config file.</summary>
-    public static IEnumerable<string> IgnoredDirs() => IgnoredDirs(_current);
+    public static IEnumerable<string> IgnoredDirs() => IgnoredDirs(Current);
     public static IEnumerable<string> IgnoredDirs(RepoConfig cfg)
     {
         var env = Environment.GetEnvironmentVariable("CODECOMPASS_IGNORE");
@@ -281,7 +296,7 @@ public static class CodeCompassConfig
     }
 
     /// <summary>Directory names to index even though a default rule skips them: CODECOMPASS_KEEP + config keepDirs.</summary>
-    public static IEnumerable<string> KeptDirs() => KeptDirs(_current);
+    public static IEnumerable<string> KeptDirs() => KeptDirs(Current);
     public static IEnumerable<string> KeptDirs(RepoConfig cfg)
     {
         var env = Environment.GetEnvironmentVariable("CODECOMPASS_KEEP");

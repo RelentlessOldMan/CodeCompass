@@ -18,9 +18,11 @@ namespace CodeCompass.Core.Indexing;
 // double-counts shared trigrams and varies run to run with parallel scheduling.
 public sealed record IndexStats(int Files, long Bytes, long TrigramPostings, int Symbols, double Seconds, long IndexBytes, int Cores);
 
-public sealed record UpdateStats(int Added, int Modified, int Removed, double Seconds, bool FullRebuild);
+// CSharpInputsChanged: did a file a C# semantic model reads change (see SemanticInputs)? Only a targeted update knows
+// exactly; the others report true, the safe side.
+public sealed record UpdateStats(int Added, int Modified, int Removed, double Seconds, bool FullRebuild, bool CSharpInputsChanged = true);
 
-public sealed record ChangeCounts(int Added, int Modified, int Removed);
+public sealed record ChangeCounts(int Added, int Modified, int Removed, bool CSharpInputsChanged = false);
 
 /// <summary>
 /// Builds and loads a repository's on-disk index: a memory-mapped segmented trigram index,
@@ -32,14 +34,26 @@ public static class RepositoryIndexer
 {
     private const int RebuildThreshold = 2000;
 
+    /// <param name="overNewerFormat">Rebuild even over an index a NEWER CodeCompass wrote - only for a deliberate
+    /// <c>codecompass index</c>. Otherwise that throws: two installs sharing a cache would rebuild each other's index forever,
+    /// and a session that can't read it would replace it with an older format.</param>
     public static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, IndexStats Stats) Build(
-        string root, Action<int, long>? onProgress = null, System.Threading.CancellationToken ct = default)
+        string root, Action<int, long>? onProgress = null, System.Threading.CancellationToken ct = default,
+        bool overNewerFormat = false)
     {
         root = Path.GetFullPath(root);
         // Every mutation of a cache holds the cross-process write lock (see IndexWriteLock): another session or a
         // terminal command writing the same cache waits for us instead of colliding on segment numbers/manifests.
         using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root), ct);
+        if (!overNewerFormat) RefuseOverNewerFormat(root, writeLock);
         return BuildLocked(root, onProgress, ct);
+    }
+
+    // See Build's overNewerFormat. Only a newer format refuses: a missing or corrupt index is what a rebuild is for.
+    private static void RefuseOverNewerFormat(string root, IndexWriteLock writeLock)
+    {
+        if (TryLoad(root, out var text, out var symbols, out var why)) { text.Dispose(); symbols.Dispose(); return; }
+        if (why == IndexLoadFailure.NewerFormat) ThrowIfMustNotRebuild(root, why, writeLock);
     }
 
     private static (SegmentedIndex Text, SegmentedSymbolIndex Symbols, IndexStats Stats) BuildLocked(
@@ -503,7 +517,8 @@ public static class RepositoryIndexer
     {
         long limit = CodeCompassConfig.MaxAutoBytes(cfg);
         long sum = 0;
-        foreach (var f in new FileWalker(new IgnoreRules()).Walk(Path.GetFullPath(root)))
+        // cfg's rules, not the ambient ones: sizing a linked root must skip what ITS config ignores.
+        foreach (var f in new FileWalker(new IgnoreRules(cfg)).Walk(Path.GetFullPath(root)))
         {
             sum += f.Size;
             if (sum > limit) { totalBytes = sum; return true; }
@@ -562,7 +577,7 @@ public static class RepositoryIndexer
         CodeCompassConfig.Load(root);
         var sw = Stopwatch.StartNew();
 
-        if (!TryLoad(root, out var text, out var symbols, out var why)) { ThrowIfMustNotRebuild(root, why); return FullRebuild(root, text, symbols, sw, ct); }
+        if (!TryLoad(root, out var text, out var symbols, out var why)) { ThrowIfMustNotRebuild(root, why, writeLock); return FullRebuild(root, text, symbols, sw, ct); }
         if (!TryLoadSnapshot(root, out var old)) return FullRebuild(root, text, symbols, sw, ct);
 
         using (old)
@@ -681,7 +696,9 @@ public static class RepositoryIndexer
         using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root));
         if (!TryLoad(root, out var text, out var symbols)) return (text, symbols, 0);
 
-        var ignore = new IgnoreRules();
+        // THIS root's rules, not the process's ambient config: in a server that also writes linked roots, that's whichever
+        // root was written last - and its rules would prune this root's keepDirs out of the index.
+        var ignore = IgnoreRules.ForRoot(root);
         var prune = new HashSet<string>(text.AllPaths(), StringComparer.Ordinal);
         foreach (var p in symbols.AllPaths()) prune.Add(p);
         prune.RemoveWhere(p => !ignore.IsIgnoredPath(p));
@@ -713,17 +730,22 @@ public static class RepositoryIndexer
         using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root), ct);
         var sw = Stopwatch.StartNew();
 
-        if (!TryLoad(root, out var text, out var symbols, out var why)) { ThrowIfMustNotRebuild(root, why); return FullRebuild(root, text, symbols, sw, ct); }
+        if (!TryLoad(root, out var text, out var symbols, out var why)) { ThrowIfMustNotRebuild(root, why, writeLock); return FullRebuild(root, text, symbols, sw, ct); }
         if (!TryLoadSnapshot(root, out var snapshot)) return FullRebuild(root, text, symbols, sw, ct);
 
         using (snapshot)
         {
-            if (changedFullPaths.Count > RebuildThreshold)
+            // Counted without the build output a clean deleted (see IrrelevantIgnoredType): thousands of .obj paths the index
+            // never held must not turn a small batch into a full rebuild.
+            var ignore = IgnoreRules.ForRoot(root);
+            var paths = changedFullPaths.Where(p => !(TryRel(root, p, out var rel) && IrrelevantIgnoredType(snapshot, rel, ignore))).ToList();
+            if (paths.Count > RebuildThreshold)
                 return FullRebuild(root, text, symbols, sw, ct);
 
-            var counts = ApplyChanges(text, symbols, snapshot, root, changedFullPaths);
+            var counts = ApplyChanges(text, symbols, snapshot, root, paths);
             SaveAll(root, text, symbols, snapshot);
-            return (text, symbols, new UpdateStats(counts.Added, counts.Modified, counts.Removed, sw.Elapsed.TotalSeconds, false));
+            return (text, symbols, new UpdateStats(counts.Added, counts.Modified, counts.Removed, sw.Elapsed.TotalSeconds, false,
+                                                   counts.CSharpInputsChanged));
         }
     }
 
@@ -738,7 +760,7 @@ public static class RepositoryIndexer
         using var writeLock = IndexWriteLock.Acquire(IndexStore.GetCacheDir(root), ct);
         if (!TryLoad(root, out var text, out var symbols, out var why))
         {
-            ThrowIfMustNotRebuild(root, why);
+            ThrowIfMustNotRebuild(root, why, writeLock);
             var b = Build(root, ct: ct); // first-time compaction falls back to a full (cancellable) build
             return (b.Text, b.Symbols);
         }
@@ -778,6 +800,9 @@ public static class RepositoryIndexer
         var ignore = new IgnoreRules();
         using var extractor = new TreeSitterSymbolExtractor();
         int added = 0, modified = 0, removed = 0;
+        // Did a file a C# semantic model reads change? Judged on what the index actually added, changed or removed - not
+        // on the batch's paths, which also hold editors' vanished temp files and folders whose timestamp moved.
+        bool csharp = false;
         // Once per batch, not per changed file: the root's and cache dir's network-ness (each a handle open), the sidecar
         // cutoff the build recorded, and the ledger files' write-time bound (a stat per ledger file). The bound stays an
         // upper bound for every entry as the batch upserts: the snapshot's own last-upsert time is folded in per file.
@@ -786,34 +811,48 @@ public static class RepositoryIndexer
 
         foreach (var full in changedFullPaths.Select(Path.GetFullPath).Distinct())
         {
-            string rel;
-            try { rel = Path.GetRelativePath(root, full).Replace('\\', '/'); }
-            catch { continue; }
+            if (!TryRel(root, full, out var rel)) continue;
             // Outside the repo: "../" escapes, "." is the root itself, and a different drive
             // (or a junction pointing off-root) yields a still-rooted path from GetRelativePath.
             if (PathSafety.IsOutsideRepo(rel)) continue;
+            if (IrrelevantIgnoredType(snapshot, rel, ignore)) continue; // no disk access for each file a build's clean deleted
 
             if (Directory.Exists(full))
             {
-                foreach (var f in new FileWalker(ignore).Walk(full))
+                // A folder in a batch is a new subtree (created, renamed or moved in) - or one REPLACED by a same-named folder
+                // within the debounce window, whose missing files no event reports. So also drop what the index holds under
+                // it that the walk no longer finds - once the disk confirms it's gone: a listing can come back empty without
+                // failing (an access-denied subfolder, a share hiccup), and a walk that couldn't list a subfolder proves nothing.
+                var walker = new FileWalker(ignore);
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var f in walker.Walk(full))
                 {
                     var childRel = Path.GetRelativePath(root, f.FullPath).Replace('\\', '/');
+                    seen.Add(childRel);
+                    int before = added + modified + removed;
                     ApplyFile(text, symbols, snapshot, dir, childRel, f.FullPath, ignore, extractor, batch,
                               ref added, ref modified, ref removed);
+                    if (added + modified + removed != before && SemanticInputs.IsCSharpInput(childRel)) csharp = true;
                 }
+                if (walker.DroppedDirs == 0)
+                    foreach (var stale in snapshot.KeysWithPrefix(rel + "/").Where(k => !seen.Contains(k)).ToList())
+                        if (!File.Exists(Path.Combine(root, stale.Replace('/', Path.DirectorySeparatorChar))))
+                            RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, ref csharp);
             }
             else if (File.Exists(full))
             {
+                int before = added + modified + removed;
                 ApplyFile(text, symbols, snapshot, dir, rel, full, ignore, extractor, batch,
                           ref added, ref modified, ref removed);
+                if (added + modified + removed != before && SemanticInputs.IsCSharpInput(rel)) csharp = true;
             }
             else
             {
-                RemovePathAndChildren(text, symbols, snapshot, dir, rel, ref removed);
+                RemovePathAndChildren(text, symbols, snapshot, dir, rel, ref removed, ref csharp);
             }
         }
 
-        return new ChangeCounts(added, modified, removed);
+        return new ChangeCounts(added, modified, removed, csharp);
     }
 
     /// <summary>Persist in-memory indexes + snapshot to the cache. The caller must hold the cache's
@@ -971,7 +1010,7 @@ public static class RepositoryIndexer
 
     private static void RemovePathAndChildren(
         SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string dir,
-        string rel, ref int removed)
+        string rel, ref int removed, ref bool csharp)
     {
         if (snapshot.TryGetValue(rel, out _) && snapshot.Remove(rel))
         {
@@ -979,6 +1018,7 @@ public static class RepositoryIndexer
             symbols.RemovePath(rel);
             PositionalSidecar.Delete(dir, rel); // idempotent (no-op if none) - cutoff-independent, no orphans
             removed++;
+            if (SemanticInputs.IsCSharpInput(rel)) csharp = true;
         }
 
         var prefix = rel + "/";
@@ -990,7 +1030,25 @@ public static class RepositoryIndexer
             symbols.RemovePath(k);
             PositionalSidecar.Delete(dir, k); // idempotent - covers any adaptive cutoff without orphaning
             removed++;
+            if (SemanticInputs.IsCSharpInput(k)) csharp = true;
         }
+    }
+
+    // A changed path's repo-relative form ('/'-separated); false if it can't be made relative.
+    private static bool TryRel(string root, string fullPath, out string rel)
+    {
+        try { rel = Path.GetRelativePath(root, Path.GetFullPath(fullPath)).Replace('\\', '/'); return true; }
+        catch { rel = ""; return false; }
+    }
+
+    // A path named like an ignored file type (.obj, .png, ...) is never itself in the index, so it matters only if the index
+    // holds files UNDER it - a folder named like one (Contoso.Lib) deleted or moved away. The watcher passes such paths on
+    // when they're gone, and a build's clean deletes thousands: judged from the snapshot, with no disk access.
+    private static bool IrrelevantIgnoredType(DiskSnapshot snapshot, string rel, IgnoreRules ignore)
+    {
+        var name = rel[(rel.LastIndexOf('/') + 1)..];
+        return name.Contains('.') && ignore.IsIgnoredFile(name, 0) &&
+               !snapshot.TryGetValue(rel, out _) && !snapshot.KeysWithPrefix(rel + "/").Any();
     }
 
     private static bool IsIgnoredRelPath(string rel, IgnoreRules ignore)
@@ -1056,14 +1114,17 @@ public static class RepositoryIndexer
     }
 
     // The update paths rebuild from scratch only when there is no usable index; a transient read failure or a
-    // newer-format index is an error to report, never a reason to discard and rebuild the whole thing.
-    private static void ThrowIfMustNotRebuild(string root, IndexLoadFailure why)
+    // newer-format index is an error to report, never a reason to discard and rebuild the whole thing. Nothing was written
+    // under <paramref name="writeLock"/> yet, so the refusal publishes no new generation: every other session would reload,
+    // and drop its C# model, for nothing - on each retry of a held-back edit.
+    private static void ThrowIfMustNotRebuild(string root, IndexLoadFailure why, IndexWriteLock writeLock)
     {
+        if (why is not (IndexLoadFailure.Transient or IndexLoadFailure.NewerFormat)) return;
+        writeLock.SkipBump();
         if (why == IndexLoadFailure.Transient)
             throw new IOException($"the index for {root} could not be read right now (transient I/O); not rebuilding - retry shortly");
-        if (why == IndexLoadFailure.NewerFormat)
-            throw new InvalidOperationException($"the index for {root} was written by a newer CodeCompass - upgrade this install " +
-                                                "(not rebuilding over it; run `codecompass index` to rebuild it deliberately)");
+        throw new InvalidOperationException($"the index for {root} was written by a newer CodeCompass - upgrade this install " +
+                                            "(not rebuilding over it; run `codecompass index` to rebuild it deliberately)");
     }
 
     /// <summary>Open the change-detection snapshot for a repo (empty if none exists). Caller owns it.</summary>

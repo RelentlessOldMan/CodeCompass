@@ -206,8 +206,11 @@ session then answers with CodeCompass.
 
 **Expect:** Grep **runs**. CodeCompass's text search is literal-only, so a regex is left to Grep. The same
 applies to a pattern under 3 characters (`search_code` refuses those), a search scoped to a subfolder or one
-file, a `glob` or `type` filter, context lines or counts, and a path outside the project. If the codecompass
-server isn't connected (check `/mcp`), every Grep runs, since there's no `search_code` to send it to.
+file, a `glob` or `type` filter, context lines or counts, and a path outside the project. Grep also runs when
+no CodeCompass server can answer for the repo (none is running, or it can't read the index), since there's no
+`search_code` to send it to. The hook can only tell whether *some* session's server serves the repo, not whether
+yours does: if your server isn't connected (check `/mcp`) but another session on the same repo has one, Grep is
+still redirected.
 
 Set `CODECOMPASS_ENFORCE=0` in the environment to turn the redirect off completely.
 

@@ -77,8 +77,38 @@ public class MixedGlobalUsingsTests
         Assert.Equal(first.Files, second.Files);
 
         analyzer.Dispose(); // rebuilds lazily on next use: the per-file answers belong to the old model
+        Assert.Equal(0, analyzer.CachedFileAnswers); // ...and are released with it, not held until the next use
         analyzer.UsingsClash(candidates);
         Assert.Equal(2 * runs, analyzer.ClashFileChecks);
+    }
+
+    // On a case-sensitive folder Use.cs and use.cs are different files: each is checked on its own, not merged into one.
+    [Fact]
+    public void Analyzer_ChecksCaseTwinsForAClash_Separately()
+    {
+        using var repo = new TempRepo();
+        repo.Write("App/App.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+            </Project>
+            """);
+        repo.Write("App/Widget.cs", "namespace App;\npublic sealed class Widget { }\n");
+        var legacy = repo.FullPath("Legacy");
+        Directory.CreateDirectory(legacy);
+        if (!TestFileSystem.TryMakeCaseSensitive(legacy)) return; // this box can't: nothing to test
+        repo.Write("Legacy/Legacy.csproj", """
+            <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+              <PropertyGroup><TargetFrameworkVersion>v4.8</TargetFrameworkVersion></PropertyGroup>
+            </Project>
+            """);
+        repo.Write("Legacy/Jobs.cs", "namespace Legacy.Jobs\n{\n    public class Task { public void RunJob() { } }\n}\n");
+        repo.Write("Legacy/Use.cs",
+            "using System;\nusing Legacy.Jobs;\nnamespace Legacy\n{\n    public static class Runner { public static void Go() { var t = new Task(); t.RunJob(); } }\n}\n");
+        repo.Write("Legacy/use.cs", "namespace Legacy\n{\n    public static class Quiet { public static void Go() { } }\n}\n");
+
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var (_, files) = analyzer.UsingsClash(new[] { repo.FullPath("Legacy/use.cs"), repo.FullPath("Legacy/Use.cs") });
+        Assert.Equal(new[] { repo.FullPath("Legacy/Use.cs") }, files);
     }
 
     [Fact]

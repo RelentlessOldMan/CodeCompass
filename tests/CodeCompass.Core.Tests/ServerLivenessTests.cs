@@ -1,4 +1,6 @@
+using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using CodeCompass.Core.Hooks;
 using CodeCompass.Core.Indexing;
@@ -38,6 +40,56 @@ public class ServerLivenessTests
         Directory.CreateDirectory(dir);
         File.WriteAllText(Path.Combine(dir, "2147483000.alive"), ""); // no such process
         Assert.False(ServerLiveness.IsServed(repo.Root));
+    }
+
+    // A marker can outlive its process (a power loss, a BSOD, a kill where delete-on-close is emulated), and after a reboot
+    // its pid can belong to an unrelated process: counted, the hook denied Grep in a session with no server. Only a marker
+    // a process holds open counts - and one nobody holds is cleaned up.
+    [Fact]
+    public void AMarkerNobodyHolds_IsNotServed_EvenIfItsPidIsRunning_AndIsRemoved()
+    {
+        using var repo = new TempRepo();
+        var dir = Path.Combine(IndexStore.CacheDirPath(repo.Root), "serving");
+        Directory.CreateDirectory(dir);
+        var stale = Path.Combine(dir, System.Environment.ProcessId + ".alive"); // a running pid: ours
+        File.WriteAllText(stale, "");
+        Assert.False(ServerLiveness.IsServed(repo.Root));
+        Assert.False(File.Exists(stale));
+    }
+
+    // A live server's marker must survive another process's cleanup: shared for delete, a probe that misjudged it (an NFS home
+    // on Linux takes no shared lock for it) deleted it, and the redirect went silently off for the server's lifetime.
+    [Fact]
+    public void ALiveMarker_IsHeldExclusively()
+    {
+        using var repo = new TempRepo();
+        using var mark = ServerLiveness.Mark(repo.Root);
+        Assert.NotNull(mark);
+        var file = Directory.GetFiles(Path.Combine(IndexStore.CacheDirPath(repo.Root), "serving"), "*.alive").Single();
+        Assert.ThrowsAny<IOException>(() => new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete).Dispose());
+        if (OperatingSystem.IsWindows()) Assert.ThrowsAny<IOException>(() => File.Delete(file));
+        Assert.True(ServerLiveness.IsServed(repo.Root));
+        Assert.True(File.Exists(file));
+    }
+
+    // A server that can't read the index (written by a newer CodeCompass) has no search_code answer to send Grep to.
+    [Fact]
+    public void AServerThatCantReadTheIndex_LetsGrepRun()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { }");
+        var (t0, s0, _) = RepositoryIndexer.Build(repo.Root);
+        t0.Dispose(); s0.Dispose();
+        var seg = Directory.GetFiles(IndexStore.CacheDirPath(repo.Root), "seg-*.ccseg")[0];
+        using (var fs = new FileStream(seg, FileMode.Open, FileAccess.Write)) { fs.Position = 4; fs.Write(System.BitConverter.GetBytes(99)); }
+        CodeCompass.Mcp.ServerContext.Init(repo.Root);
+        try
+        {
+            Assert.True(ServerLiveness.IsServed(repo.Root)); // a cold start counts: the index loads on the first query
+            Assert.Contains("NEWER CodeCompass", CodeCompass.Mcp.CodeCompassTools.SearchCode("class A"));
+            Assert.False(ServerLiveness.IsServed(repo.Root));
+        }
+        finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
     }
 
     [Fact]

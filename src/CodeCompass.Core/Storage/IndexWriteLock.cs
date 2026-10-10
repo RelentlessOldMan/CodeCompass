@@ -168,9 +168,14 @@ public static class IndexGeneration
     // carrySources: keep the current sources token (none yet -> a new one, the safe side).
     internal static string Bump(string cacheDir, bool carrySources = false)
     {
-        var sources = (carrySources ? SourcesOf(Read(cacheDir)) : null) ?? Guid.NewGuid().ToString("N");
+        var sources = carrySources ? SourcesOf(Read(cacheDir)) : null;
+        if (sources is null) { sources = Guid.NewGuid().ToString("N"); Interlocked.Increment(ref _sourcesMinted); }
         var token = Guid.NewGuid().ToString("N") + " " + sources;
         AtomicFile.WriteText(Path.Combine(cacheDir, Name), w => w.Write(token));
         return token;
     }
+
+    /// <summary>New sources tokens written by this process so far - each makes every session drop its C# model (test hook).</summary>
+    internal static int SourcesMintedForTest => Volatile.Read(ref _sourcesMinted);
+    private static int _sourcesMinted;
 }

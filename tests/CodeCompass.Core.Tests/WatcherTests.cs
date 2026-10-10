@@ -116,6 +116,69 @@ public class WatcherTests
         Assert.Contains("widget.cs", seen);
     }
 
+    // Adding an entry to a folder moves the folder's own timestamp, and Windows reports that as a Changed event for the
+    // folder. Passed on, it made the indexer re-walk the folder's whole subtree under the write lock - on every atomic save
+    // in it (a temp file + rename) - and made the server think a C# source may have changed.
+    [Fact]
+    public void Watcher_DoesNotPassOnAFolderWhoseTimestampMoved()
+    {
+        using var repo = new TempRepo();
+        repo.Write("src/a.cs", "namespace N { class A { } }");
+        var seen = new System.Collections.Concurrent.ConcurrentBag<string>();
+        using var got = new ManualResetEventSlim(false);
+        using var watcher = new RepositoryWatcher(repo.Root, b => { foreach (var p in b.ChangedFullPaths) seen.Add(p); got.Set(); }, debounceMs: 300);
+        watcher.Start();
+
+        repo.Write("src/notes.txt", "added");
+        Assert.True(got.Wait(TimeSpan.FromSeconds(15)));
+        Thread.Sleep(800); // let a split batch land
+        Assert.Contains(seen, p => p.EndsWith("notes.txt", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(seen, p => string.Equals(p.TrimEnd('\\', '/'), repo.FullPath("src"), StringComparison.OrdinalIgnoreCase));
+    }
+
+    // A folder named like an ignored file type (Contoso.Lib - .lib) is still a folder. Moved out of the repo, its own event is
+    // the only one its files get, and it was dropped: the index (and the C# analyzer) kept files that no longer exist.
+    [Fact]
+    public void Watcher_PassesOnAFolderNamedLikeAnIgnoredFileType()
+    {
+        using var repo = new TempRepo();
+        using var outside = new TempRepo();
+        repo.Write("Contoso.Lib/a.cs", "namespace N { class A { } }");
+        var seen = new System.Collections.Concurrent.ConcurrentBag<string>();
+        using var got = new ManualResetEventSlim(false);
+        using var watcher = new RepositoryWatcher(repo.Root, b => { foreach (var p in b.ChangedFullPaths) seen.Add(p); got.Set(); }, debounceMs: 300);
+        watcher.Start();
+
+        Directory.Move(repo.FullPath("Contoso.Lib"), Path.Combine(outside.Root, "Contoso.Lib"));
+        Assert.True(got.Wait(TimeSpan.FromSeconds(15)), "moving the folder out produced no change");
+        Assert.Contains(seen, p => p.EndsWith("Contoso.Lib", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // Build output written outside ignored folders (an in-tree make writes .o files next to the sources) is dropped by name,
+    // with no disk access on the event thread - a build raises thousands. Once gone it's passed on: it may have been a folder
+    // named like one, and the indexer tells the two apart from what it holds.
+    [Fact]
+    public void Watcher_DropsBuildOutputByName_ButPassesOnWhatsGone()
+    {
+        using var repo = new TempRepo();
+        repo.Write("src/a.cs", "namespace N { class A { } }");
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        using var got = new ManualResetEventSlim(false);
+        using var watcher = new RepositoryWatcher(repo.Root, b => { foreach (var p in b.ChangedFullPaths) seen.Enqueue(p); got.Set(); }, debounceMs: 300);
+        watcher.Start();
+
+        repo.Write("src/a.o", "object code");
+        repo.Write("src/b.cs", "namespace N { class B { } }"); // a real change, so a batch comes
+        Assert.True(got.Wait(TimeSpan.FromSeconds(15)));
+        Thread.Sleep(800);
+        Assert.DoesNotContain(seen, p => p.EndsWith("a.o", StringComparison.OrdinalIgnoreCase));
+
+        got.Reset();
+        File.Delete(repo.FullPath("src/a.o"));
+        Assert.True(got.Wait(TimeSpan.FromSeconds(15)), "the delete produced no change");
+        Assert.Contains(seen, p => p.EndsWith("a.o", StringComparison.OrdinalIgnoreCase));
+    }
+
     [Fact]
     public void Watcher_IgnoresChangesUnderIgnoredDirectories()
     {

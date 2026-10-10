@@ -268,12 +268,13 @@ public static class CodeCompassTools
         var csConditional = csharp.ConditionalFiles(csCandidates, ct); // from the analyzer's text: no per-query disk re-read
         // .cs files the semantic model couldn't read are absent from it - incomplete, so backfill + name them.
         var csUnreadable = csharp.UnreadableFiles;
+        int csDroppedDirs = csharp.DroppedDirs; // folders its walk couldn't list: which files are missing is unknown
         // A legacy project (no ImplicitUsings) next to SDK ones: the injected global usings can make a name ambiguous in
         // its files. A clash in a declaration reaches other files (the whole C# pass is incomplete); one only in a
         // candidate's code is backfilled in that file alone.
         var csClash = csharp.UsingsClash(csCandidates, ct);
         var csBackfill = new System.Collections.Generic.HashSet<string>(csClash.Files, System.StringComparer.OrdinalIgnoreCase);
-        bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0 || csClash.Declarations.Count > 0;
+        bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0 || csDroppedDirs > 0 || csClash.Declarations.Count > 0;
         // Per-query comment/string classifier for C#/C/C++ name matches; classifies each file once, from the text the name
         // search already read when it read the file whole (ReferenceTextSink), so the file isn't read twice.
         var spanFilter = new LexicalSpanFilter(name);
@@ -331,6 +332,8 @@ public static class CodeCompassTools
                 csConditional.Select(f => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f)).ToList()) + ")");
         if (csUnreadable.Count > 0)
             notes.Append(" (Note: " + ReferenceMerge.CSharpUnreadableNote(csUnreadable.Select(System.IO.Path.GetFileName).ToList()!) + ")");
+        if (csDroppedDirs > 0)
+            notes.Append(" (Note: " + ReferenceMerge.CSharpDroppedDirsNote(csDroppedDirs) + ")");
         if (csClash.Declarations.Count > 0 || csClash.Files.Count > 0)
         {
             string Disp(string f) => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f);
@@ -486,7 +489,9 @@ public static class CodeCompassTools
                 ? "This workspace is too large to rebuild inside a tool call (it would time out). The current index keeps " +
                   $"serving; rebuild from a terminal: codecompass index \"{ServerContext.Root}\" - this session picks it up automatically."
                 : ServerContext.CliBuildGuidance();
-        var s = ServerContext.Rebuild();
+        IndexStats? s;
+        try { s = ServerContext.Rebuild(); }
+        catch (InvalidOperationException ex) { return "Not reindexed: " + ex.Message; } // e.g. a newer CodeCompass's index
         if (s is null)
             return "Another CodeCompass process is writing this index right now (e.g. `codecompass index` or `update` " +
                    "in a terminal). This session reloads its result automatically when it finishes - no reindex needed.";
