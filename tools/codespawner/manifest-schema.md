@@ -6,8 +6,8 @@ change between generator versions; **this schema is the stable coupling point.**
 hard-assert `_meta.manifestVersion` before trusting a manifest.
 
 > **Versioning rule** (agreed across consumers): *additive optional fields never bump `manifestVersion`;
-> renames, removals, or semantic changes do.* New optional fields (`_meta.populations`, `expectedMiss`,
-> `dupGroups`, and the **oracle-v1** block — `_meta.roots` / `_meta.indirectTruthSha` /
+> renames, removals, or semantic changes do.* New optional fields (`_meta.populations`, `_meta.gen`,
+> `expectedMiss`, `dupGroups`, and the **oracle-v1** block — `_meta.roots` / `_meta.indirectTruthSha` /
 > `_meta.totalOracleBytes`, per-symbol `indirectEdges` / `bytes`, and non-linear DAG `edges`) all ship at
 > v1 — old adapters ignore what they don't consume. The next real **v2** bump is reserved for when the
 > schema grows for real (the C++ language profile: vtables, overrides, templates).
@@ -56,7 +56,8 @@ The generator writes the manifest as a sibling of the corpus directory: for `--o
 | `generatorVersion` | CodeSpawner version that emitted the corpus. |
 | `seed` | RNG seed. Consumers should assert this matches the corpus they think they have. |
 | `corpusRoot` | The absolute `--out` dir at generation time. **Informational only** — do NOT resolve paths against it (the corpus may have been copied/staged on an SMB share). Resolve against the corpus dir you are actually reading. |
-| `populations` | *(optional)* Per-population shape stats: `{ "<name>": {fileCount, totalBytes, identCount} }`. Lets a consumer assert the corpus is the shape it expects *before* trusting any pass/fail. Present for the header bands (`giant-headers`/`big-headers`/`med-headers`/`dense-band`) and the pathology populations (`broad-token`/`long-lines`/`encoding-mix`). Additive — absent on older manifests. |
+| `populations` | *(optional)* Per-population shape stats: `{ "<name>": {fileCount, totalBytes, identCount} }`. Lets a consumer assert the corpus is the shape it expects *before* trusting any pass/fail. Present for the header bands (`giant-headers`/`big-headers`/`med-headers`/`dense-band`), the pathology populations (`broad-token`/`long-lines`/`encoding-mix`/`pathological-symbols`/`dup-content`), and the mutate-seed pools (`mutate-shrink-seed`/`mutate-restream-seed`) when those knobs are active. Additive — absent on older manifests. |
+| `gen` | *(optional)* The effective generation knobs — a `{ "<knob>": <value> }` block recording the full recipe (scale, seed, all count/size knobs, and every oracle knob) needed to regenerate this corpus byte-identically. Emitted on every plain `gen` manifest; **absent for `--from-profile`** (the profile itself is the recipe) and on manifests from before 1.1.1. Additive. |
 | `roots` | *(optional, oracle-v1)* Array of **symbol-name strings** — the declared call-graph entry points. The reachable set is `BFS(roots)` over `edges`. Present when the oracle overlay runs (`--with-oracle`). See [`_meta.roots` + reachability](#_metaroots--reachability-oracle-v1). |
 | `indirectTruthSha` | *(optional, oracle-v1)* Lowercase-hex SHA-256 **component digest** of the indirect-edge ground truth + `roots`, over a LOCKED canonical byte-form. Deliberately separate from the frozen primary `prevTruthSha`; a rewired indirect edge or moved root trips this. Present iff any symbol has `indirectEdges`. See [`indirectTruthSha`](#indirecttruthsha--the-canonical-component-digest-oracle-v1). |
 | `totalOracleBytes` | *(optional, oracle-v1)* Sum of every symbol's `bytes` — the exact denominator for a byte-based reduction ratio. Present with `--oracle-bytes`. |
@@ -96,14 +97,14 @@ A map keyed by **symbol name**. The symbol name — not the path — is the **se
 reachable set purely from `edges` without resolving a single path (paths are only needed for the
 build/precision-reporting step).
 
-- **Linear default** (no `--oracle-fanout`): the chain `func_i → func_{i-1}`; `func_0` has no `func_*`
-  edge, and `hot_shared` and `vendor_gated` have empty `edges`. Byte-identical to earlier releases.
+- **Linear default** (no `--oracle-fanout`): the chain `func_i → func_{i-1}`; `func_0` has no `func_*` edge,
+  and `hot_shared` and `vendor_gated` have empty `edges`. Byte-identical to earlier releases.
 - **DAG** (`--oracle-fanout k` [+ `--oracle-depth`, `--oracle-shared-leaves`]): each node has up to `k`
   out-edges; shared leaves give multiple callers a common sink (diamonds). Every `edges` target is still a
   declared symbol. Reachability is `BFS(_meta.roots)` — see below.
 
-Edges to `hot_shared` (the hot symbol) depend on the mode. In an oracle overlay (`--with-oracle`) every
-`func_i`, `func_0` included, also carries an edge to it. In a plain `gen` only the giant-including files'
+Edges to `hot_shared` (the hot symbol) depend on the mode. In an **oracle overlay** (`--with-oracle`) every
+`func_i`, `func_0` included, also carries an edge to it. In a **plain `gen`** only the giant-including files'
 `func_i` do (the first N, N = the giant-includer count), and with no giant headers (`--giant-headers 0`) there
 is no `hot_shared` symbol at all. Exclude `hot_shared` when testing for "real" branching.
 
