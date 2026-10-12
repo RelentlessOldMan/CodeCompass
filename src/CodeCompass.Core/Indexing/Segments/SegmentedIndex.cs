@@ -760,6 +760,13 @@ public sealed class SegmentedIndex : IDisposable
                 _segments.Clear();
                 throw new InvalidDataException(ex.Message);
             }
+            catch
+            {
+                // A corrupt or newer-format segment past the first: the ones already opened must not stay mapped until a GC.
+                foreach (var s in _segments) s.Dispose();
+                _segments.Clear();
+                throw;
+            }
         }
     }
 

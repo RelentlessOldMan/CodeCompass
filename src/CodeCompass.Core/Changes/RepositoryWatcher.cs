@@ -26,6 +26,8 @@ public sealed class RepositoryWatcher : IDisposable
     // Ordinal: a case-only rename (Foo.cs -> foo.cs) must deliver BOTH spellings, or the index keeps the stale casing.
     // The value: did the path get a created/deleted/renamed event, not only Changed (see Flush)?
     private readonly Dictionary<string, bool> _pending = new(StringComparer.Ordinal);
+    // Created or renamed-in paths named like an ignored file type: passed on only if Flush finds a FOLDER there (see ShouldReact).
+    private readonly HashSet<string> _ifFolder = new(StringComparer.Ordinal);
     private bool _overflow;
 
     private readonly object _timerGate = new();
@@ -75,7 +77,9 @@ public sealed class RepositoryWatcher : IDisposable
 
     private void OnEvent(object sender, FileSystemEventArgs e)
     {
-        if (ShouldReact(e.FullPath, gone: e.ChangeType == WatcherChangeTypes.Deleted)) Record(e.FullPath, structural: true);
+        bool gone = e.ChangeType == WatcherChangeTypes.Deleted;
+        if (ShouldReact(e.FullPath, gone)) Record(e.FullPath, structural: true);
+        else if (!gone) RecordIfFolder(e.FullPath);
     }
 
     // A file's content changed - or a FOLDER's timestamp moved because an entry in it was added, removed or renamed, which
@@ -92,6 +96,7 @@ public sealed class RepositoryWatcher : IDisposable
         bool any = false;
         if (ShouldReact(e.OldFullPath, gone: true)) { Record(e.OldFullPath, structural: true); any = true; }
         if (ShouldReact(e.FullPath, gone: false)) { Record(e.FullPath, structural: true); any = true; }
+        else RecordIfFolder(e.FullPath);
         if (any) Schedule();
     }
 
@@ -135,6 +140,21 @@ public sealed class RepositoryWatcher : IDisposable
     private void Record(string fullPath, bool structural)
     {
         lock (_pendingGate) _pending[fullPath] = structural || (_pending.TryGetValue(fullPath, out var was) && was);
+        Schedule();
+    }
+
+    // A created or renamed-in path ShouldReact turned down. If it's an ignored file TYPE's name, it may be a FOLDER named like
+    // one (src/Lib renamed to src/Contoso.Lib): creating or moving a folder in raises its own event only, nothing for its
+    // files, so dropping it lost the whole folder. Flush checks, off the event thread.
+    private void RecordIfFolder(string fullPath)
+    {
+        string rel;
+        try { rel = Path.GetRelativePath(_root, fullPath); }
+        catch { return; }
+        if (Storage.PathSafety.IsOutsideRepo(rel)) return;
+        var parts = rel.Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0 || parts.Any(_ignore.IsIgnoredDirectory)) return;
+        lock (_pendingGate) _ifFolder.Add(fullPath);
         Schedule();
     }
 
@@ -186,12 +206,15 @@ public sealed class RepositoryWatcher : IDisposable
             lock (_timerGate) _firstPendingTick = 0; // start a fresh max-wait window
 
             List<KeyValuePair<string, bool>> pending;
+            List<string> ifFolder;
             bool overflow;
             lock (_pendingGate)
             {
                 pending = _pending.ToList();
+                ifFolder = _ifFolder.ToList();
                 overflow = _overflow;
                 _pending.Clear();
+                _ifFolder.Clear();
                 _overflow = false;
             }
             // Drop a folder that only reported Changed: its timestamp moved because an entry in it was added, removed or
@@ -201,6 +224,11 @@ public sealed class RepositoryWatcher : IDisposable
             // (Not after an overflow: the batch is then a full reconcile, and its paths go unused.)
             var paths = overflow ? new List<string>()
                                  : pending.Where(p => p.Value || !Directory.Exists(p.Key)).Select(p => p.Key).ToList();
+            if (!overflow)
+            {
+                var seen = new HashSet<string>(paths, StringComparer.Ordinal);
+                paths.AddRange(ifFolder.Where(p => !seen.Contains(p) && Directory.Exists(p)));
+            }
             if (paths.Count == 0 && !overflow) return;
 
             try { _onFlush(new ChangeBatch(paths, overflow)); }

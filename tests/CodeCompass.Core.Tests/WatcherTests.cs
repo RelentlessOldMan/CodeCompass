@@ -154,6 +154,36 @@ public class WatcherTests
         Assert.Contains(seen, p => p.EndsWith("Contoso.Lib", StringComparison.OrdinalIgnoreCase));
     }
 
+    // ...and renamed TO such a name (src/Lib -> src/Contoso.Lib): the old side went through and removed the folder's files,
+    // the new side was dropped by name, so the whole folder vanished from the index until a full update.
+    [Fact]
+    public void Watcher_AndIndexer_AFolderRenamedToAnIgnoredTypesName_KeepsItsFiles()
+    {
+        using var repo = new TempRepo();
+        repo.Write("src/Lib/widget.cs", "namespace N { class WidgetThing { } }");
+        var b = RepositoryIndexer.Build(repo.Root); b.Text.Dispose(); b.Symbols.Dispose();
+        var seen = new System.Collections.Concurrent.ConcurrentBag<string>();
+        using var got = new ManualResetEventSlim(false);
+        bool full = false;
+        using (var watcher = new RepositoryWatcher(repo.Root, bt => { full |= bt.FullReconcile; foreach (var p in bt.ChangedFullPaths) seen.Add(p); got.Set(); }, debounceMs: 300))
+        {
+            watcher.Start();
+            Directory.Move(repo.FullPath("src/Lib"), repo.FullPath("src/Contoso.Lib"));
+            Assert.True(got.Wait(TimeSpan.FromSeconds(15)), "the rename produced no change");
+            Thread.Sleep(800); // let a split batch land
+        }
+        Assert.False(full, "lost events");
+        Assert.True(seen.Any(p => p.EndsWith("Contoso.Lib", StringComparison.OrdinalIgnoreCase)), "seen: " + string.Join(", ", seen));
+
+        var u = RepositoryIndexer.UpdatePaths(repo.Root, seen.Distinct().ToList());
+        using (u.Text) using (u.Symbols)
+        {
+            var hits = u.Text.Search("WidgetThing");
+            Assert.Contains(hits, h => h.Path.Replace('\\', '/').Contains("src/Contoso.Lib/widget.cs"));
+            Assert.DoesNotContain(hits, h => h.Path.Replace('\\', '/').Contains("src/Lib/"));
+        }
+    }
+
     // Build output written outside ignored folders (an in-tree make writes .o files next to the sources) is dropped by name,
     // with no disk access on the event thread - a build raises thousands. Once gone it's passed on: it may have been a folder
     // named like one, and the indexer tells the two apart from what it holds.

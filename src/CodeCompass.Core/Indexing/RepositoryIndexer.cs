@@ -738,11 +738,11 @@ public static class RepositoryIndexer
             // Counted without the build output a clean deleted (see IrrelevantIgnoredType): thousands of .obj paths the index
             // never held must not turn a small batch into a full rebuild.
             var ignore = IgnoreRules.ForRoot(root);
-            var paths = changedFullPaths.Where(p => !(TryRel(root, p, out var rel) && IrrelevantIgnoredType(snapshot, rel, ignore))).ToList();
-            if (paths.Count > RebuildThreshold)
+            // Only counted: ApplyChanges judges each (a folder named like one, created or moved in, must still be walked).
+            if (changedFullPaths.Count(p => !(TryRel(root, p, out var rel) && IrrelevantIgnoredType(snapshot, rel, ignore))) > RebuildThreshold)
                 return FullRebuild(root, text, symbols, sw, ct);
 
-            var counts = ApplyChanges(text, symbols, snapshot, root, paths);
+            var counts = ApplyChanges(text, symbols, snapshot, root, changedFullPaths);
             SaveAll(root, text, symbols, snapshot);
             return (text, symbols, new UpdateStats(counts.Added, counts.Modified, counts.Removed, sw.Elapsed.TotalSeconds, false,
                                                    counts.CSharpInputsChanged));
@@ -815,7 +815,9 @@ public static class RepositoryIndexer
             // Outside the repo: "../" escapes, "." is the root itself, and a different drive
             // (or a junction pointing off-root) yields a still-rooted path from GetRelativePath.
             if (PathSafety.IsOutsideRepo(rel)) continue;
-            if (IrrelevantIgnoredType(snapshot, rel, ignore)) continue; // no disk access for each file a build's clean deleted
+            // No disk access for each file a build's clean deleted - bar a stat for a name the snapshot holds nothing under:
+            // a folder named like one that was created or moved in (src/Lib renamed to src/Contoso.Lib) must be walked.
+            if (IrrelevantIgnoredType(snapshot, rel, ignore) && !Directory.Exists(full)) continue;
 
             if (Directory.Exists(full))
             {

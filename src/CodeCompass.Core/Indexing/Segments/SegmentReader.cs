@@ -23,31 +23,42 @@ public sealed class SegmentReader : IDisposable
     {
         FilePath = filePath;
         _mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, mapName: null, capacity: 0, MemoryMappedFileAccess.Read);
-        _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+        // A file that fails the checks below (not a segment, a newer format, corrupt) must not keep its mapping open until
+        // a GC: every retry of a failed load leaked one, and the open mapping blocks overwriting or deleting the file.
+        try
+        {
+            _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
 
-        if (_view.ReadUInt32(0) != SegmentBuilder.Magic) throw new InvalidDataException("not a CodeCompass segment");
-        int version = _view.ReadInt32(4);
-        if (version > SegmentBuilder.Version) throw new IndexFormatTooNewException("segment", version, SegmentBuilder.Version);
-        if (version != SegmentBuilder.Version) throw new InvalidDataException("unsupported segment version");
-        DocCount = _view.ReadInt32(8);
-        TermCount = _view.ReadInt32(12);
-        _termKeysOff = _view.ReadInt64(16);
-        _termInfoOff = _view.ReadInt64(24);
-        _postingsOff = _view.ReadInt64(32);
-        _docTableOff = _view.ReadInt64(40);
+            if (_view.ReadUInt32(0) != SegmentBuilder.Magic) throw new InvalidDataException("not a CodeCompass segment");
+            int version = _view.ReadInt32(4);
+            if (version > SegmentBuilder.Version) throw new IndexFormatTooNewException("segment", version, SegmentBuilder.Version);
+            if (version != SegmentBuilder.Version) throw new InvalidDataException("unsupported segment version");
+            DocCount = _view.ReadInt32(8);
+            TermCount = _view.ReadInt32(12);
+            _termKeysOff = _view.ReadInt64(16);
+            _termInfoOff = _view.ReadInt64(24);
+            _postingsOff = _view.ReadInt64(32);
+            _docTableOff = _view.ReadInt64(40);
 
-        // Reject a structurally-corrupt/tampered file at open (offsets must be ascending and in
-        // bounds) so callers rebuild instead of hitting an OOB/huge-alloc on a later read.
-        long cap = _view.Capacity;
-        if (DocCount < 0 || TermCount < 0 || _termKeysOff < 0 || _termInfoOff < _termKeysOff ||
-            _postingsOff < _termInfoOff || _docTableOff < _postingsOff || _docTableOff > cap)
-            throw new InvalidDataException("corrupt CodeCompass segment (bad section offsets)");
-        // Each fixed-width region must be large enough for its declared count, else a later read of a term/doc
-        // index would run into the next section or off the end. (long math: counts can't overflow the offsets.)
-        if (_termInfoOff - _termKeysOff < (long)TermCount * 8 ||     // term keys: 8 bytes each
-            _postingsOff - _termInfoOff < (long)TermCount * 12 ||    // term info: (rel:8, len:4) each
-            cap - _docTableOff < (long)(DocCount + 1) * 4)           // doc offset table: (DocCount+1) ints
-            throw new InvalidDataException("corrupt CodeCompass segment (section too small for its counts)");
+            // Reject a structurally-corrupt/tampered file at open (offsets must be ascending and in
+            // bounds) so callers rebuild instead of hitting an OOB/huge-alloc on a later read.
+            long cap = _view.Capacity;
+            if (DocCount < 0 || TermCount < 0 || _termKeysOff < 0 || _termInfoOff < _termKeysOff ||
+                _postingsOff < _termInfoOff || _docTableOff < _postingsOff || _docTableOff > cap)
+                throw new InvalidDataException("corrupt CodeCompass segment (bad section offsets)");
+            // Each fixed-width region must be large enough for its declared count, else a later read of a term/doc
+            // index would run into the next section or off the end. (long math: counts can't overflow the offsets.)
+            if (_termInfoOff - _termKeysOff < (long)TermCount * 8 ||     // term keys: 8 bytes each
+                _postingsOff - _termInfoOff < (long)TermCount * 12 ||    // term info: (rel:8, len:4) each
+                cap - _docTableOff < (long)(DocCount + 1) * 4)           // doc offset table: (DocCount+1) ints
+                throw new InvalidDataException("corrupt CodeCompass segment (section too small for its counts)");
+        }
+        catch
+        {
+            _view?.Dispose();
+            _mmf.Dispose();
+            throw;
+        }
     }
 
     /// <summary>The i-th trigram key (keys are stored sorted). For enumerating a segment during a merge.</summary>

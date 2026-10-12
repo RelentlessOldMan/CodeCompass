@@ -868,9 +868,16 @@ static int CmdWatch(string[] args)
     SegmentedIndex text;
     SegmentedSymbolIndex symbols;
     string? loadedGen = IndexGeneration.Read(cacheDir); // read before loading (see ServerContext.MaybeReloadExternal)
-    if (RepositoryIndexer.TryLoad(root, out text, out symbols))
+    if (RepositoryIndexer.TryLoad(root, out text, out symbols, out var loadWhy))
     {
         Console.Error.WriteLine("loaded existing index");
+    }
+    else if (loadWhy == IndexLoadFailure.NewerFormat)
+    {
+        // Written by a newer CodeCompass: this one can't read or write it (Build refuses), so it mustn't hold the role.
+        Console.Error.WriteLine("this repo's index was written by a newer CodeCompass - watch it with that version, or run " +
+                                $"'codecompass index \"{root}\"' to rebuild it for this one.");
+        return 1;
     }
     else
     {
@@ -887,37 +894,72 @@ static int CmdWatch(string[] args)
     // Keep the index in memory and apply targeted changes in place (no reopen per batch). Each batch holds the
     // cross-process write lock, and reloads first if another process (a terminal `update`, an MCP reindex)
     // committed since we loaded - flushing our stale manifest over theirs would drop their segments. If that reload
-    // fails (a transient lock, a newer-format index), the batch is held back for the next one, never applied to the
-    // stale copy.
+    // fails, the batch is never applied to the stale copy: briefly unreadable holds it back and retries on a back-off
+    // timer (not only on the next change - there may be none); missing or corrupt rebuilds it; a newer CodeCompass's
+    // index stops the watch. The watcher's batches and the retry timer are serialized on `gate`.
     var heldBack = new HashSet<string>(StringComparer.Ordinal);
-    using var watcher = new RepositoryWatcher(root, batch =>
+    var gate = new object();
+    bool stopped = false;
+    int retryMs = 0;
+    System.Threading.Timer? retry = null;
+    using var exit = new ManualResetEventSlim(false);
+
+    void Rebuild(IndexWriteLock wl, string why)
     {
-        try
+        var b = RepositoryIndexer.Build(root); // before letting go of the old index: a refusal leaves it in place
+        text.Dispose();
+        symbols.Dispose();
+        snapshot.Dispose();
+        text = b.Text;
+        symbols = b.Symbols;
+        snapshot = RepositoryIndexer.LoadSnapshot(root);
+        loadedGen = wl.Commit();
+        heldBack.Clear(); // the rebuild read every file, the held-back ones included
+        retryMs = 0;
+        Console.Error.WriteLine("reindexed: full rebuild" + why);
+        Log.For(root).Info("watch: full rebuild" + why);
+    }
+
+    void OnBatch(ChangeBatch batch)
+    {
+        lock (gate)
         {
-            using var wl = IndexWriteLock.Acquire(cacheDir);
-            if (batch.FullReconcile)
+            if (stopped) return;
+            try
             {
-                text.Dispose();
-                symbols.Dispose();
-                snapshot.Dispose();
-                var b = RepositoryIndexer.Build(root);
-                text = b.Text;
-                symbols = b.Symbols;
-                snapshot = RepositoryIndexer.LoadSnapshot(root);
-                loadedGen = wl.Commit();
-                Console.Error.WriteLine("reindexed: full rebuild");
-                Log.For(root).Info("watch: full rebuild");
-            }
-            else
-            {
+                using var wl = IndexWriteLock.Acquire(cacheDir);
+                if (batch.FullReconcile)
+                {
+                    Rebuild(wl, "");
+                    return;
+                }
                 var gen = IndexGeneration.Read(cacheDir);
                 if (gen is null || gen != loadedGen)
                 {
-                    if (!RepositoryIndexer.TryLoad(root, out var t2, out var s2))
+                    if (!RepositoryIndexer.TryLoad(root, out var t2, out var s2, out var why))
                     {
                         heldBack.UnionWith(batch.ChangedFullPaths);
+                        if (why == IndexLoadFailure.NewerFormat)
+                        {
+                            wl.SkipBump();
+                            Console.Error.WriteLine("this repo's index was rewritten by a newer CodeCompass, which this one can't " +
+                                                    "write; stopping - watch it with that version.");
+                            Log.For(root).Warn("watch: the index was rewritten by a newer CodeCompass; stopping");
+                            stopped = true;
+                            exit.Set();
+                            return;
+                        }
+                        if (why is IndexLoadFailure.Missing or IndexLoadFailure.Corrupt)
+                        {
+                            Rebuild(wl, $" (the index on disk was {why.ToString().ToLowerInvariant()})");
+                            return;
+                        }
                         wl.SkipBump();
-                        const string held = "the index changed on disk but could not be reloaded; holding back edits until the next change";
+                        retryMs = Math.Clamp(retryMs * 2, 1000, 30_000);
+                        retry?.Dispose();
+                        retry = new System.Threading.Timer(_ => OnBatch(new ChangeBatch(Array.Empty<string>(), FullReconcile: false)),
+                                                           null, retryMs, Timeout.Infinite);
+                        string held = $"the index changed on disk but could not be reloaded; holding back {heldBack.Count} edit(s), retrying in {retryMs / 1000} s";
                         Console.Error.WriteLine(held);
                         Log.For(root).Warn("watch: " + held);
                         return;
@@ -928,8 +970,8 @@ static int CmdWatch(string[] args)
                     loadedGen = gen;
                     Log.For(root).Info("watch: reloaded the index (another CodeCompass process updated it)");
                 }
-                var paths = heldBack.Count == 0 ? batch.ChangedFullPaths : heldBack.Union(batch.ChangedFullPaths).ToList();
-                heldBack.Clear();
+                IReadOnlyList<string> paths = heldBack.Count == 0 ? batch.ChangedFullPaths : heldBack.Union(batch.ChangedFullPaths).ToList();
+                if (paths.Count == 0) { wl.SkipBump(); return; } // a retry that found the index reloadable, nothing held
                 var c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, paths);
                 RepositoryIndexer.Persist(root, text, symbols, snapshot);
                 if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
@@ -951,27 +993,34 @@ static int CmdWatch(string[] args)
                 // sessions reload the index but keep their C# model (see ServerContext.ApplyIncremental).
                 if (!RoslynCSharpAnalyzer.MayAffect(paths) && !c.CSharpInputsChanged) wl.SourcesUnchanged();
                 loadedGen = wl.Commit();
+                heldBack.Clear(); // only now: a write that throws keeps them held (and said at exit)
+                retryMs = 0;
+            }
+            catch (Exception ex)
+            {
+                // What this batch carried isn't in the index: keep it for the next change, and the exit note.
+                heldBack.UnionWith(batch.ChangedFullPaths);
+                Console.Error.WriteLine($"reindex failed ({ex.Message}); holding back {heldBack.Count} edit(s) until the next change");
+                Log.For(root).Error("watch reindex failed", ex);
             }
         }
-        catch (Exception ex)
-        {
-            Log.For(root).Error("watch reindex failed", ex);
-        }
-    }, ignore: IgnoreRules.ForRoot(root)); // the repo's own rules: nothing loaded its config for this thread
+    }
+
+    using var watcher = new RepositoryWatcher(root, OnBatch, ignore: IgnoreRules.ForRoot(root)); // the repo's own rules: nothing loaded its config for this thread
     watcher.Start();
 
     Log.For(root).Info("cli watch started");
     Console.Error.WriteLine($"watching {root} - press Ctrl+C to stop");
-    using var exit = new ManualResetEventSlim(false);
     Console.CancelKeyPress += (_, e) => { e.Cancel = true; exit.Set(); };
     exit.Wait();
     watcher.Dispose(); // stop the watcher and drain any in-flight reindex BEFORE freeing the indexes it touches
+    lock (gate) { stopped = true; retry?.Dispose(); } // and the retry timer (a callback already running holds the gate)
     text.Dispose();
     symbols.Dispose();
     snapshot.Dispose();
     if (heldBack.Count > 0)
         Console.Error.WriteLine($"{heldBack.Count} edit(s) were held back and are NOT in the index - run: codecompass update \"{root}\"");
-    return 0;
+    return heldBack.Count > 0 ? 1 : 0;
 }
 
 // CLI queries operate on a SINGLE root; only the MCP server federates a project's linked roots. If this

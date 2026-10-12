@@ -414,12 +414,21 @@ public static class ServerContext
         });
     }
 
-    // Retry held-back edits (see _heldBack) after a back-off: 1 s, doubling to 30 s while the write keeps failing.
+    // Retry held-back edits (see _heldBack) after a back-off: 1 s, doubling to 30 s while the write keeps failing. A retry
+    // already due is left alone: re-arming it on every failing edit pushed it back for good while edits kept coming faster
+    // than the back-off, and nothing else rebuilds a missing or corrupt index (see DrainPending).
     private static void ScheduleRetry()
     {
+        Timer? timer = null;
+        timer = new Timer(_ =>
+        {
+            if (Interlocked.CompareExchange(ref _retryTimer, null, timer) != timer) return; // replaced by a re-point/shutdown
+            timer!.Dispose();
+            RetryHeldBack();
+        }, null, Timeout.Infinite, Timeout.Infinite);
+        if (Interlocked.CompareExchange(ref _retryTimer, timer, null) is not null) { timer.Dispose(); return; }
         int delay = _retryDelayMs = Math.Clamp(_retryDelayMs * 2, 1000, 30_000);
-        var timer = new Timer(_ => RetryHeldBack(), null, delay, Timeout.Infinite);
-        Interlocked.Exchange(ref _retryTimer, timer)?.Dispose();
+        timer.Change(delay, Timeout.Infinite);
     }
 
     private static void RetryHeldBack()
@@ -642,6 +651,15 @@ public static class ServerContext
         }
         _heldBack = true;
         if (MayAffectUnindexed(fresh)) { _csharp?.Dispose(); _csharp = null; }
+    }
+
+    // A rebuild covered the held-back edits, or the lost-events note speaks for them from here: forget them as held, so a
+    // later hold counts an edit to the same file as new (see HoldBackLocked). Takes the Rw write lock.
+    private static void EndHold()
+    {
+        Rw.EnterWriteLock();
+        try { _heldBack = false; _heldPaths.Clear(); _retryDelayMs = 0; }
+        finally { Rw.ExitWriteLock(); }
     }
 
     // The index on disk loaded and the held-back edits are being applied: the hold is over. A rebuild it alone asked for
@@ -1324,6 +1342,7 @@ public static class ServerContext
                 _state = IndexState.Ready;
                 _loadedGen = gen;
                 _statusOverride = null;
+                _newerFormat = false; // an index this version wrote: the next query may take the live-watch role back
                 installed = true;
             }
         }
@@ -1871,12 +1890,26 @@ public static class ServerContext
                     if (paths.Count == 0 && !reconcile) { wl.SkipBump(); return; }
                     // A rebuild only a hold asked for (the index on disk was missing or corrupt) isn't needed once the index
                     // loads again - fixed meanwhile by a terminal `codecompass index`, say: the held edits just apply.
-                    if (reconcile && holdCaused && _state == IndexState.Ready && RefreshIfStaleLocked() == IndexLoadFailure.None)
+                    // Only still missing or corrupt calls for it: briefly unreadable (a terminal build's fresh index, locked
+                    // just now) is retried, never rebuilt over; a newer CodeCompass's index is left to it (see EnterNewerFormat).
+                    var hold = reconcile && holdCaused && _state == IndexState.Ready ? RefreshIfStaleLocked() : IndexLoadFailure.Missing;
+                    if (hold == IndexLoadFailure.None)
                     {
                         reconcile = false;
                         if (paths.Count == 0) { ClearHoldLocked(); wl.SkipBump(); return; }
                     }
-                    if (_state != IndexState.Ready && reconcile)
+                    if (hold is IndexLoadFailure.Transient or IndexLoadFailure.NewerFormat)
+                    {
+                        failure = hold;
+                        reconcile = false;
+                        if (hold == IndexLoadFailure.Transient)
+                        {
+                            _pendingReconcile = true;
+                            _holdWantsRebuild = true;
+                            _pendingPaths.UnionWith(paths);
+                        }
+                    }
+                    else if (_state != IndexState.Ready && reconcile)
                     {
                         // Nothing loaded to reconcile yet: keep the request (and the edits) for when something is.
                         _pendingReconcile = true;
@@ -1925,13 +1958,13 @@ public static class ServerContext
                     _staleReason = LostEventsReason;
                     _eventsLostUtc = DateTime.UtcNow;
                     _eventsLost = true;
-                    _heldBack = false; // the lost-events note says it from here: they wait for a terminal update
+                    EndHold(); // the lost-events note says it from here: they wait for a terminal update
                     Log.For(Root).Warn($"a captured full-reconcile request was not run in-session (network/large); run: codecompass update \"{Root}\"");
                     continue;
                 }
                 Log.For(Root).Info("draining a full-reconcile request captured during build");
                 var b = RepositoryIndexer.Build(Root, ct: ct);
-                if (Swap(b.Text, b.Symbols, epoch, wl.Commit())) { _eventsLost = false; _heldBack = false; _retryDelayMs = 0; }
+                if (Swap(b.Text, b.Symbols, epoch, wl.Commit())) { _eventsLost = false; EndHold(); }
             }
             catch (OperationCanceledException) { Log.For(Root).Info("drained update canceled (re-point/shutdown)"); return; }
             catch (Exception ex)
@@ -1944,7 +1977,7 @@ public static class ServerContext
                     _staleReason = "a rebuild of the index failed in this session and recent edits may be missing";
                     _eventsLostUtc = DateTime.UtcNow;
                     _eventsLost = true;
-                    _heldBack = false;
+                    EndHold();
                 }
                 return;
             }

@@ -24,43 +24,54 @@ public sealed class SymbolSegmentReader : IDisposable
     {
         FilePath = filePath;
         _mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, mapName: null, capacity: 0, MemoryMappedFileAccess.Read);
-        _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+        // A file that fails the checks below (not a segment, a newer format, corrupt) must not keep its mapping open until
+        // a GC: every retry of a failed load leaked one, and the open mapping blocks overwriting or deleting the file.
+        try
+        {
+            _view = _mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
 
-        if (_view.ReadUInt32(0) != SymbolSegmentBuilder.Magic) throw new InvalidDataException("not a CodeCompass symbol segment");
-        int version = _view.ReadInt32(4);
-        if (version > SymbolSegmentBuilder.Version) throw new IndexFormatTooNewException("symbol segment", version, SymbolSegmentBuilder.Version);
-        if (version != SymbolSegmentBuilder.Version) throw new InvalidDataException("unsupported symbol segment version");
-        Count = _view.ReadInt32(8);
-        PathCount = _view.ReadInt32(12);
-        _nameOffsetsOff = _view.ReadInt64(16);
-        _kindsOff = _view.ReadInt64(24);
-        _pathIdsOff = _view.ReadInt64(32);
-        _linesOff = _view.ReadInt64(40);
-        _endLinesOff = _view.ReadInt64(48);
-        _colsOff = _view.ReadInt64(56);
-        _nameBlobOff = _view.ReadInt64(64);
-        _pathOffsetsOff = _view.ReadInt64(72);
-        _pathBlobOff = _view.ReadInt64(80);
+            if (_view.ReadUInt32(0) != SymbolSegmentBuilder.Magic) throw new InvalidDataException("not a CodeCompass symbol segment");
+            int version = _view.ReadInt32(4);
+            if (version > SymbolSegmentBuilder.Version) throw new IndexFormatTooNewException("symbol segment", version, SymbolSegmentBuilder.Version);
+            if (version != SymbolSegmentBuilder.Version) throw new InvalidDataException("unsupported symbol segment version");
+            Count = _view.ReadInt32(8);
+            PathCount = _view.ReadInt32(12);
+            _nameOffsetsOff = _view.ReadInt64(16);
+            _kindsOff = _view.ReadInt64(24);
+            _pathIdsOff = _view.ReadInt64(32);
+            _linesOff = _view.ReadInt64(40);
+            _endLinesOff = _view.ReadInt64(48);
+            _colsOff = _view.ReadInt64(56);
+            _nameBlobOff = _view.ReadInt64(64);
+            _pathOffsetsOff = _view.ReadInt64(72);
+            _pathBlobOff = _view.ReadInt64(80);
 
-        // Reject a structurally-corrupt/tampered segment at open so callers rebuild.
-        long cap = _view.Capacity;
-        _cap = cap;
-        if (Count < 0 || PathCount < 0 || _nameOffsetsOff < 0 || _kindsOff < _nameOffsetsOff ||
-            _pathIdsOff < _kindsOff || _linesOff < _pathIdsOff || _endLinesOff < _linesOff ||
-            _colsOff < _endLinesOff || _nameBlobOff < _colsOff || _pathOffsetsOff < _nameBlobOff ||
-            _pathBlobOff < _pathOffsetsOff || _pathBlobOff > cap)
-            throw new InvalidDataException("corrupt CodeCompass symbol segment (bad section offsets)");
-        // Each fixed-width column must be large enough for its declared count, else a later read of a
-        // symbol/path index would run past its section or off the mapped view. (Mirrors SegmentReader's
-        // count-size check; long math so counts can't overflow the offset arithmetic.)
-        if (_kindsOff - _nameOffsetsOff < (long)(Count + 1) * 4 || // name offsets: (Count+1) ints
-            _pathIdsOff - _kindsOff < (long)Count ||               // kinds: 1 byte each
-            _linesOff - _pathIdsOff < (long)Count * 4 ||           // pathIds
-            _endLinesOff - _linesOff < (long)Count * 4 ||          // lines
-            _colsOff - _endLinesOff < (long)Count * 4 ||           // endLines
-            _nameBlobOff - _colsOff < (long)Count * 4 ||           // cols
-            _pathBlobOff - _pathOffsetsOff < (long)(PathCount + 1) * 4) // path offsets: (PathCount+1) ints
-            throw new InvalidDataException("corrupt CodeCompass symbol segment (section too small for its counts)");
+            // Reject a structurally-corrupt/tampered segment at open so callers rebuild.
+            long cap = _view.Capacity;
+            _cap = cap;
+            if (Count < 0 || PathCount < 0 || _nameOffsetsOff < 0 || _kindsOff < _nameOffsetsOff ||
+                _pathIdsOff < _kindsOff || _linesOff < _pathIdsOff || _endLinesOff < _linesOff ||
+                _colsOff < _endLinesOff || _nameBlobOff < _colsOff || _pathOffsetsOff < _nameBlobOff ||
+                _pathBlobOff < _pathOffsetsOff || _pathBlobOff > cap)
+                throw new InvalidDataException("corrupt CodeCompass symbol segment (bad section offsets)");
+            // Each fixed-width column must be large enough for its declared count, else a later read of a
+            // symbol/path index would run past its section or off the mapped view. (Mirrors SegmentReader's
+            // count-size check; long math so counts can't overflow the offset arithmetic.)
+            if (_kindsOff - _nameOffsetsOff < (long)(Count + 1) * 4 || // name offsets: (Count+1) ints
+                _pathIdsOff - _kindsOff < (long)Count ||               // kinds: 1 byte each
+                _linesOff - _pathIdsOff < (long)Count * 4 ||           // pathIds
+                _endLinesOff - _linesOff < (long)Count * 4 ||          // lines
+                _colsOff - _endLinesOff < (long)Count * 4 ||           // endLines
+                _nameBlobOff - _colsOff < (long)Count * 4 ||           // cols
+                _pathBlobOff - _pathOffsetsOff < (long)(PathCount + 1) * 4) // path offsets: (PathCount+1) ints
+                throw new InvalidDataException("corrupt CodeCompass symbol segment (section too small for its counts)");
+        }
+        catch
+        {
+            _view?.Dispose();
+            _mmf.Dispose();
+            throw;
+        }
     }
 
     public string GetName(int i)
