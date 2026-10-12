@@ -22,7 +22,11 @@ public sealed record IndexStats(int Files, long Bytes, long TrigramPostings, int
 // exactly; the others report true, the safe side.
 public sealed record UpdateStats(int Added, int Modified, int Removed, double Seconds, bool FullRebuild, bool CSharpInputsChanged = true);
 
-public sealed record ChangeCounts(int Added, int Modified, int Removed, bool CSharpInputsChanged = false);
+public sealed record ChangeCounts(int Added, int Modified, int Removed, bool CSharpInputsChanged = false)
+{
+    /// <summary>Paths on a network root the share didn't answer for: left as indexed, for the caller to retry.</summary>
+    public IReadOnlyList<string> Unsure { get; init; } = Array.Empty<string>();
+}
 
 /// <summary>
 /// Builds and loads a repository's on-disk index: a memory-mapped segmented trigram index,
@@ -465,6 +469,8 @@ public static class RepositoryIndexer
     // throws OutOfMemoryException (to hit the per-file memory backstop). StallWarnMsForTests shortens the
     // watchdog window below the 5 s config floor so those tests run in well under a second.
     internal static Action<string>? OnFileStartForTests;
+    // Runs as Compact starts merging (a test holds a compaction there).
+    internal static Action? OnCompactForTests;
     internal static long? StallWarnMsForTests;
 
     /// <summary>The stall watchdog's headline and advice. Over a share, a worker "held" on a big file is usually
@@ -769,6 +775,7 @@ public static class RepositoryIndexer
         // Dispose the loaded handles on cancel so a teardown doesn't leak the mmaps.
         try
         {
+            OnCompactForTests?.Invoke();
             ct.ThrowIfCancellationRequested();
             text.Compact();
             ct.ThrowIfCancellationRequested();
@@ -824,12 +831,14 @@ public static class RepositoryIndexer
         var irrelevant = inRepo.Where(p => IrrelevantIgnoredType(snapshot, p.Rel, ignore)).Select(p => p.Full).ToList();
         var irrelevantFolders = irrelevant.Count == 0 ? null : FolderProbe.Folders(irrelevant);
         var skip = new HashSet<string>(irrelevant.Where(p => !irrelevantFolders!.Contains(p)), StringComparer.Ordinal);
+        var unsure = new List<string>();
 
         foreach (var (full, rel) in inRepo)
         {
             if (skip.Contains(full)) continue;
 
-            if (Directory.Exists(full))
+            var kind = Probe(full, batch.RootIsNetwork);
+            if (kind == PathKind.Folder)
             {
                 // A folder in a batch is a new subtree (created, renamed or moved in) - or one REPLACED by a same-named folder
                 // within the debounce window, whose missing files no event reports. So also drop what the index holds under
@@ -848,23 +857,53 @@ public static class RepositoryIndexer
                 }
                 if (walker.DroppedDirs == 0)
                     foreach (var stale in snapshot.KeysWithPrefix(rel + "/").Where(k => !seen.Contains(k)).ToList())
-                        if (!File.Exists(Path.Combine(root, stale.Replace('/', Path.DirectorySeparatorChar))))
-                            RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, ref csharp);
+                    {
+                        var staleFull = Path.Combine(root, stale.Replace('/', Path.DirectorySeparatorChar));
+                        switch (Probe(staleFull, batch.RootIsNetwork))
+                        {
+                            case PathKind.Gone: RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, ref csharp); break;
+                            // A file replaced by a same-named folder: the walk just indexed what's in it, so drop the file alone.
+                            case PathKind.Folder: RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, ref csharp, withChildren: false); break;
+                            case PathKind.Unknown: unsure.Add(staleFull); break;
+                        }
+                    }
             }
-            else if (File.Exists(full))
+            else if (kind == PathKind.File)
             {
                 int before = added + modified + removed;
                 ApplyFile(text, symbols, snapshot, dir, rel, full, ignore, extractor, batch,
                           ref added, ref modified, ref removed);
                 if (added + modified + removed != before && SemanticInputs.IsCSharpInput(rel)) csharp = true;
             }
-            else
+            else if (kind == PathKind.Gone)
             {
                 RemovePathAndChildren(text, symbols, snapshot, dir, rel, ref removed, ref csharp);
             }
+            else unsure.Add(full);
         }
 
-        return new ChangeCounts(added, modified, removed, csharp);
+        return new ChangeCounts(added, modified, removed, csharp) { Unsure = unsure };
+    }
+
+    private enum PathKind { Folder, File, Gone, Unknown }
+
+    /// <summary>Test seam (null in production): true makes a path's probe fail the way an unreachable share does.</summary>
+    internal static Func<string, bool>? ProbeFailsForTests;
+
+    // What's at a changed path now. File.Exists and Directory.Exists also answer false when the call FAILED, and on a network
+    // root a share that blinked is common: taking that as "gone" dropped healthy files from the index. There, "gone" needs the
+    // disk to say so; otherwise it's Unknown, and the caller retries. A local disk that can't stat a path is believed.
+    private static PathKind Probe(string full, bool network)
+    {
+        if (ProbeFailsForTests?.Invoke(full) == true) return network ? PathKind.Unknown : PathKind.Gone;
+        if (Directory.Exists(full)) return PathKind.Folder;
+        if (File.Exists(full)) return PathKind.File;
+        if (!network) return PathKind.Gone;
+        try { File.GetAttributes(full); return PathKind.Gone; } // there, yet neither (a dangling link): never indexed
+        catch (FileNotFoundException) { return PathKind.Gone; }
+        catch (DirectoryNotFoundException) { return PathKind.Gone; }
+        catch (IOException) { return PathKind.Unknown; }
+        catch (UnauthorizedAccessException) { return PathKind.Unknown; }
     }
 
     /// <summary>Persist in-memory indexes + snapshot to the cache. The caller must hold the cache's
@@ -1022,7 +1061,7 @@ public static class RepositoryIndexer
 
     private static void RemovePathAndChildren(
         SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string dir,
-        string rel, ref int removed, ref bool csharp)
+        string rel, ref int removed, ref bool csharp, bool withChildren = true)
     {
         if (snapshot.TryGetValue(rel, out _) && snapshot.Remove(rel))
         {
@@ -1032,6 +1071,7 @@ public static class RepositoryIndexer
             removed++;
             if (SemanticInputs.IsCSharpInput(rel)) csharp = true;
         }
+        if (!withChildren) return;
 
         var prefix = rel + "/";
         var children = snapshot.KeysWithPrefix(prefix).ToList();

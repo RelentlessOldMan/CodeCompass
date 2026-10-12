@@ -1013,7 +1013,17 @@ static int CmdWatch(string[] args)
                 if (!RoslynCSharpAnalyzer.MayAffect(paths) && !c.CSharpInputsChanged) wl.SourcesUnchanged();
                 loadedGen = wl.Commit();
                 heldBack.Clear(); // only now: a write that throws keeps them held (and said at exit)
-                retryMs = 0;
+                if (c.Unsure.Count == 0) retryMs = 0;
+                else
+                {
+                    // The share didn't answer for these (see RepositoryIndexer.Probe): kept as indexed - look again shortly.
+                    heldBack.UnionWith(c.Unsure);
+                    retryMs = Math.Clamp(retryMs * 2, 1000, 30_000);
+                    retry?.Dispose();
+                    retry = new System.Threading.Timer(_ => OnBatch(new ChangeBatch(Array.Empty<string>(), FullReconcile: false)),
+                                                       null, retryMs, Timeout.Infinite);
+                    Log.For(root).Warn($"watch: the share didn't answer for {c.Unsure.Count} changed path(s); kept as indexed, retrying");
+                }
             }
             catch (Exception ex)
             {

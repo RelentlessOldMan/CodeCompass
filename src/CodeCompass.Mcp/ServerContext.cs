@@ -1718,7 +1718,7 @@ public static class ServerContext
         // processes) -> Rw. Both waits are cancellable, and neither holds Rw, so a long write by another process (a
         // terminal `codecompass index`) only parks this callback - queries keep serving the loaded index meanwhile.
         try { BuildGate.Wait(ct); } catch (OperationCanceledException) { return; }
-        bool ok = false, keptServing = false;
+        bool ok = false, keptServing = false, rebuildingSet = false;
         try
         {
             using var wl = IndexWriteLock.Acquire(CacheDir, ct);
@@ -1741,7 +1741,9 @@ public static class ServerContext
                     {
                         affects = ApplyIncremental(TakePendingLocked(batch.ChangedFullPaths));
                         compact = RepositoryIndexer.NeedsCompaction(_text!, _symbols!);
-                        if (compact) _state = IndexState.Building;
+                        // The merge works on its own copy of the index: this one keeps serving, as during any rebuild here
+                        // (BackgroundReconcile, Reindex) - not "indexing 0%" - while the watcher's edits wait their turn.
+                        if (compact) _rebuilding = rebuildingSet = true;
                     }
                     else if (failure != IndexLoadFailure.NewerFormat) HoldBackLocked(batch.ChangedFullPaths, failure);
                 }
@@ -1780,7 +1782,7 @@ public static class ServerContext
                     return;
                 }
                 Rw.EnterWriteLock();
-                try { _state = IndexState.Building; }
+                try { _rebuilding = rebuildingSet = true; } // as for a compaction, above
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info("watcher requested full reconcile; rebuilding");
                 var b = RepositoryIndexer.Build(Root, ct: ct);
@@ -1808,10 +1810,25 @@ public static class ServerContext
             }
             finally { Rw.ExitWriteLock(); }
             if (!keptServing) SetServing(false);
+            else if (batch.FullReconcile)
+            {
+                // The rebuild was to catch the edits the watcher lost: they're still missing. Say so (as DrainPending does).
+                _staleReason = "a rebuild of the index failed in this session and recent edits may be missing";
+                _eventsLostUtc = DateTime.UtcNow;
+                _eventsLost = true;
+            }
             Log.For(Root).Error("reconcile/compaction failed" + (keptServing ? "; keeping the serving index" : "; falling back to CLI-build state"), ex);
             PublishStatus();
         }
-        finally { BuildGate.Release(); }
+        finally
+        {
+            if (rebuildingSet)
+            {
+                Rw.EnterWriteLock();
+                try { _rebuilding = false; } finally { Rw.ExitWriteLock(); }
+            }
+            BuildGate.Release();
+        }
         if (ok || keptServing) DrainPending();
     }
 
@@ -1833,6 +1850,14 @@ public static class ServerContext
             if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
                 Log.For(Root).Info($"incremental reindex: +{c.Added} ~{c.Modified} -{c.Removed} " +
                                    $"({changedFullPaths.Count} path(s) changed)");
+            if (c.Unsure.Count > 0)
+            {
+                // The share didn't answer for these (see RepositoryIndexer.Probe): they stay as indexed - look again shortly.
+                _pendingPaths.UnionWith(c.Unsure);
+                Log.For(Root).Warn($"the share didn't answer for {c.Unsure.Count} changed path(s); kept as indexed, retrying");
+                ScheduleRetry();
+            }
+            else if (!_heldBack) _retryDelayMs = 0;
         }
         catch (Exception ex)
         {

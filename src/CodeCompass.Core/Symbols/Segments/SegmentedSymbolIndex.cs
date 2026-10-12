@@ -99,6 +99,7 @@ public sealed class SegmentedSymbolIndex : IDisposable
 
     public void RemovePath(string relativePath)
     {
+        _pending?.RemovePath(relativePath); // not yet in a segment: no tombstone would reach it
         for (int segId = 0; segId < _segments.Count; segId++)
         {
             if (!_segments[segId].ContainsPath(relativePath)) continue;

@@ -22,10 +22,21 @@ public sealed class SymbolSegmentBuilder
     public int Count => _symbols.Count;
     public long ApproxBytes { get; private set; }
 
+    // The paths held, built on the first removal: a build, which never removes, doesn't pay for it.
+    private HashSet<string>? _paths;
+
     public void Add(Symbol s)
     {
         _symbols.Add(s);
+        _paths?.Add(s.RelativePath);
         ApproxBytes += (long)s.Name.Length * 2 + s.RelativePath.Length * 2 + 32;
+    }
+
+    /// <summary>Drop a path's symbols - a file indexed, then removed, before they were written.</summary>
+    public void RemovePath(string relativePath)
+    {
+        _paths ??= new HashSet<string>(_symbols.Select(s => s.RelativePath), StringComparer.Ordinal);
+        if (_paths.Remove(relativePath)) _symbols.RemoveAll(s => s.RelativePath == relativePath);
     }
 
     public void WriteTo(string filePath)
