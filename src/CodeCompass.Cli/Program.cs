@@ -872,22 +872,41 @@ static int CmdWatch(string[] args)
     {
         Console.Error.WriteLine("loaded existing index");
     }
-    else if (loadWhy == IndexLoadFailure.NewerFormat)
-    {
-        // Written by a newer CodeCompass: this one can't read or write it (Build refuses), so it mustn't hold the role.
-        Console.Error.WriteLine("this repo's index was written by a newer CodeCompass - watch it with that version, or run " +
-                                $"'codecompass index \"{root}\"' to rebuild it for this one.");
-        return 1;
-    }
     else
     {
-        Console.Error.WriteLine("building initial index...");
+        // Looked at again under the write lock: a writer committing just now (a terminal `index`) is done by then. Only a
+        // missing or corrupt index is built - never one that's briefly unreadable, nor a newer CodeCompass's.
         using var wl = IndexWriteLock.Acquire(cacheDir);
-        var b = RepositoryIndexer.Build(root);
-        text = b.Text;
-        symbols = b.Symbols;
-        loadedGen = wl.Commit();
-        Console.Error.WriteLine($"indexed {b.Stats.Files} files");
+        if (loadWhy != IndexLoadFailure.NewerFormat && RepositoryIndexer.TryLoad(root, out text, out symbols, out loadWhy))
+        {
+            wl.SkipBump();
+            loadedGen = IndexGeneration.Read(cacheDir);
+            Console.Error.WriteLine("loaded existing index");
+        }
+        else if (loadWhy == IndexLoadFailure.NewerFormat)
+        {
+            // Written by a newer CodeCompass: this one can't read or write it (Build refuses), so it mustn't hold the role.
+            wl.SkipBump();
+            Console.Error.WriteLine("this repo's index was written by a newer CodeCompass - watch it with that version, or run " +
+                                    $"'codecompass index \"{root}\"' to rebuild it for this one.");
+            return 1;
+        }
+        else if (loadWhy == IndexLoadFailure.Transient)
+        {
+            wl.SkipBump();
+            Console.Error.WriteLine("this repo's index could not be read right now (transient I/O - another process may have " +
+                                    "it open); not rebuilding it - try again shortly.");
+            return 1;
+        }
+        else
+        {
+            Console.Error.WriteLine("building initial index...");
+            var b = RepositoryIndexer.Build(root);
+            text = b.Text;
+            symbols = b.Symbols;
+            loadedGen = wl.Commit();
+            Console.Error.WriteLine($"indexed {b.Stats.Files} files");
+        }
     }
     var snapshot = RepositoryIndexer.LoadSnapshot(root);
 
@@ -899,7 +918,7 @@ static int CmdWatch(string[] args)
     // index stops the watch. The watcher's batches and the retry timer are serialized on `gate`.
     var heldBack = new HashSet<string>(StringComparer.Ordinal);
     var gate = new object();
-    bool stopped = false;
+    bool stopped = false, newerFormat = false;
     int retryMs = 0;
     System.Threading.Timer? retry = null;
     using var exit = new ManualResetEventSlim(false);
@@ -945,7 +964,7 @@ static int CmdWatch(string[] args)
                             Console.Error.WriteLine("this repo's index was rewritten by a newer CodeCompass, which this one can't " +
                                                     "write; stopping - watch it with that version.");
                             Log.For(root).Warn("watch: the index was rewritten by a newer CodeCompass; stopping");
-                            stopped = true;
+                            stopped = newerFormat = true;
                             exit.Set();
                             return;
                         }
@@ -1019,7 +1038,10 @@ static int CmdWatch(string[] args)
     symbols.Dispose();
     snapshot.Dispose();
     if (heldBack.Count > 0)
-        Console.Error.WriteLine($"{heldBack.Count} edit(s) were held back and are NOT in the index - run: codecompass update \"{root}\"");
+        Console.Error.WriteLine($"{heldBack.Count} edit(s) were held back and are NOT in the index - " + (newerFormat
+            // This version's `update` refuses a newer CodeCompass's index.
+            ? $"update it with that newer CodeCompass, or rebuild it for this one: codecompass index \"{root}\""
+            : $"run: codecompass update \"{root}\""));
     return heldBack.Count > 0 ? 1 : 0;
 }
 

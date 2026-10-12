@@ -809,15 +809,25 @@ public static class RepositoryIndexer
         var batch = new ApplyBatch(IndexMetaFile.ReadFromCacheDir(dir)?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold,
                                    Storage.NetworkPath.IsNetwork(root), Storage.NetworkPath.IsNetwork(dir), snapshot.RecordedByUtcTicks);
 
+        var inRepo = new List<(string Full, string Rel)>();
         foreach (var full in changedFullPaths.Select(Path.GetFullPath).Distinct())
         {
             if (!TryRel(root, full, out var rel)) continue;
             // Outside the repo: "../" escapes, "." is the root itself, and a different drive
             // (or a junction pointing off-root) yields a still-rooted path from GetRelativePath.
             if (PathSafety.IsOutsideRepo(rel)) continue;
-            // No disk access for each file a build's clean deleted - bar a stat for a name the snapshot holds nothing under:
-            // a folder named like one that was created or moved in (src/Lib renamed to src/Contoso.Lib) must be walked.
-            if (IrrelevantIgnoredType(snapshot, rel, ignore) && !Directory.Exists(full)) continue;
+            inRepo.Add((full, rel));
+        }
+        // A name like an ignored file type the snapshot holds nothing under is skipped - unless it's a folder named like one,
+        // created or moved in (src/Lib renamed to src/Contoso.Lib), which must be walked. Asked of the disk once per parent
+        // folder (see FolderProbe), not once per path: a build's clean deletes thousands of such files.
+        var irrelevant = inRepo.Where(p => IrrelevantIgnoredType(snapshot, p.Rel, ignore)).Select(p => p.Full).ToList();
+        var irrelevantFolders = irrelevant.Count == 0 ? null : FolderProbe.Folders(irrelevant);
+        var skip = new HashSet<string>(irrelevant.Where(p => !irrelevantFolders!.Contains(p)), StringComparer.Ordinal);
+
+        foreach (var (full, rel) in inRepo)
+        {
+            if (skip.Contains(full)) continue;
 
             if (Directory.Exists(full))
             {

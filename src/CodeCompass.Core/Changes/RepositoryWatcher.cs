@@ -226,8 +226,10 @@ public sealed class RepositoryWatcher : IDisposable
                                  : pending.Where(p => p.Value || !Directory.Exists(p.Key)).Select(p => p.Key).ToList();
             if (!overflow)
             {
+                // One listing per parent folder, not a stat per path: an in-tree build creates thousands of .o files.
                 var seen = new HashSet<string>(paths, StringComparer.Ordinal);
-                paths.AddRange(ifFolder.Where(p => !seen.Contains(p) && Directory.Exists(p)));
+                var unseen = ifFolder.Where(p => !seen.Contains(p)).ToList();
+                if (unseen.Count > 0) paths.AddRange(Storage.FolderProbe.Folders(unseen));
             }
             if (paths.Count == 0 && !overflow) return;
 

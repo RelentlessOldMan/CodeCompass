@@ -245,42 +245,45 @@ public class WriteLockTests
         }
     }
 
-    // ...and once this version's index is back (the cache purged and rebuilt, or another session of this version rebuilt it),
-    // the session must take the live-watch role back. Only a reload cleared the newer-format state, not a rebuild, so it
-    // never watched again - edits went unindexed with no note.
+    // ...and once this version's index is back - the cache purged and rebuilt by the session itself - it must take the
+    // live-watch role back. Only a load cleared the newer-format state, not the session's own rebuild, so it never
+    // watched again: edits went unindexed with no note.
     [Fact]
     public void Server_AfterANewerFormatIndexIsRebuiltByThisVersion_TheLiveWatchRoleIsTakenBack()
     {
         using var repo = new TempRepo();
         repo.Write("a.cs", "namespace N { class AlphaLocal { } }");
-        var oldAuto = Environment.GetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE");
         var cache = IndexStore.CacheDirPath(repo.Root);
+        var b0 = RepositoryIndexer.Build(repo.Root); b0.Text.Dispose(); b0.Symbols.Dispose();
+        foreach (var seg in Directory.GetFiles(cache, "seg-*.ccseg")) // a newer CodeCompass's index
+            using (var fs = new FileStream(seg, FileMode.Open, FileAccess.Write)) { fs.Position = 4; fs.Write(BitConverter.GetBytes(99)); }
         ServerContext.Init(repo.Root);
         try
         {
-            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", "false");
-            CodeCompassTools.Reindex();
-            var before = Directory.GetFiles(cache, "seg-*.ccseg");
-            repo.Write("b.cs", "namespace N { class BravoExternal { } }");
-            OtherWriter(repo.Root);
-            var newest = Directory.GetFiles(cache, "seg-*.ccseg").Except(before).First();
-            using (var fs = new FileStream(newest, FileMode.Open, FileAccess.Write)) { fs.Position = 4; fs.Write(BitConverter.GetBytes(99)); }
-            ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("a.cs") }, FullReconcile: false));
-            for (int i = 0; i < 50 && ServerContext.IsLiveWatchOwnerForTest; i++) Thread.Sleep(100);
-            Assert.False(ServerContext.IsLiveWatchOwnerForTest);
+            bool handedOver = false;
+            for (int i = 0; i < 100 && !handedOver; i++)
+            {
+                handedOver = CodeCompassTools.SearchCode("AlphaLocal").Contains("NEWER CodeCompass") && !ServerContext.IsLiveWatchOwnerForTest;
+                if (!handedOver) Thread.Sleep(100);
+            }
+            Assert.True(handedOver, "the session never handed a newer CodeCompass's index over");
 
-            var wl = IndexWriteLock.Acquire(cache);
-            var b = RepositoryIndexer.Build(repo.Root, overNewerFormat: true);
-            wl.Commit(); wl.Dispose();
-            Assert.True(ServerContext.SwapForTest(b.Text, b.Symbols, ServerContext.EpochForTest));
+            // The cache is purged: the session's own background build (Swap) brings this version's index back.
+            foreach (var f in Directory.GetFiles(cache).Where(f => f.EndsWith(".ccseg") || f.EndsWith(".manifest")))
+                File.Delete(f);
 
-            Assert.Contains("BravoExternal", CodeCompassTools.SearchCode("BravoExternal")); // a query: the role is free to take
-            for (int i = 0; i < 50 && !ServerContext.IsLiveWatchOwnerForTest; i++) Thread.Sleep(100);
-            Assert.True(ServerContext.IsLiveWatchOwnerForTest, "the session never took the live-watch role back");
+            bool owner = false; // the next queries build it and take the role back
+            for (int i = 0; i < 100 && !owner; i++)
+            {
+                CodeCompassTools.SearchCode("AlphaLocal");
+                owner = ServerContext.IsLiveWatchOwnerForTest;
+                if (!owner) Thread.Sleep(100);
+            }
+            Assert.True(owner, "the session never took the live-watch role back");
+            Assert.Contains("a.cs", CodeCompassTools.SearchCode("AlphaLocal"));
         }
         finally
         {
-            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", oldAuto);
             ServerContext.Init(repo.Root);
         }
     }
@@ -357,6 +360,55 @@ public class WriteLockTests
             var r = CodeCompassTools.SearchCode("AlphaLocal");
             Assert.Contains("NEWER CodeCompass", r);
             Assert.DoesNotContain("a rebuild of the index failed", r);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", oldAuto);
+            ServerContext.Init(repo.Root);
+        }
+    }
+
+    // A rebuild a hold queued (the index was corrupt) found it whole again but briefly unreadable by the time it ran (a
+    // terminal build's fresh index, locked just now): it must keep the edits held and retry - never rebuild over it.
+    [Fact]
+    public void Server_AHoldsRebuild_FindingTheIndexBrieflyUnreadable_RetriesInsteadOfRebuilding()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class AlphaLocal { } }");
+        var oldAuto = Environment.GetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE");
+        var cache = IndexStore.CacheDirPath(repo.Root);
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", "true");
+            var before = Directory.GetFiles(cache, "seg-*.ccseg");
+            repo.Write("b.cs", "namespace N { class BravoExternal { } }");
+            OtherWriter(repo.Root);
+            var newest = Directory.GetFiles(cache, "seg-*.ccseg").Except(before).First();
+            var orig = File.ReadAllBytes(newest);
+            using (var fs = new FileStream(newest, FileMode.Open, FileAccess.Write)) fs.Write(new byte[4]); // corrupt: a rebuild is queued
+            repo.Write("c.cs", "namespace N { class CharlieLocal { } }");
+            ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("c.cs") }, FullReconcile: false));
+
+            // Before the retry (1 s) runs, the index is whole again - but locked just now.
+            using (var fs = new FileStream(newest, FileMode.Open, FileAccess.Write, FileShare.ReadWrite)) fs.Write(orig, 0, 8);
+            var segs = Directory.GetFiles(cache, "seg-*.ccseg").OrderBy(f => f).ToList();
+            using (new FileStream(Path.Combine(cache, "symbols.manifest"), FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Thread.Sleep(2500); // the retry runs meanwhile
+                Assert.Equal(segs, Directory.GetFiles(cache, "seg-*.ccseg").OrderBy(f => f).ToList()); // nothing rebuilt
+            }
+
+            bool landed = false; // readable again: a later retry applies the held edit to the other writer's index
+            for (int i = 0; i < 150 && !landed; i++)
+            {
+                Thread.Sleep(100);
+                if (RepositoryIndexer.TryLoad(repo.Root, out var t, out var s))
+                    using (t) using (s) landed = t.Search("CharlieLocal").Count > 0 && t.Search("BravoExternal").Count > 0;
+            }
+            Assert.True(landed, "the held edit never landed");
+            Assert.DoesNotContain("a rebuild of the index failed", CodeCompassTools.SearchCode("AlphaLocal"));
         }
         finally
         {

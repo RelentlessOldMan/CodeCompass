@@ -428,7 +428,7 @@ public static class ServerContext
         }, null, Timeout.Infinite, Timeout.Infinite);
         if (Interlocked.CompareExchange(ref _retryTimer, timer, null) is not null) { timer.Dispose(); return; }
         int delay = _retryDelayMs = Math.Clamp(_retryDelayMs * 2, 1000, 30_000);
-        timer.Change(delay, Timeout.Infinite);
+        timer.Change(delay, Timeout.Infinite); // disposed meanwhile by a re-point/shutdown: returns false, doesn't throw
     }
 
     private static void RetryHeldBack()
