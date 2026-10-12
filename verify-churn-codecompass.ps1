@@ -88,6 +88,12 @@ for ($k = 1; $k -le $Edits; $k++) {
     $deltaPath = Join-Path (Split-Path $Corpus) ((Split-Path $Corpus -Leaf) + "-delta-$k.json")
     if (-not (Test-Path $deltaPath)) { $fail++; Say "  step ${k}: no delta emitted" 'Red'; continue }
     $delta = Get-Content $deltaPath -Raw | ConvertFrom-Json
+    # A symbol (overlay) delta says deltaKind "symbol" since CodeSpawner 1.1.4; older ones omit it. Any other kind
+    # ("diff", "conflict-3way") is a different format that would read here as "no change", so refuse it.
+    $kindProp = $delta._meta.PSObject.Properties['deltaKind']
+    if ($kindProp -and $kindProp.Value -ne 'symbol') {
+        $fail++; Say "  step ${k}: delta is deltaKind '$($kindProp.Value)', not a symbol delta" 'Red'; continue
+    }
 
     # 1. CHAIN INTEGRITY: my composed truth (state_{k-1}) must match what mutate expected.
     $preDig = Get-TruthDigest $truth

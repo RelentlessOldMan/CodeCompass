@@ -1,7 +1,7 @@
 ﻿CodeSpawner generator vendored into this repo.
 
-generatorVersion : 1.1.3
+generatorVersion : 1.1.5
 manifestVersion  : 1
-vendoredFrom     : CodeSpawner GitHub release v1.1.3 (9d7ad05)
+vendoredFrom     : CodeSpawner GitHub release v1.1.5 (4068f68)
 note             : Vendored, not a submodule. To bump: copy the release exe and docs\manifest-schema.md here, then update this file.
                    Consumers MUST assert _meta.manifestVersion == 1 before trusting a manifest.
