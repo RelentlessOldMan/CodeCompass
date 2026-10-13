@@ -226,8 +226,9 @@ from this exact input — `roots = ["func_0"]`, and edges:
 | `func_0` | `iext_1` | `vector-table` | 0 | 0 |
 | `func_1` | `itgt_0` | `init_array` | 1 | 1 |
 
-Run `codespawner digest-selftest` — it prints both the primary (`7de5e47…`) and this indirect vector and
-exits non-zero on any drift. A read-side recompute that reproduces `fa9432bd…` from the fixture above is
+Run `codespawner digest-selftest` — it prints all four golden vectors (the primary `7de5e47…`, this
+indirect one, and the `diffTruthSha` and `conflictTruthSha` vectors from
+[diff-delta-design.md](diff-delta-design.md)) and exits non-zero on any drift. A read-side recompute that reproduces `fa9432bd…` from the fixture above is
 proven byte-identical to the generator and can be trusted on real manifests.
 
 ### `bytes` / `_meta.totalOracleBytes` — byte-mass ground truth (oracle-v1)
