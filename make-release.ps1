@@ -229,7 +229,10 @@ Or do it by hand:
     codex plugin marketplace add "<full path to this folder>"
     codex plugin add codecompass@codecompass
 
-The plugin resolves the server path automatically (nothing hardcoded, nothing copied).
+UPGRADING: unzip the new release anywhere and run the same command from it. The installer
+re-points Codex at the new folder (by hand: codex plugin marketplace remove codecompass first).
+
+The plugin resolves the server path automatically (nothing hardcoded; Codex runs its own copy).
 The server serves Codex's working directory, so open Codex in your project root.
 Verify with:  codex plugin list   and   codex mcp list
 

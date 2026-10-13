@@ -130,8 +130,12 @@ codex plugin marketplace add "C:\path\to\codecompass-plugin-<version>-win-x64"
 codex plugin add codecompass@codecompass
 ```
 
-The plugin's `mcp.json` uses `${CODEX_PLUGIN_ROOT}`, which Codex expands to the plugin folder — so no path
-is hardcoded and nothing is copied. No workspace argument is passed: the server indexes **Codex's working
+**Upgrading:** unzip the new release and run the same command from its folder. Codex won't re-point a
+marketplace at a new folder, so the installer removes the old `codecompass` marketplace first (by hand:
+`codex plugin marketplace remove codecompass`, then the two commands above).
+
+Codex copies the plugin into its own cache (`~/.codex/plugins/cache`, one folder per version) and runs the
+server from there; the plugin's `mcp.json` uses `${CODEX_PLUGIN_ROOT}`, so no path is hardcoded. No workspace argument is passed: the server indexes **Codex's working
 directory** (its cwd), so open Codex in your project root; it prints the resolved root to stderr at startup.
 Verify with `codex plugin list` and `codex mcp list`.
 

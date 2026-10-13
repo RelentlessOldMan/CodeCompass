@@ -70,6 +70,18 @@ function Test-CodexInstall {
             try {
                 $mkOut = & codex plugin marketplace add "$root" 2>&1
                 $mkCode = $LASTEXITCODE
+                if ($mkCode -ne 0 -and ($mkOut | Out-String) -match 'different source') {
+                    # Upgrade: each release unzips to its own folder, and Codex refuses to re-point a marketplace
+                    # name at a new folder. Without this, plugin add below "succeeds" against the OLD folder.
+                    Write-Host "Replacing the previous CodeCompass marketplace with $root (upgrade)."
+                    $rmOut = & codex plugin marketplace remove codecompass 2>&1
+                    $mkOut = @($rmOut) + @(& codex plugin marketplace add "$root" 2>&1)
+                    $mkCode = $LASTEXITCODE
+                }
+                if ($mkCode -ne 0) {
+                    $detail = ($mkOut | Out-String).Trim()
+                    throw "codex plugin marketplace add failed (exit $mkCode). Run it by hand to see why:`n  codex plugin marketplace add `"$root`"`n$detail"
+                }
                 $addOut = & codex plugin add "$Name@codecompass" 2>&1
                 $addCode = $LASTEXITCODE
                 if ($addCode -ne 0) {
