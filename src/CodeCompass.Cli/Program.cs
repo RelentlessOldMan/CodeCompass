@@ -917,9 +917,12 @@ static int CmdWatch(string[] args)
     // timer (not only on the next change - there may be none); missing or corrupt rebuilds it; a newer CodeCompass's
     // index stops the watch. The watcher's batches and the retry timer are serialized on `gate`.
     var heldBack = new HashSet<string>(StringComparer.Ordinal);
+    // Paths the share didn't answer for (see RepositoryIndexer.Probe): kept as indexed and looked at again by the retry
+    // timer, on their own back-off. Not held-back edits: their edit is applied as far as the share let it be.
+    var unsure = new HashSet<string>(StringComparer.Ordinal);
     var gate = new object();
     bool stopped = false, newerFormat = false;
-    int retryMs = 0;
+    int retryMs = 0, unsureMs = 0;
     System.Threading.Timer? retry = null;
     using var exit = new ManualResetEventSlim(false);
 
@@ -934,7 +937,8 @@ static int CmdWatch(string[] args)
         snapshot = RepositoryIndexer.LoadSnapshot(root);
         loadedGen = wl.Commit();
         heldBack.Clear(); // the rebuild read every file, the held-back ones included
-        retryMs = 0;
+        unsure.Clear();
+        retryMs = unsureMs = 0;
         Console.Error.WriteLine("reindexed: full rebuild" + why);
         Log.For(root).Info("watch: full rebuild" + why);
     }
@@ -944,6 +948,7 @@ static int CmdWatch(string[] args)
         lock (gate)
         {
             if (stopped) return;
+            HashSet<string>? retried = null; // the paths the share didn't answer for that this retry looks at again
             try
             {
                 using var wl = IndexWriteLock.Acquire(cacheDir);
@@ -990,6 +995,14 @@ static int CmdWatch(string[] args)
                     Log.For(root).Info("watch: reloaded the index (another CodeCompass process updated it)");
                 }
                 IReadOnlyList<string> paths = heldBack.Count == 0 ? batch.ChangedFullPaths : heldBack.Union(batch.ChangedFullPaths).ToList();
+                // The retry timer (an empty batch) looks again at the paths the share didn't answer for.
+                if (batch.ChangedFullPaths.Count == 0 && unsure.Count > 0)
+                {
+                    retried = new HashSet<string>(unsure, StringComparer.Ordinal);
+                    retried.ExceptWith(paths);
+                    unsure.Clear();
+                    paths = paths.Concat(retried).ToList();
+                }
                 if (paths.Count == 0) { wl.SkipBump(); return; } // a retry that found the index reloadable, nothing held
                 var c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, paths);
                 RepositoryIndexer.Persist(root, text, symbols, snapshot);
@@ -1010,25 +1023,37 @@ static int CmdWatch(string[] args)
                 }
                 // A README or .json edit (an editor's temp files and folder timestamps included) changes no C# source:
                 // sessions reload the index but keep their C# model (see ServerContext.ApplyIncremental).
-                if (!RoslynCSharpAnalyzer.MayAffect(paths) && !c.CSharpInputsChanged) wl.SourcesUnchanged();
+                // A retry isn't a new edit: that edit counted when it arrived.
+                var fresh = retried is null ? paths : paths.Where(p => !retried.Contains(p)).ToList();
+                if (!RoslynCSharpAnalyzer.MayAffect(fresh) && !c.CSharpInputsChanged) wl.SourcesUnchanged();
                 loadedGen = wl.Commit();
                 heldBack.Clear(); // only now: a write that throws keeps them held (and said at exit)
-                if (c.Unsure.Count == 0) retryMs = 0;
+                retryMs = 0;
+                // The share didn't answer for these: kept as indexed - look again later. Said once when it starts and once
+                // when it ends, not on every retry of a path that may never answer (access denied).
+                bool wasUnsure = unsure.Count > 0 || retried is not null;
+                unsure.ExceptWith(paths);
+                unsure.UnionWith(c.Unsure);
+                if (unsure.Count == 0)
+                {
+                    if (wasUnsure) Log.For(root).Info("watch: the share answered for every path it hadn't; the index caught up");
+                    unsureMs = 0;
+                }
                 else
                 {
-                    // The share didn't answer for these (see RepositoryIndexer.Probe): kept as indexed - look again shortly.
-                    heldBack.UnionWith(c.Unsure);
-                    retryMs = Math.Clamp(retryMs * 2, 1000, 30_000);
+                    if (!wasUnsure)
+                        Log.For(root).Warn($"watch: the share didn't answer for {c.Unsure.Count} changed path(s); kept as indexed, retrying");
+                    unsureMs = Math.Clamp(unsureMs * 2, 1000, 30_000);
                     retry?.Dispose();
                     retry = new System.Threading.Timer(_ => OnBatch(new ChangeBatch(Array.Empty<string>(), FullReconcile: false)),
-                                                       null, retryMs, Timeout.Infinite);
-                    Log.For(root).Warn($"watch: the share didn't answer for {c.Unsure.Count} changed path(s); kept as indexed, retrying");
+                                                       null, unsureMs, Timeout.Infinite);
                 }
             }
             catch (Exception ex)
             {
                 // What this batch carried isn't in the index: keep it for the next change, and the exit note.
                 heldBack.UnionWith(batch.ChangedFullPaths);
+                if (retried is not null) unsure.UnionWith(retried); // not looked at: still to retry
                 Console.Error.WriteLine($"reindex failed ({ex.Message}); holding back {heldBack.Count} edit(s) until the next change");
                 Log.For(root).Error("watch reindex failed", ex);
             }
@@ -1052,7 +1077,10 @@ static int CmdWatch(string[] args)
             // This version's `update` refuses a newer CodeCompass's index.
             ? $"update it with that newer CodeCompass, or rebuild it for this one: codecompass index \"{root}\""
             : $"run: codecompass update \"{root}\""));
-    return heldBack.Count > 0 ? 1 : 0;
+    if (unsure.Count > 0)
+        Console.Error.WriteLine($"the share never answered for {unsure.Count} changed path(s), so the index may not match them - " +
+                                $"run: codecompass update \"{root}\"");
+    return heldBack.Count > 0 || unsure.Count > 0 ? 1 : 0;
 }
 
 // CLI queries operate on a SINGLE root; only the MCP server federates a project's linked roots. If this

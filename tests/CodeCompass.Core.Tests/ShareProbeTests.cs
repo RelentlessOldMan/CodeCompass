@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Indexing;
+using CodeCompass.Core.Storage;
 using CodeCompass.Mcp;
 using Xunit;
 
@@ -189,7 +190,10 @@ public class ShareProbeTests
 
             Assert.Contains("a.cs", during);
             Assert.DoesNotContain("indexing", during);
+            // A rebuild for lost events serves an index known to miss edits: it says so until the rebuild lands.
+            Assert.Equal(lostEvents, during.Contains("STALE"));
             Assert.Contains("b.cs", CodeCompassTools.SearchCode("BravoLocal"));
+            Assert.DoesNotContain("STALE", CodeCompassTools.SearchCode("AlphaLocal"));
 
             // ...and once it's done, edits apply again (not parked as if it still ran).
             repo.Write("c.cs", "namespace N { class CharlieLocal { } }");
@@ -201,6 +205,190 @@ public class ShareProbeTests
             release.Set();
             RepositoryIndexer.OnCompactForTests = null;
             RepositoryIndexer.OnFileStartForTests = null;
+            Environment.SetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS", prevCompact);
+            ServerContext.Init(repo.Root);
+        }
+    }
+
+    // Without the test seam: on a network root one GetAttributes call classifies a path. Separate Exists calls let a share
+    // that failed the first and answered the next take a healthy folder for gone.
+    [Fact]
+    public void OnANetworkRoot_TheRealProbe_TellsAFolderAFileAndAGonePathApart()
+    {
+        using var repo = new TempRepo();
+        repo.Write("edit.cs", "namespace N { class EditOld { } }");
+        repo.Write("del.cs", "namespace N { class DelGone { } }");
+        var b = RepositoryIndexer.Build(repo.Root); b.Text.Dispose(); b.Symbols.Dispose();
+        repo.Write("edit.cs", "namespace N { class EditNew { } }");
+        File.Delete(repo.FullPath("del.cs"));
+        repo.Write("newdir/inner.cs", "namespace N { class InNewFolder { } }");
+
+        var c = Apply(repo, network: true, _ => false, "edit.cs", "del.cs", "newdir");
+
+        Assert.Empty(c.Unsure);
+        Assert.True(Indexed(repo, "EditNew"));
+        Assert.False(Indexed(repo, "EditOld"));
+        Assert.False(Indexed(repo, "DelGone"));
+        Assert.True(Indexed(repo, "InNewFolder"));
+    }
+
+    // A mapped drive mid-reconnect says "path not found" for every path under it: that's not the disk saying they're gone.
+    [Fact]
+    public void OnANetworkRoot_NotFoundWhileTheRootItselfIsMissing_IsUnsure_NotGone()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class AlphaKept { } }");
+        var b = RepositoryIndexer.Build(repo.Root); b.Text.Dispose(); b.Symbols.Dispose();
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+        ChangeCounts c;
+        try
+        {
+            Assert.True(RepositoryIndexer.TryLoad(repo.Root, out var text, out var symbols));
+            using (text) using (symbols) using (var snapshot = RepositoryIndexer.LoadSnapshot(repo.Root))
+            {
+                var away = repo.Root + "-away";
+                Directory.Move(repo.Root, away);
+                try { c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, repo.Root, new[] { repo.FullPath("a.cs") }); }
+                finally { Directory.Move(away, repo.Root); }
+                RepositoryIndexer.Persist(repo.Root, text, symbols, snapshot);
+            }
+        }
+        finally { Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prev); }
+
+        Assert.Equal(new[] { repo.FullPath("a.cs") }, c.Unsure);
+        Assert.True(Indexed(repo, "AlphaKept"));
+    }
+
+    // A path the share never answers for (access denied, say) was retried every second, five passes back to back, each one
+    // rewriting the index and moving its sources token - so every session dropped its C# model on every retry.
+    [Fact]
+    public void Server_APathTheShareNeverAnswersFor_IsRetriedOnABackOff_AndLeavesTheSourcesTokenAlone()
+    {
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class AlphaStays { } }");
+        repo.Write("locked.cs", "namespace N { class LockedOld { } }");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+            int probes = 0;
+            RepositoryIndexer.ProbeFailsForTests = p => p.EndsWith("locked.cs") && Interlocked.Increment(ref probes) > 0;
+            repo.Write("locked.cs", "namespace N { class LockedNew { } }");
+
+            ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("locked.cs") }, FullReconcile: false));
+            var dir = IndexStore.CacheDirPath(repo.Root);
+            var sources = IndexGeneration.SourcesOf(IndexGeneration.Read(dir));
+            Thread.Sleep(6000);
+
+            // The edit, then retries about 1 s and 3 s later, the next not until 7 s (the back-off doubles) - not one a second, nor five back to back.
+            Assert.InRange(Volatile.Read(ref probes), 2, 4);
+            Assert.Equal(sources, IndexGeneration.SourcesOf(IndexGeneration.Read(dir)));
+            Assert.True(Indexed(repo, "LockedOld")); // kept as indexed
+        }
+        finally
+        {
+            RepositoryIndexer.ProbeFailsForTests = null;
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prev);
+            ServerContext.Init(repo.Root);
+        }
+    }
+
+    // A linked root's update threw the share's unsure paths away: nothing retried them, so a file deleted during a blink
+    // stayed indexed.
+    [Fact]
+    public void Server_ALinkedRootsPathTheShareCantAnswerFor_IsRetried_AndDroppedOnceConfirmedGone()
+    {
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        using var project = new TempRepo();
+        using var lib = new TempRepo();
+        project.Write("p.cs", "class P { }\n");
+        lib.Write("lib.cs", "public class LibStays { }\n");
+        lib.Write("gone.cs", "public class LibGoneLater { }\n");
+        var built = RepositoryIndexer.Build(lib.Root); built.Text.Dispose(); built.Symbols.Dispose();
+        LinkStore.Add(project.Root, lib.Root);
+        var otherSession = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(lib.Root)); // no watcher here to race the test's calls
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            CodeCompassTools.SearchCode("LibStays"); // loads the linked root
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+            File.Delete(lib.FullPath("gone.cs"));
+            int blinks = 0;
+            RepositoryIndexer.ProbeFailsForTests = p => p.EndsWith("gone.cs") && Interlocked.Increment(ref blinks) <= 1;
+
+            ServerContext.OnLinkedChangesForTest(lib.Root, new ChangeBatch(new[] { lib.FullPath("gone.cs") }, FullReconcile: false));
+            Assert.True(Indexed(lib, "LibGoneLater")); // the share didn't answer: kept
+
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (Indexed(lib, "LibGoneLater") && DateTime.UtcNow < deadline) Thread.Sleep(100);
+            Assert.False(Indexed(lib, "LibGoneLater"));
+            Assert.True(Indexed(lib, "LibStays"));
+        }
+        finally
+        {
+            RepositoryIndexer.ProbeFailsForTests = null;
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prev);
+            otherSession?.Dispose();
+            ServerContext.Init(project.Root);
+        }
+    }
+
+    // A startup reconcile marks the server rebuilding BEFORE it waits for the build gate. A compaction finishing meanwhile
+    // cleared that mark, so during the reconcile the watcher's edits blocked on the gate instead of being captured.
+    [Fact]
+    public void Server_ACompactionEndingWhileAReconcileWaits_LeavesTheReconcileCapturingEdits()
+    {
+        var prevCompact = Environment.GetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS");
+        Environment.SetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS", "2");
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class AlphaLocal { } }");
+        ServerContext.Init(repo.Root);
+        using var compacting = new ManualResetEventSlim(false);
+        using var endCompaction = new ManualResetEventSlim(false);
+        using var reconciling = new ManualResetEventSlim(false);
+        using var endReconcile = new ManualResetEventSlim(false);
+        try
+        {
+            CodeCompassTools.Reindex();
+            RepositoryIndexer.OnCompactForTests = () => { compacting.Set(); endCompaction.Wait(TimeSpan.FromSeconds(30)); };
+            repo.Write("b.cs", "namespace N { class BravoLocal { } }");
+            var compaction = new Thread(() => ServerContext.OnChangesForTest(
+                new ChangeBatch(new[] { repo.FullPath("b.cs") }, FullReconcile: false)));
+            compaction.Start();
+            Assert.True(compacting.Wait(TimeSpan.FromSeconds(30)), "the compaction never started");
+
+            // The reconcile finds an out-of-session file and parks reading it.
+            repo.Write("c.cs", "namespace N { class CharlieLocal { } }");
+            RepositoryIndexer.OnUpdateFileForTests = _ => { reconciling.Set(); endReconcile.Wait(TimeSpan.FromSeconds(30)); };
+            var reconcile = new Thread(ServerContext.RunStartupReconcileNow);
+            reconcile.Start();
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (!ServerContext.IsReconciling && DateTime.UtcNow < deadline) Thread.Sleep(10);
+            Assert.True(ServerContext.IsReconciling, "the reconcile never started waiting");
+            endCompaction.Set();
+            Assert.True(compaction.Join(TimeSpan.FromSeconds(30)));
+            Assert.True(reconciling.Wait(TimeSpan.FromSeconds(30)), "the reconcile never read a file");
+
+            repo.Write("d.cs", "namespace N { class DeltaLocal { } }");
+            var edit = new Thread(() => ServerContext.OnChangesForTest(
+                new ChangeBatch(new[] { repo.FullPath("d.cs") }, FullReconcile: false)));
+            edit.Start();
+            Assert.True(edit.Join(TimeSpan.FromSeconds(5)), "the edit blocked on the reconcile instead of being captured");
+
+            endReconcile.Set();
+            Assert.True(reconcile.Join(TimeSpan.FromSeconds(30)));
+            Assert.Contains("d.cs", CodeCompassTools.SearchCode("DeltaLocal")); // captured, then drained
+        }
+        finally
+        {
+            endCompaction.Set();
+            endReconcile.Set();
+            RepositoryIndexer.OnCompactForTests = null;
+            RepositoryIndexer.OnUpdateFileForTests = null;
             Environment.SetEnvironmentVariable("CODECOMPASS_COMPACT_SEGMENTS", prevCompact);
             ServerContext.Init(repo.Root);
         }

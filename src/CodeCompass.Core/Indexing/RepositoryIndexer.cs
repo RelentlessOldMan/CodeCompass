@@ -20,7 +20,11 @@ public sealed record IndexStats(int Files, long Bytes, long TrigramPostings, int
 
 // CSharpInputsChanged: did a file a C# semantic model reads change (see SemanticInputs)? Only a targeted update knows
 // exactly; the others report true, the safe side.
-public sealed record UpdateStats(int Added, int Modified, int Removed, double Seconds, bool FullRebuild, bool CSharpInputsChanged = true);
+public sealed record UpdateStats(int Added, int Modified, int Removed, double Seconds, bool FullRebuild, bool CSharpInputsChanged = true)
+{
+    /// <summary>A targeted update's paths the share didn't answer for (see <see cref="ChangeCounts.Unsure"/>).</summary>
+    public IReadOnlyList<string> Unsure { get; init; } = Array.Empty<string>();
+}
 
 public sealed record ChangeCounts(int Added, int Modified, int Removed, bool CSharpInputsChanged = false)
 {
@@ -471,6 +475,8 @@ public static class RepositoryIndexer
     internal static Action<string>? OnFileStartForTests;
     // Runs as Compact starts merging (a test holds a compaction there).
     internal static Action? OnCompactForTests;
+    /// <summary>Test seam (null in production): runs as Update starts on a file the walk found new or changed.</summary>
+    internal static Action<string>? OnUpdateFileForTests;
     internal static long? StallWarnMsForTests;
 
     /// <summary>The stall watchdog's headline and advice. Over a share, a worker "held" on a big file is usually
@@ -631,6 +637,7 @@ public static class RepositoryIndexer
                         continue;
                     }
 
+                    OnUpdateFileForTests?.Invoke(rel);
                     switch (ApplyExistingFile(text, symbols, dir, sidecarThreshold, rel, file.FullPath, file.Size, mtime, oldState, recordedBy,
                                               rootIsNetwork, cacheDirIsNetwork, extractor, upsert, drop))
                     {
@@ -751,7 +758,7 @@ public static class RepositoryIndexer
             var counts = ApplyChanges(text, symbols, snapshot, root, changedFullPaths);
             SaveAll(root, text, symbols, snapshot);
             return (text, symbols, new UpdateStats(counts.Added, counts.Modified, counts.Removed, sw.Elapsed.TotalSeconds, false,
-                                                   counts.CSharpInputsChanged));
+                                                   counts.CSharpInputsChanged) { Unsure = counts.Unsure });
         }
     }
 
@@ -832,12 +839,14 @@ public static class RepositoryIndexer
         var irrelevantFolders = irrelevant.Count == 0 ? null : FolderProbe.Folders(irrelevant);
         var skip = new HashSet<string>(irrelevant.Where(p => !irrelevantFolders!.Contains(p)), StringComparer.Ordinal);
         var unsure = new List<string>();
+        bool? rootAnswered = null;
+        bool RootAnswers() => rootAnswered ??= Directory.Exists(root);
 
         foreach (var (full, rel) in inRepo)
         {
             if (skip.Contains(full)) continue;
 
-            var kind = Probe(full, batch.RootIsNetwork);
+            var kind = Probe(full, batch.RootIsNetwork, RootAnswers);
             if (kind == PathKind.Folder)
             {
                 // A folder in a batch is a new subtree (created, renamed or moved in) - or one REPLACED by a same-named folder
@@ -859,7 +868,7 @@ public static class RepositoryIndexer
                     foreach (var stale in snapshot.KeysWithPrefix(rel + "/").Where(k => !seen.Contains(k)).ToList())
                     {
                         var staleFull = Path.Combine(root, stale.Replace('/', Path.DirectorySeparatorChar));
-                        switch (Probe(staleFull, batch.RootIsNetwork))
+                        switch (Probe(staleFull, batch.RootIsNetwork, RootAnswers))
                         {
                             case PathKind.Gone: RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, ref csharp); break;
                             // A file replaced by a same-named folder: the walk just indexed what's in it, so drop the file alone.
@@ -893,17 +902,25 @@ public static class RepositoryIndexer
     // What's at a changed path now. File.Exists and Directory.Exists also answer false when the call FAILED, and on a network
     // root a share that blinked is common: taking that as "gone" dropped healthy files from the index. There, "gone" needs the
     // disk to say so; otherwise it's Unknown, and the caller retries. A local disk that can't stat a path is believed.
-    private static PathKind Probe(string full, bool network)
+    // One call answers there: separate Exists calls let a share that failed the first and answered the next classify a
+    // healthy folder as gone. And "not found" is believed only while the root itself answers (rootAnswers, asked once per
+    // batch): a mapped drive mid-reconnect says "path not found" for every path under it.
+    private static PathKind Probe(string full, bool network, Func<bool> rootAnswers)
     {
         if (ProbeFailsForTests?.Invoke(full) == true) return network ? PathKind.Unknown : PathKind.Gone;
-        if (Directory.Exists(full)) return PathKind.Folder;
-        if (File.Exists(full)) return PathKind.File;
-        if (!network) return PathKind.Gone;
-        try { File.GetAttributes(full); return PathKind.Gone; } // there, yet neither (a dangling link): never indexed
-        catch (FileNotFoundException) { return PathKind.Gone; }
-        catch (DirectoryNotFoundException) { return PathKind.Gone; }
-        catch (IOException) { return PathKind.Unknown; }
-        catch (UnauthorizedAccessException) { return PathKind.Unknown; }
+        if (!network)
+            return Directory.Exists(full) ? PathKind.Folder : File.Exists(full) ? PathKind.File : PathKind.Gone;
+        FileAttributes a;
+        try { a = File.GetAttributes(full); }
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return rootAnswers() ? PathKind.Gone : PathKind.Unknown;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return PathKind.Unknown; }
+        // A link's own attributes: whether its target is there is the Exists calls' answer (a dangling link: never indexed).
+        if ((a & FileAttributes.ReparsePoint) != 0)
+            return Directory.Exists(full) ? PathKind.Folder : File.Exists(full) ? PathKind.File : PathKind.Gone;
+        return (a & FileAttributes.Directory) != 0 ? PathKind.Folder : PathKind.File;
     }
 
     /// <summary>Persist in-memory indexes + snapshot to the cache. The caller must hold the cache's

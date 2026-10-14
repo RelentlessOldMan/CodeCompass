@@ -61,9 +61,9 @@ function Test-CodexInstall {
 
     if ($hasPlugin) {
         if ($PSCmdlet.ShouldProcess("Codex", "install plugin '$Name' from local marketplace '$root'")) {
-            # Idempotent: re-adding a marketplace / plugin already present is tolerated (Codex reports it). Every step's
-            # exit code is checked - printing "Installed" after a silent failure sent people chasing a "broken
-            # CodeCompass" that was never registered.
+            # Idempotent: re-adding the marketplace from the same folder exits 0 (Codex says it's already added), and so
+            # does re-adding the plugin. Every step's exit code is checked - printing "Installed" after a silent failure
+            # sent people chasing a "broken CodeCompass" that was never registered.
             # Native stderr captured under ErrorActionPreference=Stop would abort on harmless chatter (Windows
             # PowerShell 5.1): decide on exit codes only.
             $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -73,10 +73,18 @@ function Test-CodexInstall {
                 if ($mkCode -ne 0 -and ($mkOut | Out-String) -match 'different source') {
                     # Upgrade: each release unzips to its own folder, and Codex refuses to re-point a marketplace
                     # name at a new folder. Without this, plugin add below "succeeds" against the OLD folder.
-                    Write-Host "Replacing the previous CodeCompass marketplace with $root (upgrade)."
+                    $oldRoot = (& codex plugin marketplace list 2>$null | Select-String '^\s*codecompass\s+(\S.*?)\s*$' |
+                        Select-Object -First 1 | ForEach-Object { $_.Matches[0].Groups[1].Value })
+                    Write-Host "Replacing the previous CodeCompass marketplace ($oldRoot) with $root (upgrade)."
                     $rmOut = & codex plugin marketplace remove codecompass 2>&1
                     $mkOut = @($rmOut) + @(& codex plugin marketplace add "$root" 2>&1)
                     $mkCode = $LASTEXITCODE
+                    if ($mkCode -ne 0 -and $oldRoot) {
+                        # Don't leave the user with no CodeCompass at all: put the working one back.
+                        & codex plugin marketplace add "$oldRoot" *> $null
+                        if ($LASTEXITCODE -eq 0) { $mkOut += "(the previous marketplace, $oldRoot, was put back)" }
+                        else { $mkOut += "(putting the previous marketplace back failed too: codex plugin marketplace add `"$oldRoot`")" }
+                    }
                 }
                 if ($mkCode -ne 0) {
                     $detail = ($mkOut | Out-String).Trim()

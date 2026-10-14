@@ -83,6 +83,10 @@ public static class ServerContext
         // (see ScheduleRetry). Touched only under BuildGate (OnLinkedChanges); Held mirrors "non-empty" for lock-free readers.
         public readonly HashSet<string> HeldBack = new(StringComparer.Ordinal);
         public volatile bool Held;
+        // Paths the share didn't answer for (see _unsurePaths): kept as indexed, looked at again when the retry timer fires.
+        // Touched only under BuildGate, like HeldBack; HasUnsure mirrors "non-empty".
+        public readonly HashSet<string> Unsure = new(StringComparer.Ordinal);
+        public volatile bool HasUnsure;
         public volatile bool NewerFormat; // its index is a newer CodeCompass's: given up (see GiveUpLinkedRoot)
         public volatile string? FailedGen; // a generation that wouldn't load: not retried on every query until it moves
     }
@@ -133,6 +137,14 @@ public static class ServerContext
     // Guarded by the Rw write lock, like _pendingPaths.
     private static readonly HashSet<string> _heldPaths = new(StringComparer.Ordinal);
 
+    // Paths on a network root the share didn't answer for (see RepositoryIndexer.Probe): kept as indexed and looked at again
+    // on their own back-off when the retry timer fires (_unsureDue). Kept apart from _pendingPaths, which every drain round
+    // re-applies at once, and from _retryDelayMs, which any hold resets. A retry is not a new edit: the model already went
+    // when the edit arrived. Guarded by the Rw write lock.
+    private static readonly HashSet<string> _unsurePaths = new(StringComparer.Ordinal);
+    private static bool _unsureDue;
+    private static int _unsureDelayMs;
+
     // The index on disk was written by a NEWER CodeCompass: this one can't read or write it. Nothing is served (queries say
     // why), Grep runs, and the live-watch role is handed to a session that can write it (see EnterNewerFormat).
     private static volatile bool _newerFormat;
@@ -165,7 +177,10 @@ public static class ServerContext
     // A full off-lock rebuild (the reindex tool) is running while the old index keeps serving.
     // The watcher must capture changes instead of writing them, so it doesn't race the rebuild
     // for the on-disk cache.
-    private static bool _rebuilding;
+    // A count, not a flag: a compaction finishing must not clear it for a reconcile that set it and is still waiting on
+    // BuildGate (see BackgroundReconcile). Changed only under the Rw write lock (EndRebuildingLocked).
+    private static int _rebuilding;
+    private static void EndRebuildingLocked() { if (_rebuilding > 0) _rebuilding--; } // > 0: a re-point reset it meanwhile
 
     // A startup reconcile (catching changes made outside the session, e.g. a Perforce sync) is
     // running in the background while the loaded index keeps serving. Surfaced in the status line.
@@ -215,13 +230,16 @@ public static class ServerContext
             _state = IndexState.NotStarted;
             _pendingPaths.Clear();
             _pendingReconcile = false;
-            _rebuilding = false;
+            _rebuilding = 0;
             _focus = null; // a focus names the PREVIOUS project's roots - stale after a re-point; start unscoped
             _loadedGen = null;
             _eventsLost = false;
             _heldBack = false;
             _heldPaths.Clear();
             _retryDelayMs = 0;
+            _unsurePaths.Clear();
+            _unsureDue = false;
+            _unsureDelayMs = 0;
             _holdWantsRebuild = false;
             _newerFormat = false;
             _statusOverride = null;
@@ -325,7 +343,7 @@ public static class ServerContext
         if (!BuildGate.Wait(0)) return;
         try
         {
-            if (_state != IndexState.Ready || _rebuilding) return;
+            if (_state != IndexState.Ready || _rebuilding > 0) return;
             gen = IndexGeneration.Read(CacheDir); // read BEFORE loading: a write that lands mid-load just reloads again
             if (gen is null || gen == _loadedGen) return;
             int epoch = Volatile.Read(ref _epoch);
@@ -417,7 +435,8 @@ public static class ServerContext
     // Retry held-back edits (see _heldBack) after a back-off: 1 s, doubling to 30 s while the write keeps failing. A retry
     // already due is left alone: re-arming it on every failing edit pushed it back for good while edits kept coming faster
     // than the back-off, and nothing else rebuilds a missing or corrupt index (see DrainPending).
-    private static void ScheduleRetry()
+    // unsure: for paths the share didn't answer for, on their own back-off (see _unsurePaths).
+    private static void ScheduleRetry(bool unsure = false)
     {
         Timer? timer = null;
         timer = new Timer(_ =>
@@ -427,7 +446,9 @@ public static class ServerContext
             RetryHeldBack();
         }, null, Timeout.Infinite, Timeout.Infinite);
         if (Interlocked.CompareExchange(ref _retryTimer, timer, null) is not null) { timer.Dispose(); return; }
-        int delay = _retryDelayMs = Math.Clamp(_retryDelayMs * 2, 1000, 30_000);
+        int delay = unsure
+            ? _unsureDelayMs = Math.Clamp(_unsureDelayMs * 2, 1000, 30_000)
+            : _retryDelayMs = Math.Clamp(_retryDelayMs * 2, 1000, 30_000);
         timer.Change(delay, Timeout.Infinite); // disposed meanwhile by a re-point/shutdown: returns false, doesn't throw
     }
 
@@ -435,9 +456,11 @@ public static class ServerContext
     {
         try
         {
+            Rw.EnterWriteLock();
+            try { _unsureDue = _unsurePaths.Count > 0; } finally { Rw.ExitWriteLock(); }
             DrainPending();
             foreach (var lr in _linked)
-                if (lr.Held) OnLinkedChanges(lr.Root, new ChangeBatch(Array.Empty<string>(), FullReconcile: false));
+                if (lr.Held || lr.HasUnsure) OnLinkedChanges(lr.Root, new ChangeBatch(Array.Empty<string>(), FullReconcile: false));
         }
         catch (Exception ex) { Log.For(Root).Warn($"retrying held-back edits failed: {ex.Message}"); }
     }
@@ -807,6 +830,16 @@ public static class ServerContext
             held.Clear();
             paths = all;
         }
+        // A retry (an empty batch from the timer) also looks again at the paths the share didn't answer for. Not a new edit:
+        // that edit dropped the model when it arrived.
+        HashSet<string>? retried = null;
+        if (lr is { Unsure.Count: > 0 } && batch.ChangedFullPaths.Count == 0 && !batch.FullReconcile)
+        {
+            retried = new HashSet<string>(lr.Unsure, StringComparer.Ordinal);
+            retried.ExceptWith(paths);
+            lr.Unsure.Clear();
+            paths = paths.Concat(retried).ToList();
+        }
         try
         {
             if (lr?.NewerFormat == true) return; // given up: a newer CodeCompass's index (see GiveUpLinkedRoot)
@@ -833,7 +866,21 @@ public static class ServerContext
                 var u = RepositoryIndexer.UpdatePaths(linkedRoot, paths, ct); nt = u.Text; ns = u.Symbols;
                 // A path naming a C# input, or one the index found changed under a folder or a vanished path - not an
                 // editor's vanished temp file or a folder whose timestamp moved (see ApplyIncremental).
-                affects = RoslynCSharpAnalyzer.MayAffect(paths) || u.Stats.FullRebuild || u.Stats.CSharpInputsChanged;
+                affects = RoslynCSharpAnalyzer.MayAffect(retried is null ? paths : paths.Where(p => !retried.Contains(p)).ToList())
+                          || u.Stats.FullRebuild || u.Stats.CSharpInputsChanged;
+                if (lr is not null)
+                {
+                    bool wasUnsure = lr.Unsure.Count > 0 || retried is not null;
+                    lr.Unsure.ExceptWith(paths);
+                    lr.Unsure.UnionWith(u.Stats.Unsure);
+                    if (lr.Unsure.Count > 0)
+                    {
+                        if (!wasUnsure)
+                            Log.For(linkedRoot).Warn($"the share didn't answer for {u.Stats.Unsure.Count} changed path(s); kept as indexed, retrying");
+                        ScheduleRetry(unsure: true);
+                    }
+                    else if (wasUnsure) Log.For(linkedRoot).Info("the share answered for every path it hadn't; the index caught up");
+                }
             }
             if (!affects) wl.SourcesUnchanged();
             SwapLinked(linkedRoot, nt, ns, wl.Commit(), sourcesChanged: affects);
@@ -854,16 +901,18 @@ public static class ServerContext
                 // Couldn't be written now (briefly unreadable, say): keep the edits for the next update or a retry rather
                 // than lose them. The files changed on disk either way, so a C# model that read them goes - once, for new
                 // edits, not on every retry of the same ones.
-                held?.UnionWith(paths);
+                held?.UnionWith(retried is null ? paths : paths.Where(p => !retried.Contains(p)));
+                if (retried is not null) lr!.Unsure.UnionWith(retried); // not looked at: still to retry
                 if (batch.FullReconcile || MayAffectUnindexed(batch.ChangedFullPaths)) InvalidateSemanticAnalyzers(); // lost events: anything may have changed
                 if (held is { Count: > 0 }) ScheduleRetry();
+                else if (lr is { Unsure.Count: > 0 }) ScheduleRetry(unsure: true);
             }
             Log.For(linkedRoot).Error("linked root live update failed" + (held is { Count: > 0 } ? "; holding its edits for a retry" : ""), ex);
         }
         finally
         {
             nt?.Dispose(); ns?.Dispose();
-            if (lr is not null) lr.Held = held is { Count: > 0 };
+            if (lr is not null) { lr.Held = held is { Count: > 0 }; lr.HasUnsure = lr.Unsure.Count > 0; }
             BuildGate.Release();
         }
     }
@@ -1272,7 +1321,7 @@ public static class ServerContext
             return null;
         }
         Rw.EnterWriteLock();
-        try { _rebuilding = true; } // divert the watcher to the pending queue; waits out any in-flight incremental
+        try { _rebuilding++; } // divert the watcher to the pending queue; waits out any in-flight incremental
         finally { Rw.ExitWriteLock(); }
         try
         {
@@ -1296,7 +1345,7 @@ public static class ServerContext
         {
             wl.Dispose();
             Rw.EnterWriteLock();
-            try { _rebuilding = false; }
+            try { EndRebuildingLocked(); }
             finally { Rw.ExitWriteLock(); }
             BuildGate.Release();
             DrainPending(); // apply whatever the watcher captured during the rebuild (onto new or, on failure, old index)
@@ -1561,7 +1610,7 @@ public static class ServerContext
         var ct = ShutdownToken;
         int epoch = Volatile.Read(ref _epoch);
         Rw.EnterWriteLock();
-        try { _rebuilding = true; _reconciling = true; }
+        try { _rebuilding++; _reconciling = true; }
         finally { Rw.ExitWriteLock(); }
         PublishStatus(); // reconciling
 
@@ -1588,7 +1637,7 @@ public static class ServerContext
         {
             if (gated) BuildGate.Release();
             Rw.EnterWriteLock();
-            try { _rebuilding = false; _reconciling = false; }
+            try { EndRebuildingLocked(); _reconciling = false; }
             finally { Rw.ExitWriteLock(); }
             PublishStatus(); // back to Ready (Swap published "reconciling" while the flag was still set)
         }
@@ -1605,7 +1654,7 @@ public static class ServerContext
         int epoch = Volatile.Read(ref _epoch);
         try { BuildGate.Wait(ct); } catch (OperationCanceledException) { return; }
         Rw.EnterWriteLock();
-        try { _rebuilding = true; }
+        try { _rebuilding++; }
         finally { Rw.ExitWriteLock(); }
         try
         {
@@ -1633,7 +1682,7 @@ public static class ServerContext
         {
             BuildGate.Release();
             Rw.EnterWriteLock();
-            try { _rebuilding = false; }
+            try { EndRebuildingLocked(); }
             finally { Rw.ExitWriteLock(); }
             DrainPending();
         }
@@ -1683,7 +1732,7 @@ public static class ServerContext
         Rw.EnterUpgradeableReadLock();
         try
         {
-            if (_state == IndexState.Ready && !_rebuilding) return false;
+            if (_state == IndexState.Ready && _rebuilding == 0) return false;
             if (_newerFormat) return true; // nothing here can write it; a session that can takes over the edits' files
             Rw.EnterWriteLock();
             try
@@ -1743,7 +1792,7 @@ public static class ServerContext
                         compact = RepositoryIndexer.NeedsCompaction(_text!, _symbols!);
                         // The merge works on its own copy of the index: this one keeps serving, as during any rebuild here
                         // (BackgroundReconcile, Reindex) - not "indexing 0%" - while the watcher's edits wait their turn.
-                        if (compact) _rebuilding = rebuildingSet = true;
+                        if (compact) { _rebuilding++; rebuildingSet = true; }
                     }
                     else if (failure != IndexLoadFailure.NewerFormat) HoldBackLocked(batch.ChangedFullPaths, failure);
                 }
@@ -1781,8 +1830,13 @@ public static class ServerContext
                                        $"workspace - results may be stale until: codecompass update \"{Root}\"");
                     return;
                 }
+                // As for a compaction, above, the loaded index keeps serving - but it's known to miss the lost edits until the
+                // rebuild lands, so every query says so meanwhile (Swap's success clears it; a failure says why, below).
+                _staleReason = "the file watcher lost change events and the index is being rebuilt";
+                _eventsLostUtc = DateTime.UtcNow;
+                _eventsLost = true;
                 Rw.EnterWriteLock();
-                try { _rebuilding = rebuildingSet = true; } // as for a compaction, above
+                try { _rebuilding++; rebuildingSet = true; }
                 finally { Rw.ExitWriteLock(); }
                 Log.For(Root).Info("watcher requested full reconcile; rebuilding");
                 var b = RepositoryIndexer.Build(Root, ct: ct);
@@ -1825,7 +1879,7 @@ public static class ServerContext
             if (rebuildingSet)
             {
                 Rw.EnterWriteLock();
-                try { _rebuilding = false; } finally { Rw.ExitWriteLock(); }
+                try { EndRebuildingLocked(); } finally { Rw.ExitWriteLock(); }
             }
             BuildGate.Release();
         }
@@ -1834,10 +1888,13 @@ public static class ServerContext
 
     // Caller holds BuildGate, the cache's IndexWriteLock, and the Rw write lock (and RefreshIfStaleLocked returned true).
     // Returns whether a source the C# analyzer reads may have changed, and drops the analyzer if so (it rebuilds lazily).
-    private static bool ApplyIncremental(IReadOnlyCollection<string> changedFullPaths)
+    // retried: the paths among them that are only a retry of ones the share didn't answer for (see _unsurePaths).
+    private static bool ApplyIncremental(IReadOnlyCollection<string> changedFullPaths, IReadOnlySet<string>? retried = null)
     {
-        // A path naming a C# input counts before anything is applied, so the model goes even if indexing the edit fails.
-        bool affects = RoslynCSharpAnalyzer.MayAffect(changedFullPaths);
+        // A path naming a C# input counts before anything is applied, so the model goes even if indexing the edit fails. A
+        // retry doesn't: that edit dropped the model when it arrived, and what the index finds now is CSharpInputsChanged.
+        bool affects = RoslynCSharpAnalyzer.MayAffect(
+            retried is not { Count: > 0 } ? changedFullPaths : changedFullPaths.Where(p => !retried.Contains(p)).ToList());
         try
         {
             _snapshot ??= RepositoryIndexer.LoadSnapshot(Root);
@@ -1850,17 +1907,26 @@ public static class ServerContext
             if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
                 Log.For(Root).Info($"incremental reindex: +{c.Added} ~{c.Modified} -{c.Removed} " +
                                    $"({changedFullPaths.Count} path(s) changed)");
-            if (c.Unsure.Count > 0)
+            // The share didn't answer for these (see RepositoryIndexer.Probe): they stay as indexed - look again later. Said
+            // once when it starts and once when it ends, not on every retry of a path that may never answer (access denied).
+            bool wasUnsure = _unsurePaths.Count > 0 || retried is { Count: > 0 };
+            _unsurePaths.ExceptWith(changedFullPaths);
+            _unsurePaths.UnionWith(c.Unsure);
+            if (_unsurePaths.Count > 0)
             {
-                // The share didn't answer for these (see RepositoryIndexer.Probe): they stay as indexed - look again shortly.
-                _pendingPaths.UnionWith(c.Unsure);
-                Log.For(Root).Warn($"the share didn't answer for {c.Unsure.Count} changed path(s); kept as indexed, retrying");
-                ScheduleRetry();
+                if (!wasUnsure)
+                    Log.For(Root).Warn($"the share didn't answer for {c.Unsure.Count} changed path(s); kept as indexed, retrying");
+                ScheduleRetry(unsure: true);
             }
-            else if (!_heldBack) _retryDelayMs = 0;
+            else
+            {
+                if (wasUnsure) Log.For(Root).Info("the share answered for every path it hadn't; the index caught up");
+                _unsureDelayMs = 0;
+            }
         }
         catch (Exception ex)
         {
+            if (retried is not null) _unsurePaths.UnionWith(retried); // not looked at: still to retry
             affects = true; // the sources on disk changed whether or not the index caught up
             Log.For(Root).Error("incremental reindex failed", ex);
         }
@@ -1890,7 +1956,7 @@ public static class ServerContext
         for (int round = 0; round < 5; round++)
         {
             Rw.EnterReadLock();
-            try { if (_pendingPaths.Count == 0 && !_pendingReconcile) return; }
+            try { if (_pendingPaths.Count == 0 && !_pendingReconcile && !_unsureDue) return; }
             finally { Rw.ExitReadLock(); }
 
             // Same gate order as OnChanges: BuildGate -> IndexWriteLock -> Rw.
@@ -1912,6 +1978,16 @@ public static class ServerContext
                     _holdWantsRebuild = false; // taken: this round rebuilds
                     paths = _pendingPaths.ToList();
                     _pendingPaths.Clear();
+                    // Paths the share didn't answer for, when their retry is due: once per firing of the timer, not every round.
+                    HashSet<string>? retried = null;
+                    if (_unsureDue)
+                    {
+                        _unsureDue = false;
+                        retried = new HashSet<string>(_unsurePaths, StringComparer.Ordinal);
+                        retried.ExceptWith(paths); // edited again meanwhile: a new edit, not a retry
+                        _unsurePaths.Clear();
+                        paths.AddRange(retried);
+                    }
                     if (paths.Count == 0 && !reconcile) { wl.SkipBump(); return; }
                     // A rebuild only a hold asked for (the index on disk was missing or corrupt) isn't needed once the index
                     // loads again - fixed meanwhile by a terminal `codecompass index`, say: the held edits just apply.
@@ -1949,13 +2025,13 @@ public static class ServerContext
                         else if ((failure = RefreshIfStaleLocked()) == IndexLoadFailure.None)
                         {
                             ClearHoldLocked();
-                            affects = ApplyIncremental(paths);
+                            affects = ApplyIncremental(paths, retried);
                         }
                         else if (failure != IndexLoadFailure.NewerFormat) HoldBackLocked(paths, failure); // see OnChanges
                     }
                     // Divert the watcher to the pending queue during an off-lock reconcile Build, exactly as
                     // BackgroundReconcile does - an OnChanges arriving mid-Build is captured, drained next round.
-                    if (reconcile) { _rebuilding = true; rebuildingSet = true; }
+                    if (reconcile) { _rebuilding++; rebuildingSet = true; }
                 }
                 finally { Rw.ExitWriteLock(); }
 
@@ -2012,7 +2088,7 @@ public static class ServerContext
                 if (rebuildingSet)
                 {
                     Rw.EnterWriteLock();
-                    try { _rebuilding = false; } finally { Rw.ExitWriteLock(); }
+                    try { EndRebuildingLocked(); } finally { Rw.ExitWriteLock(); }
                 }
             }
         }
