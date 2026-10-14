@@ -408,10 +408,12 @@ public class ShareProbeTests
         }
     }
 
-    // Each index file's last write, logs aside: what a save would change.
+    // Each index file's last write: what a save would change. Not the bookkeeping beside it - logs, the live status a server
+    // publishes (status.json), the write lock (taking it can touch it) - nor .generation, asserted on its own.
     private static string IndexFilesWritten(string cacheDir) => string.Join("\n",
         Directory.EnumerateFiles(cacheDir, "*", SearchOption.AllDirectories)
-                 .Where(f => !Path.GetFileName(f).Contains("log", StringComparison.OrdinalIgnoreCase))
+                 .Where(f => Path.GetFileName(f) is not ("status.json" or ".write.lock" or ".generation")
+                             && !Path.GetFileName(f).Contains("log", StringComparison.OrdinalIgnoreCase))
                  .OrderBy(f => f, StringComparer.Ordinal)
                  .Select(f => f + " " + File.GetLastWriteTimeUtc(f).Ticks));
 
