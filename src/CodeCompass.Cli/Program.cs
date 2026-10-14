@@ -1112,6 +1112,10 @@ static int CmdSearch(string[] args)
     NoteLinkedRootsNotSearched(root);
     bool ignoreCase = args.Any(a => a is "-i" or "--ignore-case");
     var query = string.Join(' ', args.Skip(2).Where(a => a is not ("-i" or "--ignore-case")));
+    // Every other argument is query text - a flag can be what you're looking for - but `search <path> Name --max 5` then
+    // reads "0 match(es)" as "Name is unused". Say what was searched.
+    foreach (var a in args.Skip(2).Where(a => a.Length > 1 && a[0] == '-' && a is not ("-i" or "--ignore-case")).Distinct())
+        Console.Error.WriteLine($"-- \"{a}\" is not a search option (only -i is); it was searched as part of the query \"{query}\"");
 
     // A whitespace-only query has no trigrams and would scan the whole corpus for a bare space, dumping
     // almost every line. Reject it like the MCP tools do, with a helpful message instead of a noise flood.

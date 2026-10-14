@@ -27,6 +27,28 @@ public class CliMessagesTests
         Assert.DoesNotContain("a.txt", stdout); // no line dump
     }
 
+    // Every argument after the path is the query, so `search <path> Name --max 5` searched for "Name --max 5" and said
+    // "0 match(es)" - read as "Name isn't used". The text stays the query (a flag can be what you're looking for), but
+    // the answer says so.
+    [Fact]
+    public void Search_AnArgumentThatLooksLikeAFlag_IsSearchedAsText_AndSaysSo()
+    {
+        using var repo = new TempRepo();
+        repo.Write("run.sh", "tool --max 5\n");
+        var cli = TestCli.Find();
+        Assert.Equal(0, TestCli.Run(cli, "index", repo.Root).Exit);
+
+        var (exit, stdout, stderr) = TestCli.Run(cli, "search", repo.Root, "tool", "--max", "5");
+
+        Assert.Equal(0, exit);
+        Assert.Contains("run.sh:1:1: tool --max 5", stdout);
+        Assert.Contains("\"--max\" is not a search option", stderr);
+        Assert.Contains("\"tool --max 5\"", stderr);
+
+        var plain = TestCli.Run(cli, "search", repo.Root, "tool", "-i");
+        Assert.DoesNotContain("not a search option", plain.Stderr); // -i is one
+    }
+
     [Fact]
     public void Survey_SaysIndexedIsAPreIndexEstimate()
     {
