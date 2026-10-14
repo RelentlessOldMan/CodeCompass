@@ -48,6 +48,20 @@ Each changed file in the delta carries its `reason`. One small carve-style label
 
 ## Delta schema — modified-files + hunks
 
+The diff delta's `_meta` (in a sharded delta, the index's):
+
+```json
+"_meta": {
+  "manifestVersion": 1, "deltaKind": "diff", "editKind": "content", "baseSeed": 1337, "editSeed": 7,
+  "target": "source", "editDensity": 0.05, "baseManifestSha": "…", "prevTruthSha": "…", "diffTruthSha": "…"
+}
+```
+
+`editKind`, `target` and `editDensity` echo the run's `--edit-kind`, `--target` and `--edit-density`;
+`baseManifestSha` and `prevTruthSha` are as in a symbol delta ([mutate-design.md](mutate-design.md)), and
+`diffTruthSha` is the digest below. The index of a sharded delta adds `shardSize`. Symbol deltas carry no
+`editKind`/`target`/`editDensity`/`diffTruthSha`; the 3-way conflict file's `_meta` is shown under step 4.
+
 Per changed file, in `fileOps.modified` (now objects, not bare paths):
 
 ```json
@@ -70,7 +84,8 @@ Per changed file, in `fileOps.modified` (now objects, not bare paths):
   file). `newStart` = the number of new lines before the hunk **+ 1** for every op — for a **delete**
   (`newLines==0`) it is the new line the deleted region would have begun at. A file is reconstructable from its
   old text + hunks: walk them in order, copy old lines up to `oldStart` (insert: up to and including it), emit
-  the `newLines` new lines, skip `oldLines` old lines.
+  the `newLines` new lines, skip `oldLines` old lines. Hunks are listed in file order (ascending `oldStart`,
+  then `newStart`); before 1.1.11 a 3-way variant's add/add insert could follow a later hunk.
 - **Coalescing:** contiguous touched lines collapse into ONE replace hunk (`oldLines==newLines==run`), proper
   unified semantics — not N 1-line hunks.
 - **oldSha/newSha** = SHA-256 of the raw file bytes, **lowercase hex** (= CodeDiffer's size+hash prefilter
@@ -98,7 +113,10 @@ one-line insert at the giant's midpoint, emitted as a SINGLE explicit insert hun
 (`{op:insert, oldStart:mid, oldLines:0, newStart:mid+1, newLines:1}`). This is the content-defined-chunker
 locality case — a tiny edit in a multi-GB file that a block-indexing diff must re-diff in ~one block of
 thousands. Terminator-faithful + streamed in two passes (count, then rewrite), so the giant never lands on the
-heap. Default stays `strided`.
+heap. Default stays `strided`. If the anchor is the file's last line and it has no terminator (a one-line
+giant), the insert gives that line a `\n` first, so the line itself changes: the hunk is then ONE replace,
+`{op:replace, oldStart:mid, oldLines:1, newStart:mid, newLines:2}`, which is what a line diff reports (since
+1.1.11; before, the inserted text was glued onto the unterminated line under an insert hunk).
 
 ## Rename / move (step 3)
 
@@ -230,6 +248,9 @@ fixed order:
 |---|---|---|
 | 1 | conflicts-3way | `path · baseStart · baseLines · v1Op · v1NewStart · v1NewLines · v2Op · v2NewStart · v2NewLines` |
 | 2 | merged-clean | `path · side · op · oldStart · oldLines · newStart · newLines` (side ∈ v1\|v2) |
+
+Within a file, conflicts are listed by (`baseStart`, `baseLines`) and clean merges by (`oldStart`,
+`oldLines`) (since 1.1.11; the digest sorts its own records, so `conflictTruthSha` is unchanged).
 
 `new*` coords reference the respective variant tree (`B_v1`/`B_v2`), `base*`/`old*` reference B — so every
 coordinate reads off a real on-disk file and CodeDiffer fetches replacement text from the variant trees (no

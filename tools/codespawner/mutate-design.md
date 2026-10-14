@@ -25,6 +25,19 @@ codespawner mutate --corpus <dir> --seed <S> --edits <N> [--step <k>] [--through
   tree matches neither the base nor any delta, so the only way on is to regenerate. A `--step` (or a step of
   the default run) that fails cleanly (file untouched, no delta) removes the journal, so the step can be
   retried. Every file edit is written to a temp file and renamed over the original.
+- **One mutation per tree (since 1.1.9).** What has been applied is recorded in `<corpus>-mutated.txt`
+  BESIDE the corpus (the tree and its marker stay byte-for-byte what a base-vs-variant diff expects):
+  `step <S> <N> <k>` (symbol mode, edits 1..k applied, by `--step` or the default run), `through <S> <N>`,
+  `bulk` (a 2-way bulk run), or `variant` (a 3-way `_v1`/`_v2` tree, since 1.1.11). The step and through
+  lines end in ` restream` when the run used `--restream` (since 1.1.11), since that changes the plan. Mutate
+  refuses a recorded tree, except `--step k` on `step <S> <N> <k-1>` with the same seed, edit count and
+  `--restream`; `--step k>1` with no record is refused too. Without this, a repeated step or a
+  second bulk run edited files that no longer matched the base and wrote a delta that could not apply to it.
+  `--three-way` leaves B as the base, so it records nothing for B and can repeat; each variant tree is
+  recorded `variant`, so it is not mutated again against B's manifest. The record is written while the
+  journal still exists, so a failure there leaves the journal (corpus refused) rather than a stale record. A
+  regen deletes it, and the variants' with them; a corpus mutated by 1.1.8 or earlier has none and is treated
+  as unmutated.
 - Reads the base `<corpus>-manifest.json` to know ground truth, then selects **N distinct target files**
   deterministically from `(S, k)` (distinct so edit order never conflicts).
 - **`--step k`** — apply exactly edit `k` to the current on-disk state; emit `<corpus>-delta-{k}.json`
@@ -91,7 +104,7 @@ Ranked by how much each stresses a real incremental indexer (top = where increme
 | # | Edit | v1? | What it catches |
 |---|---|---|---|
 | 1 | **remove** a file others reference | ✅ v1 | Stale entries lingering: reconcile must drop the file's symbols AND every ref site located in it. Absence assertion. |
-| 3 | **modify (line-shift)** — insert lines above a symbol | ✅ v1 | Stale line numbers: symbol still exists at a new `path:line`; ripples to every symbol with a site in the file. |
+| 3 | **modify (line-shift)** — insert lines above a symbol | ✅ v1 | Stale line numbers: symbol still exists at a new `path:line`; ripples to every symbol with a site in the file. Keeps the file's encoding, BOM, each line's terminator and a missing final newline (since 1.1.11). |
 | 5 | **add** a new file | ✅ v1 | Basic incremental pickup. |
 | 4-grow | grow a small file **past the 8 MB sidecar cutoff** | ✅ v1 | Sidecar **CREATE** path. |
 | 4-shrink | shrink a ~9 MB seed **below the sidecar cutoff (to <2 MB)** | ✅ v1 | Sidecar **DELETE** / orphan-cleanup — CodeCompass's riskiest untested path. Needs the straddle seed (below). |
@@ -157,11 +170,16 @@ Sibling file, same convention as `<corpus>-manifest.json`:
   line endings on every OS (since 1.1.4).
 - **`fileOps`** — the FS-effect checklist. Composition never needs it; it drives CodeCompass's orphan-cleanup
   / old-path-gone asserts AND doubles as the changed-paths to replay as synthetic FS events into the watcher.
-  mutate emits **no** changed-list to `update` itself — that reconcile is the thing under test.
+  mutate emits **no** changed-list to `update` itself — that reconcile is the thing under test. It lists only
+  real changes (since 1.1.11): `removed` holds the source and those of its `.o`/`.lst`/`.bak` siblings that
+  existed (before, all four were always listed), and a Grow of a header already at the target size is not in
+  `modified`.
 - **`symbols`** — the churn set only: every symbol whose def/refs/edges changed, as its full new entry, or
   the string `"TOMBSTONE"` if removed. Optional **`removedSites`** per symbol lists ref sites that vanished
   (point-precise LEAK asserts: "this `path:line` must be gone from `find_references(X)`"), reusing the
-  existing negative-oracle machinery.
+  existing negative-oracle machinery. An entry carries the symbol's `indirectEdges` as the base manifest does
+  (since 1.1.11; before, they were dropped from delta entries); like the base, they stay out of
+  `prevTruthSha` (a symbol whose only change is its `indirectEdges` is still listed).
 
 ### The ripple invariant (why symbol-keyed, not path-keyed)
 
