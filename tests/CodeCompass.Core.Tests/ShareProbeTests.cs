@@ -344,6 +344,70 @@ public class ShareProbeTests
         }
     }
 
+    // The terminal's `codecompass watch` keeps the same promises: a path the share doesn't answer for is kept as indexed and
+    // retried without rewriting the index, and once the share answers, the edit lands.
+    [Fact]
+    public void Watch_APathTheShareDoesntAnswerFor_IsKeptWithoutRewritingTheIndex_AndLandsOnceItAnswers()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class AlphaStays { } }");
+        repo.Write("locked.cs", "namespace N { class LockedOld { } }");
+        var cli = TestCli.Find();
+        Assert.Equal(0, TestCli.Run(cli, "index", repo.Root).Exit);
+        var marker = Path.Combine(Path.GetTempPath(), "cc-unanswered-" + Guid.NewGuid().ToString("N") + ".txt"); // outside the watched tree
+        File.WriteAllText(marker, "locked.cs");
+        var dir = IndexStore.CacheDirPath(repo.Root);
+
+        var prevNetwork = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        var prevUnanswered = Environment.GetEnvironmentVariable("CODECOMPASS_TEST_UNANSWERED");
+        System.Diagnostics.Process watch;
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+            Environment.SetEnvironmentVariable("CODECOMPASS_TEST_UNANSWERED", marker);
+            watch = TestCli.Start(cli, "watch", repo.Root);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prevNetwork);
+            Environment.SetEnvironmentVariable("CODECOMPASS_TEST_UNANSWERED", prevUnanswered);
+        }
+
+        using (watch)
+        {
+            try
+            {
+                var deadline = DateTime.UtcNow.AddSeconds(60);
+                string? line;
+                while ((line = watch.StandardError.ReadLine()) is not null && !line.StartsWith("watching ") && DateTime.UtcNow < deadline) { }
+                Assert.True(line?.StartsWith("watching ") == true, "watch never started");
+                // Keep draining both pipes so the child never blocks on a full one.
+                new Thread(() => { try { while (watch.StandardError.ReadLine() is not null) { } } catch { } }) { IsBackground = true }.Start();
+                new Thread(() => { try { while (watch.StandardOutput.ReadLine() is not null) { } } catch { } }) { IsBackground = true }.Start();
+                var generation = IndexGeneration.Read(dir);
+                var written = IndexFilesWritten(dir);
+
+                repo.Write("locked.cs", "namespace N { class LockedNew { } }");
+                Thread.Sleep(5000); // the edit, then retries about 1 s and 3 s later
+
+                Assert.Equal(generation, IndexGeneration.Read(dir));
+                Assert.Equal(written, IndexFilesWritten(dir));
+                Assert.True(Indexed(repo, "LockedOld")); // kept as indexed (search would check the file's new text)
+
+                File.Delete(marker); // the share answers again
+                deadline = DateTime.UtcNow.AddSeconds(45);
+                while (!Indexed(repo, "LockedNew") && DateTime.UtcNow < deadline) Thread.Sleep(500);
+                Assert.True(Indexed(repo, "LockedNew"));
+                Assert.False(Indexed(repo, "LockedOld"));
+            }
+            finally
+            {
+                try { watch.Kill(entireProcessTree: true); watch.WaitForExit(10_000); } catch { }
+                try { File.Delete(marker); } catch { }
+            }
+        }
+    }
+
     // Each index file's last write, logs aside: what a save would change.
     private static string IndexFilesWritten(string cacheDir) => string.Join("\n",
         Directory.EnumerateFiles(cacheDir, "*", SearchOption.AllDirectories)

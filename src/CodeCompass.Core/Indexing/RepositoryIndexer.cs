@@ -907,7 +907,20 @@ public static class RepositoryIndexer
     private enum PathKind { Folder, File, Gone, Unknown }
 
     /// <summary>Test seam (null in production): true makes a path's probe fail the way an unreachable share does.</summary>
-    internal static Func<string, bool>? ProbeFailsForTests;
+    internal static Func<string, bool>? ProbeFailsForTests = UnansweredFromEnvironment();
+
+    // The same seam for a test driving another process (`codecompass watch`): CODECOMPASS_TEST_UNANSWERED names a marker file,
+    // and while it exists, a path whose file name it holds gets no answer. Deleting the marker brings the "share" back.
+    private static Func<string, bool>? UnansweredFromEnvironment()
+    {
+        var marker = Environment.GetEnvironmentVariable("CODECOMPASS_TEST_UNANSWERED");
+        if (string.IsNullOrEmpty(marker)) return null;
+        return full =>
+        {
+            try { return string.Equals(Path.GetFileName(full), File.ReadAllText(marker).Trim(), StringComparison.OrdinalIgnoreCase); }
+            catch { return false; } // the marker's gone: the share answers
+        };
+    }
 
     // What's at a changed path now. File.Exists and Directory.Exists also answer false when the call FAILED, and on a network
     // root a share that blinked is common: taking that as "gone" dropped healthy files from the index. There, "gone" needs the
