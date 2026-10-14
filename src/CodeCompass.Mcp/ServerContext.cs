@@ -845,7 +845,7 @@ public static class ServerContext
             if (lr?.NewerFormat == true) return; // given up: a newer CodeCompass's index (see GiveUpLinkedRoot)
             if (paths.Count == 0 && !batch.FullReconcile) return; // a retry with nothing left to apply
             using var wl = IndexWriteLock.Acquire(IndexStore.CacheDirPath(linkedRoot), ct);
-            bool affects;
+            bool affects, untouched = false;
             if (batch.FullReconcile)
             {
                 // Lost events on a network/huge linked root: a full in-session rebuild is gated off, same as the
@@ -864,6 +864,7 @@ public static class ServerContext
             else
             {
                 var u = RepositoryIndexer.UpdatePaths(linkedRoot, paths, ct); nt = u.Text; ns = u.Symbols;
+                untouched = u.Stats.Untouched; // nothing written (a retry the share still didn't answer, say): nothing to publish
                 // A path naming a C# input, or one the index found changed under a folder or a vanished path - not an
                 // editor's vanished temp file or a folder whose timestamp moved (see ApplyIncremental).
                 affects = RoslynCSharpAnalyzer.MayAffect(retried is null ? paths : paths.Where(p => !retried.Contains(p)).ToList())
@@ -883,7 +884,11 @@ public static class ServerContext
                 }
             }
             if (!affects) wl.SourcesUnchanged();
-            SwapLinked(linkedRoot, nt, ns, wl.Commit(), sourcesChanged: affects);
+            string? gen;
+            // What was loaded is what's on disk, under its current generation: other sessions have nothing to reload.
+            if (untouched) { wl.SkipBump(); gen = IndexGeneration.Read(IndexStore.CacheDirPath(linkedRoot)); }
+            else gen = wl.Commit();
+            SwapLinked(linkedRoot, nt, ns, gen, sourcesChanged: affects);
             nt = null; ns = null; // ownership transferred to _linked
         }
         catch (OperationCanceledException) { Log.For(linkedRoot).Info("linked root update canceled (re-point/shutdown)"); }
@@ -1778,7 +1783,7 @@ public static class ServerContext
             {
                 // Targeted incremental: fast, done under the write lock. If segments have piled up, escalate to a
                 // compaction instead of just returning.
-                bool compact = false, affects = false;
+                bool compact = false, affects = false, untouched = false;
                 var failure = IndexLoadFailure.None;
                 Rw.EnterWriteLock();
                 try
@@ -1788,7 +1793,7 @@ public static class ServerContext
                     failure = RefreshIfStaleLocked();
                     if (failure == IndexLoadFailure.None)
                     {
-                        affects = ApplyIncremental(TakePendingLocked(batch.ChangedFullPaths));
+                        affects = ApplyIncremental(TakePendingLocked(batch.ChangedFullPaths), out untouched);
                         compact = RepositoryIndexer.NeedsCompaction(_text!, _symbols!);
                         // The merge works on its own copy of the index: this one keeps serving, as during any rebuild here
                         // (BackgroundReconcile, Reindex) - not "indexing 0%" - while the watcher's edits wait their turn.
@@ -1804,8 +1809,12 @@ public static class ServerContext
                     else ScheduleRetry();
                     return;
                 }
-                if (!affects) wl.SourcesUnchanged(); // other sessions reload the index but keep their C# model
-                _loadedGen = wl.Commit();
+                if (untouched) wl.SkipBump(); // nothing written: other sessions have nothing to reload
+                else
+                {
+                    if (!affects) wl.SourcesUnchanged(); // other sessions reload the index but keep their C# model
+                    _loadedGen = wl.Commit();
+                }
                 if (!compact) return;
                 Log.For(Root).Info("compacting: segment count high after incremental edits; merging segments");
                 var c = RepositoryIndexer.Compact(Root, ct);
@@ -1889,8 +1898,11 @@ public static class ServerContext
     // Caller holds BuildGate, the cache's IndexWriteLock, and the Rw write lock (and RefreshIfStaleLocked returned true).
     // Returns whether a source the C# analyzer reads may have changed, and drops the analyzer if so (it rebuilds lazily).
     // retried: the paths among them that are only a retry of ones the share didn't answer for (see _unsurePaths).
-    private static bool ApplyIncremental(IReadOnlyCollection<string> changedFullPaths, IReadOnlySet<string>? retried = null)
+    // untouched: nothing was applied or saved (see ChangeCounts.Untouched) - the caller publishes no new generation.
+    private static bool ApplyIncremental(IReadOnlyCollection<string> changedFullPaths, out bool untouched,
+                                         IReadOnlySet<string>? retried = null)
     {
+        untouched = false;
         // A path naming a C# input counts before anything is applied, so the model goes even if indexing the edit fails. A
         // retry doesn't: that edit dropped the model when it arrived, and what the index finds now is CSharpInputsChanged.
         bool affects = RoslynCSharpAnalyzer.MayAffect(
@@ -1899,7 +1911,8 @@ public static class ServerContext
         {
             _snapshot ??= RepositoryIndexer.LoadSnapshot(Root);
             var c = RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, changedFullPaths);
-            RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
+            untouched = c.Untouched;
+            if (!untouched) RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
             // ...and so does a C# file the index found added, changed or removed under a folder or a vanished path (a folder
             // renamed or deleted). An editor's vanished temp file, or a folder whose timestamp moved, changes nothing: a
             // README or .json edit leaves the ~15 s model valid.
@@ -1967,7 +1980,7 @@ public static class ServerContext
                 using var wl = IndexWriteLock.Acquire(CacheDir, ct);
                 if (Volatile.Read(ref _epoch) != epoch) { wl.SkipBump(); return; }
                 List<string> paths;
-                bool affects = false, notReady = false;
+                bool affects = false, notReady = false, untouched = false;
                 var failure = IndexLoadFailure.None;
                 Rw.EnterWriteLock();
                 try
@@ -2025,7 +2038,7 @@ public static class ServerContext
                         else if ((failure = RefreshIfStaleLocked()) == IndexLoadFailure.None)
                         {
                             ClearHoldLocked();
-                            affects = ApplyIncremental(paths, retried);
+                            affects = ApplyIncremental(paths, out untouched, retried);
                         }
                         else if (failure != IndexLoadFailure.NewerFormat) HoldBackLocked(paths, failure); // see OnChanges
                     }
@@ -2047,6 +2060,7 @@ public static class ServerContext
 
                 if (!reconcile)
                 {
+                    if (untouched) { wl.SkipBump(); continue; } // nothing written (see OnChanges)
                     if (!affects) wl.SourcesUnchanged();
                     _loadedGen = wl.Commit();
                     continue;

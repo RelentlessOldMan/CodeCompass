@@ -1005,7 +1005,7 @@ static int CmdWatch(string[] args)
                 }
                 if (paths.Count == 0) { wl.SkipBump(); return; } // a retry that found the index reloadable, nothing held
                 var c = RepositoryIndexer.ApplyChanges(text, symbols, snapshot, root, paths);
-                RepositoryIndexer.Persist(root, text, symbols, snapshot);
+                if (!c.Untouched) RepositoryIndexer.Persist(root, text, symbols, snapshot);
                 if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
                 {
                     Console.Error.WriteLine($"reindexed: +{c.Added} ~{c.Modified} -{c.Removed}");
@@ -1013,8 +1013,8 @@ static int CmdWatch(string[] args)
                 }
 
                 // Keep a long-running watch from accumulating unbounded segments/tombstones.
-                // Merge existing segments in place (no source-file re-read).
-                if (RepositoryIndexer.NeedsCompaction(text, symbols))
+                // Merge existing segments in place (no source-file re-read). Nothing applied adds none.
+                if (!c.Untouched && RepositoryIndexer.NeedsCompaction(text, symbols))
                 {
                     text.Compact();
                     symbols.Compact();
@@ -1026,7 +1026,8 @@ static int CmdWatch(string[] args)
                 // A retry isn't a new edit: that edit counted when it arrived.
                 var fresh = retried is null ? paths : paths.Where(p => !retried.Contains(p)).ToList();
                 if (!RoslynCSharpAnalyzer.MayAffect(fresh) && !c.CSharpInputsChanged) wl.SourcesUnchanged();
-                loadedGen = wl.Commit();
+                // Nothing written (a retry the share still didn't answer, say): no new generation for sessions to reload.
+                if (c.Untouched) wl.SkipBump(); else loadedGen = wl.Commit();
                 heldBack.Clear(); // only now: a write that throws keeps them held (and said at exit)
                 retryMs = 0;
                 // The share didn't answer for these: kept as indexed - look again later. Said once when it starts and once

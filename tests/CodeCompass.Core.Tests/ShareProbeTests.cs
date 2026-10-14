@@ -261,9 +261,10 @@ public class ShareProbeTests
     }
 
     // A path the share never answers for (access denied, say) was retried every second, five passes back to back, each one
-    // rewriting the index and moving its sources token - so every session dropped its C# model on every retry.
+    // rewriting the index and moving its sources token - so every session dropped its C# model on every retry. And a retry
+    // that still got no answer saved the whole unchanged index and moved its generation: every session reloaded it.
     [Fact]
-    public void Server_APathTheShareNeverAnswersFor_IsRetriedOnABackOff_AndLeavesTheSourcesTokenAlone()
+    public void Server_APathTheShareNeverAnswersFor_IsRetriedOnABackOff_WithoutRewritingTheIndex()
     {
         var prev = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
         using var repo = new TempRepo();
@@ -277,15 +278,17 @@ public class ShareProbeTests
             int probes = 0;
             RepositoryIndexer.ProbeFailsForTests = p => p.EndsWith("locked.cs") && Interlocked.Increment(ref probes) > 0;
             repo.Write("locked.cs", "namespace N { class LockedNew { } }");
+            var dir = IndexStore.CacheDirPath(repo.Root);
+            var generation = IndexGeneration.Read(dir);
+            var written = IndexFilesWritten(dir);
 
             ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("locked.cs") }, FullReconcile: false));
-            var dir = IndexStore.CacheDirPath(repo.Root);
-            var sources = IndexGeneration.SourcesOf(IndexGeneration.Read(dir));
             Thread.Sleep(6000);
 
             // The edit, then retries about 1 s and 3 s later, the next not until 7 s (the back-off doubles) - not one a second, nor five back to back.
             Assert.InRange(Volatile.Read(ref probes), 2, 4);
-            Assert.Equal(sources, IndexGeneration.SourcesOf(IndexGeneration.Read(dir)));
+            Assert.Equal(generation, IndexGeneration.Read(dir)); // nothing was applied: nothing to publish
+            Assert.Equal(written, IndexFilesWritten(dir));
             Assert.True(Indexed(repo, "LockedOld")); // kept as indexed
         }
         finally
@@ -295,6 +298,58 @@ public class ShareProbeTests
             ServerContext.Init(repo.Root);
         }
     }
+
+    // The same for a linked root: a retry the share still doesn't answer saves nothing and leaves its generation alone.
+    [Fact]
+    public void Server_ALinkedRootsPathTheShareNeverAnswersFor_IsRetriedWithoutRewritingItsIndex()
+    {
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        using var project = new TempRepo();
+        using var lib = new TempRepo();
+        project.Write("p.cs", "class P { }\n");
+        lib.Write("lib.cs", "public class LibStays { }\n");
+        lib.Write("locked.cs", "public class LibLockedOld { }\n");
+        var built = RepositoryIndexer.Build(lib.Root); built.Text.Dispose(); built.Symbols.Dispose();
+        LinkStore.Add(project.Root, lib.Root);
+        var otherSession = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(lib.Root)); // no watcher here to race the test's calls
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            CodeCompassTools.SearchCode("LibStays"); // loads the linked root
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+            int probes = 0;
+            RepositoryIndexer.ProbeFailsForTests = p => p.EndsWith("locked.cs") && Interlocked.Increment(ref probes) > 0;
+            lib.Write("locked.cs", "public class LibLockedNew { }\n");
+            var dir = IndexStore.CacheDirPath(lib.Root);
+            var generation = IndexGeneration.Read(dir);
+            var written = IndexFilesWritten(dir);
+
+            ServerContext.OnLinkedChangesForTest(lib.Root, new ChangeBatch(new[] { lib.FullPath("locked.cs") }, FullReconcile: false));
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (Volatile.Read(ref probes) < 3 && DateTime.UtcNow < deadline) Thread.Sleep(100);
+
+            Assert.True(Volatile.Read(ref probes) >= 3, "the linked root's path was never retried");
+            Assert.Equal(generation, IndexGeneration.Read(dir));
+            Assert.Equal(written, IndexFilesWritten(dir));
+            Assert.True(Indexed(lib, "LibLockedOld")); // kept as indexed
+            Assert.True(Indexed(lib, "LibStays"));     // and still served
+        }
+        finally
+        {
+            RepositoryIndexer.ProbeFailsForTests = null;
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prev);
+            otherSession?.Dispose();
+            ServerContext.Init(project.Root);
+        }
+    }
+
+    // Each index file's last write, logs aside: what a save would change.
+    private static string IndexFilesWritten(string cacheDir) => string.Join("\n",
+        Directory.EnumerateFiles(cacheDir, "*", SearchOption.AllDirectories)
+                 .Where(f => !Path.GetFileName(f).Contains("log", StringComparison.OrdinalIgnoreCase))
+                 .OrderBy(f => f, StringComparer.Ordinal)
+                 .Select(f => f + " " + File.GetLastWriteTimeUtc(f).Ticks));
 
     // A linked root's update threw the share's unsure paths away: nothing retried them, so a file deleted during a blink
     // stayed indexed.

@@ -24,12 +24,20 @@ public sealed record UpdateStats(int Added, int Modified, int Removed, double Se
 {
     /// <summary>A targeted update's paths the share didn't answer for (see <see cref="ChangeCounts.Unsure"/>).</summary>
     public IReadOnlyList<string> Unsure { get; init; } = Array.Empty<string>();
+
+    /// <summary>A targeted update that wrote nothing (see <see cref="ChangeCounts.Untouched"/>): the caller can skip its commit.</summary>
+    public bool Untouched { get; init; }
 }
 
 public sealed record ChangeCounts(int Added, int Modified, int Removed, bool CSharpInputsChanged = false)
 {
     /// <summary>Paths on a network root the share didn't answer for: left as indexed, for the caller to retry.</summary>
     public IReadOnlyList<string> Unsure { get; init; } = Array.Empty<string>();
+
+    /// <summary>No path reached the index or its snapshot (each was skipped, or the share didn't answer for it): there is
+    /// nothing to save, and a commit would only make every session reload an unchanged index. Counts of zero aren't enough:
+    /// a touched-but-identical file still records a new ledger entry.</summary>
+    public bool Untouched { get; init; }
 }
 
 /// <summary>
@@ -756,9 +764,9 @@ public static class RepositoryIndexer
                 return FullRebuild(root, text, symbols, sw, ct);
 
             var counts = ApplyChanges(text, symbols, snapshot, root, changedFullPaths);
-            SaveAll(root, text, symbols, snapshot);
+            if (!counts.Untouched) SaveAll(root, text, symbols, snapshot);
             return (text, symbols, new UpdateStats(counts.Added, counts.Modified, counts.Removed, sw.Elapsed.TotalSeconds, false,
-                                                   counts.CSharpInputsChanged) { Unsure = counts.Unsure });
+                                                   counts.CSharpInputsChanged) { Unsure = counts.Unsure, Untouched = counts.Untouched });
         }
     }
 
@@ -839,6 +847,7 @@ public static class RepositoryIndexer
         var irrelevantFolders = irrelevant.Count == 0 ? null : FolderProbe.Folders(irrelevant);
         var skip = new HashSet<string>(irrelevant.Where(p => !irrelevantFolders!.Contains(p)), StringComparer.Ordinal);
         var unsure = new List<string>();
+        bool touched = false; // did any path reach the index or the snapshot (see ChangeCounts.Untouched)?
         bool? rootAnswered = null;
         bool RootAnswers() => rootAnswered ??= Directory.Exists(root);
 
@@ -847,6 +856,7 @@ public static class RepositoryIndexer
             if (skip.Contains(full)) continue;
 
             var kind = Probe(full, batch.RootIsNetwork, RootAnswers);
+            if (kind != PathKind.Unknown) touched = true;
             if (kind == PathKind.Folder)
             {
                 // A folder in a batch is a new subtree (created, renamed or moved in) - or one REPLACED by a same-named folder
@@ -891,7 +901,7 @@ public static class RepositoryIndexer
             else unsure.Add(full);
         }
 
-        return new ChangeCounts(added, modified, removed, csharp) { Unsure = unsure };
+        return new ChangeCounts(added, modified, removed, csharp) { Unsure = unsure, Untouched = !touched };
     }
 
     private enum PathKind { Folder, File, Gone, Unknown }
