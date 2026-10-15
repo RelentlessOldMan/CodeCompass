@@ -53,13 +53,13 @@ The generator writes the manifest as a sibling of the corpus directory: for `--o
 
 | Field | Meaning |
 |---|---|
-| `manifestVersion` | Schema version. Always `1` for this document. Consumers assert on it. |
+| `manifestVersion` | Schema version: `1` for a C corpus (everything above the v2 section), `2` for a C++ corpus ([Manifest v2](#manifest-v2-c-gen---lang-cpp)). Consumers assert on it. |
 | `generatorVersion` | CodeSpawner version that emitted the corpus. |
 | `seed` | RNG seed. Consumers should assert this matches the corpus they think they have. |
 | `corpusRoot` | The absolute `--out` dir at generation time. **Informational only** — do NOT resolve paths against it (the corpus may have been copied/staged on an SMB share). Resolve against the corpus dir you are actually reading. |
 | `populations` | *(optional)* Per-population shape stats: `{ "<name>": {fileCount, totalBytes, identCount} }`. Lets a consumer assert the corpus is the shape it expects *before* trusting any pass/fail. Present for the header bands (`giant-headers`/`big-headers`/`med-headers`/`dense-band`), the pathology populations (`broad-token`/`long-lines`/`encoding-mix`/`pathological-symbols`/`dup-content`), and the mutate-seed pools (`mutate-shrink-seed`/`mutate-restream-seed`) when those knobs are active. Additive — absent on older manifests. |
 | `gen` | *(optional)* The effective generation knobs — a `{ "<knob>": <value> }` block recording the full recipe (scale, seed, all count/size knobs, and every oracle knob) needed to regenerate this corpus byte-identically. Emitted on every plain `gen` manifest; **absent for `--from-profile`** (the profile itself is the recipe) and on manifests from before 1.1.1. Additive. |
-| `roots` | *(optional, oracle-v1)* Array of **symbol-name strings** — the declared call-graph entry points. The reachable set is `BFS(roots)` over `edges`. Present when the oracle overlay runs (`--with-oracle`). See [`_meta.roots` + reachability](#_metaroots--reachability-oracle-v1). |
+| `roots` | *(optional, oracle-v1)* Array of **symbol-name strings** — the declared call-graph entry points. The reachable set is `BFS(roots)` over `edges`. Present when the oracle overlay runs (`--with-oracle`), and always in a v2 manifest (where reachability adds the v2 edge kinds; see Manifest v2). See [`_meta.roots` + reachability](#_metaroots--reachability-oracle-v1). |
 | `indirectTruthSha` | *(optional, oracle-v1)* Lowercase-hex SHA-256 **component digest** of the indirect-edge ground truth + `roots`, over a LOCKED canonical byte-form. Deliberately separate from the frozen primary `prevTruthSha`; a rewired indirect edge or moved root trips this. Present iff any symbol has `indirectEdges`. See [`indirectTruthSha`](#indirecttruthsha--the-canonical-component-digest-oracle-v1). |
 | `totalOracleBytes` | *(optional, oracle-v1)* Sum of every symbol's `bytes` — the exact denominator for a byte-based reduction ratio. Present with `--oracle-bytes`. |
 
@@ -252,7 +252,7 @@ is [cpp-profile-design.md](cpp-profile-design.md) (D1–D10 plus "As built"). A 
 | `instanceOf` | instance | its `template` symbol; an instance shares the template's `def` line |
 | `pure` | method | `true` for a pure virtual (def = its `= 0;` declaration line); absent otherwise |
 | `implicitEdges` | symbol | compiler-added calls (ctor → base/member ctors, dtor → member/base dtors, scope exit → dtor); no ref site |
-| `virtualEdges` | symbol | `[{static, cha[], rta[]}]` per virtual call: sound set (`cha`) and precise set (`rta ⊆ cha`) |
+| `virtualEdges` | symbol | `[{static, cha[], rta[]}]` per virtual call: sound set (`cha`) and precise set (`rta ⊆ cha`); see the receiver note below |
 | `memberPtrEdges` | symbol | `[{target, via: table\|arg, dispatched}]`; the `&Cls::m` line is a ref of `m` |
 | `_meta.staticInitRoots` | meta | ctor + dtor of each static-storage object; roots alongside `_meta.roots` |
 | `_meta.classes` | meta | `{class: [direct bases]}` for every class and mixin |
@@ -262,6 +262,15 @@ is [cpp-profile-design.md](cpp-profile-design.md) (D1–D10 plus "As built"). A 
 other line where the name is a whole word outside strings and `#include`s (type uses, qualifiers, ctor/dtor
 lines, constructions). They have no edges. **Skip `kind` in {`class`, `template`} when counting symbols for
 reachability or a reduction ratio**: neither can ever be reachable, so counting them dilutes the fraction.
+
+**Virtual records and the receiver.** A virtual call `gp_Cls_7->m_2();` goes through a receiver of static type
+`Cls_7`. `static` is the method that call resolves to: `Cls_7`'s own `m_2`, or the one it inherits (then
+`static`'s class is an ancestor of `Cls_7`). `cha` is every non-pure implementation some class at or below
+`Cls_7` resolves `m_2` to; `rta` is the part of it that a live class at or below `Cls_7` resolves to. The receiver
+class itself is not recorded: two calls through different receivers can share `static` with different sets,
+and each keeps its own record. `cha` (and so `rta`) can be empty: a call through an abstract class with no
+concrete class below it has no body to dispatch to. `verify` accepts a record when `cha` is exactly the set for
+some receiver at or below `static`'s class that resolves the call to `static`.
 
 Symbols are keyed by qualified name (`ns_1::Cls_4::m_2`, `ns_0::tf_2<int>`, `ns_1::Tmpl_3<long>::m_0`).
 Reachability: `BFS(roots ∪ staticInitRoots)` over `edges ∪ implicitEdges ∪ cha ∪ memberPtrEdges` (sound) or
@@ -282,8 +291,24 @@ digest := sha256(s1 GS s2 GS s3 GS s4 GS s5)               // lowercase hex; all
 ```
 
 `pure`, `simpleName`, `def`, `refs` and `edges` are not in it. Golden vector (`digest-selftest`):
-`28b4e1de981d282a6918de91846e990955f5b8220c88efc993d2a984c0bfed08`, for the fixture in
-[cpp-profile-design.md](cpp-profile-design.md) "As built".
+`28b4e1de981d282a6918de91846e990955f5b8220c88efc993d2a984c0bfed08`, for this fixture (every symbol not
+listed has a `kind` and none of the edge kinds):
+
+| Symbol | kind | Edges |
+|---|---|---|
+| `ns::f` | `function` | virtual `{static: ns::A::m_0, cha: [ns::B::m_0, ns::A::m_0], rta: [ns::A::m_0]}`; implicit `ns::A::~A`; memberPtr `{ns::A::m_1, arg, dispatched: false}` |
+| `ns::g` | `function` | memberPtr `{ns::B::m_1, table, dispatched: true}` |
+| `ns::A::m_0`, `ns::B::m_0`, `ns::A::m_1`, `ns::B::m_1` | `method` | |
+| `ns::A::A` | `ctor` | |
+| `ns::A::~A` | `dtor` | |
+| `ns::B::B` | `ctor` | implicit `ns::A::A` |
+| `ns::tf` | `template` | |
+| `ns::tf<int>` | `instance` (`instanceOf: ns::tf`) | |
+
+with `staticInitRoots = [ns::A::A, ns::A::~A]` (the same set as `CppDigestTests.GoldenSyms`). A generated
+program's digest is pinned too: `gen --lang cpp` at the default seed 1337 gives
+`d3a38e31f260177f36337a7b475eba0fb266008cf56e22e620ced14a36f40ad5` (unit test + bench), and a release that moves
+it says so in the CHANGELOG.
 
 ## Stable invariants consumers may rely on
 

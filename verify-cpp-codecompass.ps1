@@ -68,16 +68,6 @@ foreach ($p in $m.symbols.PSObject.Properties) {
     foreach ($r in @($s.refs)) { if ($r) { [void]$g.Refs.Add($r) } }
 }
 
-# Files of templates that are never instantiated (no symbol's instanceOf names them). CodeSpawner 1.2.0 records refs inside a
-# template body once per instance, so a never-instantiated body records none, though a name search finds its uses - a known
-# generator gap (confirmed 2026-10-15, fix pending), so an extra line in such a file is expected until it ships.
-$instantiated = [Collections.Generic.HashSet[string]]::new()
-foreach ($p in $m.symbols.PSObject.Properties) { if ($p.Value.PSObject.Properties.Name -contains 'instanceOf') { [void]$instantiated.Add($p.Value.instanceOf) } }
-$uninstantiatedFiles = [Collections.Generic.HashSet[string]]::new()
-foreach ($p in $m.symbols.PSObject.Properties) {
-    if ($p.Value.kind -eq 'template' -and -not $instantiated.Contains($p.Name)) { [void]$uninstantiatedFiles.Add(($p.Value.def -replace ':\d+$', '')) }
-}
-
 # Run the CLI and return "path:line" for each result line (refs: path:line:col: text; def: path:start-end:col: Kind Name).
 function Get-Lines([string]$cmd, [string]$name) {
     $set = [Collections.Generic.HashSet[string]]::new()
@@ -98,7 +88,7 @@ function Test-Declaration([string]$site, [string]$name) {
     return $text -match "^\s*(?:virtual\s+|static\s+|explicit\s+|inline\s+)*(?:[\w:<>,\s\*&]+\s+)?~?$n\s*\((?:[^()]|\([^()]*\))*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:override\s*)?(?:final\s*)?(?:=\s*(?:0|default|delete)\s*)?;\s*$"
 }
 
-$fail = 0; $names = 0; $truthLines = 0; $declExtras = 0; $templateExtras = 0; $pureGaps = 0
+$fail = 0; $names = 0; $truthLines = 0; $declExtras = 0; $pureGaps = 0
 foreach ($name in ($groups.Keys | Sort-Object)) {
     $g = $groups[$name]; $names++
     $truth = [Collections.Generic.HashSet[string]]::new($g.Refs)
@@ -114,7 +104,6 @@ foreach ($name in ($groups.Keys | Sort-Object)) {
     foreach ($x in $got) {
         if ($truth.Contains($x)) { continue }
         if (Test-Declaration $x $name) { $declExtras++ }
-        elseif ($uninstantiatedFiles.Contains(($x -replace ':\d+$', ''))) { $templateExtras++ }
         else { $problems.Add("extra $x") }
     }
     foreach ($d in $defs) { if (-not $g.Defs.Contains($d) -and -not $g.PureDefs.Contains($d)) { $problems.Add("def $d is not a truth def") } }
@@ -128,8 +117,5 @@ foreach ($name in ($groups.Keys | Sort-Object)) {
 
 Write-Host ("{0} simple names, {1} truth lines; {2} in-class declaration line(s) listed by name (expected), {3} pure virtual(s) with no body def (expected)" -f `
         $names, $truthLines, $declExtras, $pureGaps) -ForegroundColor Cyan
-if ($templateExtras -gt 0) {
-    Write-Host ("{0} use(s) inside never-instantiated templates, which the manifest doesn't record yet (CodeSpawner gap; expected)" -f $templateExtras) -ForegroundColor Cyan
-}
 if ($fail -ne 0) { Write-Host "VERIFY-CPP: FAIL ($fail problem(s))" -ForegroundColor Red; exit 1 }
 Write-Host "VERIFY-CPP: PASS" -ForegroundColor Green
