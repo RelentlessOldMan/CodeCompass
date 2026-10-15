@@ -17,6 +17,7 @@
                  * a broad C/C++ find_references (CodeSpawner broad-token, ~1 GB) is right against the
                    manifest, peaks under 768 MB, and stays under 2x the index time of the same corpus.
                  * a 10-edit CodeSpawner churn through `update` matches the composed ground truth.
+                 * C++ find_definition + find_references match a CodeSpawner C++ program's truth (manifest v2).
     -Fetch     + real-repo bench  - fetch-corpus + `bench verify` (needs network; large).
 
   Exits non-zero if anything fails, so it's usable as a pre-push check:  ./check.ps1 -Big
@@ -300,6 +301,15 @@ if ($Big -and (Test-Path $cli)) {
     Check "churn corpus generated" ($LASTEXITCODE -eq 0 -and (Test-Path "$churn-manifest.json"))
     & (Join-Path $root "verify-churn-codecompass.ps1") -Corpus $churn -Edits 10 -Cli $cli | Out-Host
     Check "churn oracle passes (10 steps)" ($LASTEXITCODE -eq 0)
+
+    # C++ defs + refs against CodeSpawner's C++ program (manifest v2): per simple name, every truth line is found and every
+    # extra line is a bodiless declaration (or a use the generator doesn't record yet; see the adapter). ~80 s, small corpus.
+    Section "C++: find_definition + find_references match CodeSpawner's C++ truth (manifest v2)"
+    $cpp = Join-Path $root ".corpus/_cppcheck"
+    & $spawner gen --out $cpp --lang cpp --force | Out-Null
+    Check "C++ corpus generated" ($LASTEXITCODE -eq 0 -and (Test-Path "$cpp-manifest.json"))
+    & (Join-Path $root "verify-cpp-codecompass.ps1") -Corpus $cpp -Cli $cli | Out-Host
+    Check "C++ defs + refs match the truth" ($LASTEXITCODE -eq 0)
 }
 
 # ---- Tier 3: real-repo correctness bench --------------------------------------------------------
