@@ -17,6 +17,8 @@
   <!-- Let the test assembly reach internal helpers (e.g. RoslynCSharpAnalyzer.CollectGlobalUsings) directly. -->
   <ItemGroup>
     <InternalsVisibleTo Include="CodeCompass.Core.Tests" />
+    <!-- The CLI reports the span filter's read counters to the -Big check (CODECOMPASS_TEST_REFS_READS). -->
+    <InternalsVisibleTo Include="CodeCompass.Cli" />
   </ItemGroup>
 
 </Project>

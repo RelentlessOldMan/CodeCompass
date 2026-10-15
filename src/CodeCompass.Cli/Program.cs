@@ -1328,6 +1328,12 @@ static int CmdRefs(string[] args)
             ", so some references may not be listed; check those files with `search`.");
 
     Console.Error.WriteLine($"-- {cs.Count} C# semantic + {named} name-matched reference(s)");
+    // For check.ps1 -Big: the comment/string filter must classify each hit file from the text the name search already read
+    // (it reads only files the search block-read). Re-reading the rest is the regression that once made a broad C/C++
+    // refs 2.5x slower - counted, not timed.
+    if (Environment.GetEnvironmentVariable("CODECOMPASS_TEST_REFS_READS") == "1")
+        Console.Error.WriteLine($"-- test: {LexicalSpanFilter.AllFilesClassified} file(s) classified, " +
+                                $"{LexicalSpanFilter.AllFilesReadFromDisk} read again from disk");
     WarnIfIndexerBehind(root);
     return 0;
 }

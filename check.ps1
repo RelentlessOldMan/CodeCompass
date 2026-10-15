@@ -15,7 +15,7 @@
                    still indexes (pre-scan skipped) and the positional search still finds the marker.
                  * the nested-template "pathological" files index without hanging at the default cap.
                  * a broad C/C++ find_references (CodeSpawner broad-token, ~1 GB) is right against the
-                   manifest, peaks under 768 MB, and stays under 2x the index time of the same corpus.
+                   manifest, peaks under 768 MB, and reads each hit file once (counted, not timed).
                  * a 10-edit CodeSpawner churn through `update` matches the composed ground truth.
                  * C++ find_definition + find_references match a CodeSpawner C++ program's truth (manifest v2).
     -Fetch     + real-repo bench  - fetch-corpus + `bench verify` (needs network; large).
@@ -250,11 +250,11 @@ if ($Big -and (Test-Path $cli)) {
 
     # A broad C/C++ find_references once took a machine to 9-11 GB and OOM. The name search has to stay bounded:
     # a CodeSpawner broad-token corpus (~1 GB: 200 files of 2-8 MB, one hot name in every one) is the worst shape
-    # for it. Checks the answer against the manifest's ground truth, the process's peak memory, and its time
-    # against indexing the same bytes on the same machine (a ratio, so the gate holds on any runner; a field build
-    # once made refs 2.5x slower with every other check passing). Measured 2026-10-07 on 12 threads: index 5.7 s
-    # 608 MB; refs 14 s 250 MB before the read-once fix, 4.6-6.3 s 350 MB after (0.8-1.1x). The 2x limit fails if
-    # the filter goes back to re-reading each hit file (2.5-2.8x).
+    # for it. Checks the answer against the manifest's ground truth, the process's peak memory, and that the
+    # comment/string filter re-reads no hit file (a field build once made refs 2.5x slower that way with every other
+    # check passing). Measured 2026-10-07 on 12 threads: index 5.7 s 608 MB; refs 14 s 250 MB before the read-once
+    # fix, 4.6-6.3 s 350 MB after (0.8-1.1x). The time ratio is printed, not gated (2026-10-15): shared CI runners
+    # failed it at random.
     Section "broad C/C++ find_references: right answer, bounded memory, no latency regression"
     $spawner = Join-Path $root "tools/codespawner/codespawner.exe"
     $broad = Join-Path $root ".corpus/_broadcheck"
@@ -264,7 +264,9 @@ if ($Big -and (Test-Path $cli)) {
 
     $bIdx = Invoke-CliMeasured @("index", $broad)
     Check "broad-token corpus indexes" ($bIdx.Code -eq 0)
-    $bRefs = Invoke-CliMeasured @("refs", $broad, "broad_hot")
+    $env:CODECOMPASS_TEST_REFS_READS = "1"
+    try { $bRefs = Invoke-CliMeasured @("refs", $broad, "broad_hot") }
+    finally { Remove-Item Env:\CODECOMPASS_TEST_REFS_READS -ErrorAction SilentlyContinue }
     $sites = @{}
     foreach ($ln in ($bRefs.Out -split "`r?`n")) {
         $mm = [regex]::Match($ln, '^(?<p>.+?):(?<l>\d+):\d+:(?<t>.*)$')
@@ -277,19 +279,18 @@ if ($Big -and (Test-Path $cli)) {
     Check "refs leaves out the definition" (-not $sites.ContainsKey($bm.symbols.broad_hot.def))
     $peakMb = [math]::Round($bRefs.PeakBytes / 1MB)
     Check "refs peak memory ${peakMb} MB stays under 768 MB" ($bRefs.PeakBytes -gt 0 -and $bRefs.PeakBytes -lt 768MB)
+    # The latency regression this guards (the filter re-reading each hit file: 2.5x the index time) is checked by COUNT, not
+    # by the clock: GitHub's shared runners measured 2.18x, 2.46x and 4.84x for code that runs 0.7-1.2x, so a timing gate
+    # failed releases at random. No hit file may be read whole twice: the filter classifies from the text the search
+    # already read, and reads a file itself only when the search never read it whole - a file of 8 MB or more
+    # (LargeFileIndexer.SidecarThresholdBytes), which the search reads by its matching blocks. The regression reads all ~200.
+    $blockRead = @(Get-ChildItem $broad -Recurse -File | Where-Object { $_.Length -ge 8MB }).Count
+    $rr = [regex]::Match($bRefs.Err, '-- test: (?<c>\d+) file\(s\) classified, (?<d>\d+) read again from disk')
+    $readAgain = if ($rr.Success) { [int]$rr.Groups['d'].Value } else { -1 }
+    Check "refs reads no hit file whole twice (filter read $readAgain itself; $blockRead were block-read by the search)" `
+        ($rr.Success -and [int]$rr.Groups['c'].Value -ge 100 -and $readAgain -ge 0 -and $readAgain -le $blockRead)
     $ratio = [math]::Round($bRefs.Ms / [math]::Max(1, $bIdx.Ms), 2)
-    # One slow sample isn't a regression: GitHub runners measured this at 2.46x and 4.84x (then 2.9x right after) on
-    # commits that rerun at 0.7-1.2x; normal CI runs are 0.6-1.25x. The slow spells can outlast one re-measure, so take up
-    # to three samples 10 s apart and keep the fastest - a real regression (the filter re-reading each hit file) is slow
-    # every time.
-    for ($try = 2; $ratio -gt 2 -and $try -le 3; $try++) {
-        Write-Host "  refs took ${ratio}x the index time; re-measuring ($try of 3) in 10 s"
-        Start-Sleep -Seconds 10
-        $again = Invoke-CliMeasured @("refs", $broad, "broad_hot")
-        if ($again.Code -eq 0 -and $again.Ms -lt $bRefs.Ms) { $bRefs = $again }
-        $ratio = [math]::Round($bRefs.Ms / [math]::Max(1, $bIdx.Ms), 2)
-    }
-    Check "refs time $($bRefs.Ms) ms is under 2x the index time $($bIdx.Ms) ms (now $ratio x)" ($ratio -le 2)
+    Write-Host "  info  refs $($bRefs.Ms) ms vs index $($bIdx.Ms) ms ($ratio x; typically 0.7-1.2x, not a gate)"
 
     # Long churn through `codecompass update` against CodeSpawner's composed ground truth (removes, line shifts,
     # adds, and grow/shrink across the sidecar cutoff so sidecars are created and orphan-cleaned). 10 edits cycle
