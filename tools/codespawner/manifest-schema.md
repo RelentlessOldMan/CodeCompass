@@ -1,4 +1,4 @@
-# Ground-Truth Manifest — Schema v1
+# Ground-Truth Manifest — Schema v1 (+ v2 for C++)
 
 `manifestVersion: 1`. This is the **contract** that couples the generator to its consumers
 (CodeCompass `-Verify`, CodeCarver's oracle, and CodeSpawner's own `verify`). The corpus bytes may
@@ -9,8 +9,9 @@ hard-assert `_meta.manifestVersion` before trusting a manifest.
 > renames, removals, or semantic changes do.* New optional fields (`_meta.populations`, `_meta.gen`,
 > `expectedMiss`, `dupGroups`, and the **oracle-v1** block — `_meta.roots` / `_meta.indirectTruthSha` /
 > `_meta.totalOracleBytes`, per-symbol `indirectEdges` / `bytes`, and non-linear DAG `edges`) all ship at
-> v1 — old adapters ignore what they don't consume. The next real **v2** bump is reserved for when the
-> schema grows for real (the C++ language profile: vtables, overrides, templates).
+> v1 — old adapters ignore what they don't consume. **v2** (1.2.0) is the C++ language profile and is
+> written ONLY by `gen --lang cpp`; every C corpus stays v1, byte-identical. See
+> [Manifest v2 (C++)](#manifest-v2-c-gen---lang-cpp) below.
 
 The generator writes the manifest as a sibling of the corpus directory: for `--out <dir>` it emits
 `<dir>-manifest.json`.
@@ -226,9 +227,9 @@ from this exact input — `roots = ["func_0"]`, and edges:
 | `func_0` | `iext_1` | `vector-table` | 0 | 0 |
 | `func_1` | `itgt_0` | `init_array` | 1 | 1 |
 
-Run `codespawner digest-selftest` — it prints all four golden vectors (the primary `7de5e47…`, this
-indirect one, and the `diffTruthSha` and `conflictTruthSha` vectors from
-[diff-delta-design.md](diff-delta-design.md)) and exits non-zero on any drift. A read-side recompute that reproduces `fa9432bd…` from the fixture above is
+Run `codespawner digest-selftest` — it prints all five golden vectors (the primary `7de5e47…`, this
+indirect one, the `diffTruthSha` and `conflictTruthSha` vectors from
+[diff-delta-design.md](diff-delta-design.md), and the v2 `cppTruthSha`) and exits non-zero on any drift. A read-side recompute that reproduces `fa9432bd…` from the fixture above is
 proven byte-identical to the generator and can be trusted on real manifests.
 
 ### `bytes` / `_meta.totalOracleBytes` — byte-mass ground truth (oracle-v1)
@@ -237,6 +238,52 @@ With `--oracle-bytes`, each symbol carries `bytes` (its definition-span byte mas
 is their exact sum. This is the denominator for a **byte-based** reduction ratio (how much *mass*, not how many
 *symbols*, a carve keeps) — most meaningful with `--oracle-scale`, which sizes bodies to the profile's measured
 `.c` sizes. Absent (all `bytes` 0, total 0) by default.
+
+## Manifest v2 (C++, `gen --lang cpp`)
+
+`manifestVersion: 2`, `_meta.lang: "cpp"`. The full design, with every statement form and what it records,
+is [cpp-profile-design.md](cpp-profile-design.md) (D1–D10 plus "As built"). A v1 reader must refuse it
+(hard-assert the version). Every v1 field keeps its meaning; these are added:
+
+| Field | Where | Meaning |
+|---|---|---|
+| `kind` | symbol | `function` \| `method` \| `ctor` \| `dtor` \| `template` \| `instance` \| `class` |
+| `simpleName` | symbol | the unqualified name the source spells (`m_2`, `Cls_4` for a ctor, `~Cls_4`); def/ref lines contain it as a whole word |
+| `instanceOf` | instance | its `template` symbol; an instance shares the template's `def` line |
+| `pure` | method | `true` for a pure virtual (def = its `= 0;` declaration line); absent otherwise |
+| `implicitEdges` | symbol | compiler-added calls (ctor → base/member ctors, dtor → member/base dtors, scope exit → dtor); no ref site |
+| `virtualEdges` | symbol | `[{static, cha[], rta[]}]` per virtual call: sound set (`cha`) and precise set (`rta ⊆ cha`) |
+| `memberPtrEdges` | symbol | `[{target, via: table\|arg, dispatched}]`; the `&Cls::m` line is a ref of `m` |
+| `_meta.staticInitRoots` | meta | ctor + dtor of each static-storage object; roots alongside `_meta.roots` |
+| `_meta.classes` | meta | `{class: [direct bases]}` for every class and mixin |
+| `_meta.cppTruthSha` | meta | the canonical digest below |
+
+**Class symbols** (`kind: class`, key `ns_1::Cls_4`): `def` is the `class Cls_4 … {` line and `refs` are every
+other line where the name is a whole word outside strings and `#include`s (type uses, qualifiers, ctor/dtor
+lines, constructions). They have no edges. **Skip `kind` in {`class`, `template`} when counting symbols for
+reachability or a reduction ratio**: neither can ever be reachable, so counting them dilutes the fraction.
+
+Symbols are keyed by qualified name (`ns_1::Cls_4::m_2`, `ns_0::tf_2<int>`, `ns_1::Tmpl_3<long>::m_0`).
+Reachability: `BFS(roots ∪ staticInitRoots)` over `edges ∪ implicitEdges ∪ cha ∪ memberPtrEdges` (sound) or
+`edges ∪ implicitEdges ∪ rta ∪ memberPtrEdges[dispatched]` (precise).
+
+### `cppTruthSha`
+
+Five sections, GS between them, all always present (empty = zero records); each section's records are
+deduplicated then ORDINAL-sorted, with RS after each record (US = `0x1F`, RS = `0x1E`, GS = `0x1D`):
+
+```
+virtualEdges:    source US static US join(",", sort(dedup(cha))) US join(",", sort(dedup(rta)))
+implicitEdges:   source US target
+memberPtrEdges:  source US target US via US (dispatched?"1":"0")
+kinds:           name US kind US (instanceOf or "")        // every symbol that has a kind
+staticInitRoots: name
+digest := sha256(s1 GS s2 GS s3 GS s4 GS s5)               // lowercase hex; all-empty = sha256(GS x4)
+```
+
+`pure`, `simpleName`, `def`, `refs` and `edges` are not in it. Golden vector (`digest-selftest`):
+`28b4e1de981d282a6918de91846e990955f5b8220c88efc993d2a984c0bfed08`, for the fixture in
+[cpp-profile-design.md](cpp-profile-design.md) "As built".
 
 ## Stable invariants consumers may rely on
 

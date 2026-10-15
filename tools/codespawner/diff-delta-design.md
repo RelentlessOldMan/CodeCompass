@@ -128,9 +128,14 @@ giant), the insert gives that line a `\n` first, so the line itself changes: the
   (`similarityMilli<1000`); rename+edit hunks live in `fileOps.modified` keyed by the **`to`** path (so the
   `renamed` section stays flat).
 - **Similarity metric (pinned):** `commonLines / max(oldLineCount, newLineCount)` over **EOL-normalized**
-  lines, `commonLines` = multiset intersection; encoded as `similarityMilli = round(sim*1000)` (integer
-  thousandths — dodges float-format ambiguity, same spirit as bools-as-0/1). Matches CodeDiffer's own
-  line-hash/MinHash engine so the threshold test is apples-to-apples.
+  lines, `commonLines` = multiset intersection; encoded as `similarityMilli` in integer thousandths
+  (dodges float-format ambiguity, same spirit as bools-as-0/1). Matches CodeDiffer's own engine so the
+  threshold test is apples-to-apples. Pinned precisely (1.1.13, agreed with CodeDiffer 2026-10-14):
+  - Lines are counted on the **decoded text**, never raw bytes: a BOM is honoured (so UTF-16 is decoded
+    first), otherwise UTF-8. CRLF and a lone CR count as LF; a final terminator does not start another line.
+  - Rounding is **half-up in integers**: `similarityMilli = (1000·commonLines + m/2) / m` with integer
+    division and `m = max(oldLineCount, newLineCount)` (so 9/16 = 562.5 records 563).
+  - A file that isn't text (binary) gets no similarity: its rename is always pure (1000, identical bytes).
 - **Graded:** emit renames near ~0.9 / ~0.6 / ~0.3 to probe CodeDiffer's ~0.5 default threshold boundary.
 - **Decoys:** scatter near-duplicate **non-renamed** files (dup `nearVariants`) so CodeDiffer scores false
   **positives**, not just recall. Truth = the `{from,to}` set ⇒ a precision/recall oracle (a missed rename
@@ -236,6 +241,15 @@ the target, so tiny files honestly report low similarity). Pure renames (1000) a
 `renamed` stays flat. `--decoy-fraction f` emits near-duplicate ADDs (`*_dup*`, original kept) into
 `fileOps.added` as rename false-positive traps — `added` is NOT digested (not a locked digest section), it is
 scoring truth for CodeDiffer: the `{from,to}` set is the recall oracle, the decoys the precision oracle.
+**Rename margin (1.1.12):** every decoy left in `added` scores at most `similarityMilli − 20` against every
+recorded rename's `from` (pinned metric, both directions of pairing); a decoy closer than that is deleted and
+left out of `added`. Every decoy differs from its source (at least one marked line; a non-text or empty file
+gets no decoy, 1.1.13). Renames below 20 milli, non-text bases, and renames past the check's line budget (32M
+indexed lines, a stderr warning says how many) are not checked. Another rename's `to` can't be dropped, so a
+target set holding near-copies of each other can still have renames that cross-match; mutate warns on stderr
+with the count. That happens with the default `--source-bodies same` sources, and with `--target all`, whose
+`.bak`/`.o`/`.lst` build outputs are copies of each other. The best-match guarantee holds for rename fixtures
+generated with `gen --source-bodies varied` and mutated with `--target source`.
 **Step 4 status:** IMPLEMENTED. `--three-way --overlap-fraction f` leaves base B pristine and emits two
 mutated sibling trees `B_v1/` + `B_v2/`, their standard `deltaKind:"diff"` deltas `B-delta-v1.json` /
 `B-delta-v2.json`, and `B-conflict.json` (`deltaKind:"conflict-3way"`, `_meta.conflictTruthSha`). All edits
