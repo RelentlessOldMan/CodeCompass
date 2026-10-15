@@ -123,6 +123,56 @@ public class McpToolsTests
         }
     }
 
+    // Release-gate failure (2026-10-14): taking on a linked root starts a background reconcile of its index, and unlinking
+    // neither cancelled nor waited for it. A purge right after the root loaded met that reconcile holding the index's write
+    // lock and kept the index ("index kept: in use"); a reconcile that lost the race could then write the deleted index back.
+    // Parks the startup reconcile inside the write lock, then unlinks with purge: the unlink must stop it and delete the index.
+    [Fact]
+    public void ManageLinks_RemovePurge_WhileTheLinkedRootsStartupReconcileRuns_StopsItAndDeletesTheIndex()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class A { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class RaceGizmo { } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+        var cacheDir = CodeCompass.Core.Storage.IndexStore.CacheDirPath(external.Root);
+
+        using var parked = new System.Threading.ManualResetEventSlim();
+        using var release = new System.Threading.ManualResetEventSlim();
+        bool sawCancel = false;
+        ServerContext.LinkedReconcileHoldForTest = (root, ct) =>
+        {
+            if (!CodeCompass.Core.Storage.PathSafety.SameDir(root, external.Root)) return;
+            parked.Set();
+            try { release.Wait(TimeSpan.FromSeconds(30), ct); }
+            catch (OperationCanceledException) { sawCancel = true; throw; }
+        };
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.Contains("Gizmo.cs", CodeCompassTools.SearchCode("RaceGizmo")); // loaded + owned: its startup reconcile starts
+            Assert.True(parked.Wait(TimeSpan.FromSeconds(30)), "the linked root's startup reconcile never ran");
+
+            var msg = CodeCompassTools.ManageLinks("remove", external.Root, purge: true);
+            Assert.True(msg.Contains("index deleted"), msg);
+            Assert.True(sawCancel, "the unlink didn't cancel the running reconcile");
+            Assert.False(System.IO.Directory.Exists(cacheDir));
+            System.Threading.Thread.Sleep(500); // a reconcile that ran on would write the index back now
+            Assert.False(System.IO.Directory.Exists(cacheDir));
+        }
+        finally
+        {
+            release.Set();
+            ServerContext.LinkedReconcileHoldForTest = null;
+            ServerContext.Init(project.Root);
+            CodeCompass.Core.Storage.LinkStore.Remove(project.Root, external.Root);
+            CodeCompass.Core.Storage.IndexStore.TryClearCacheDir(cacheDir, out _);
+        }
+    }
+
     // An unrecognized action must return the usage default, not silently behave like "list" or throw.
     [Fact]
     public void ManageLinks_UnknownAction_ReturnsUsage()

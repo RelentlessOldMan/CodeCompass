@@ -89,6 +89,20 @@ public static class ServerContext
         public volatile bool HasUnsure;
         public volatile bool NewerFormat; // its index is a newer CodeCompass's: given up (see GiveUpLinkedRoot)
         public volatile string? FailedGen; // a generation that wouldn't load: not retried on every query until it moves
+        // Its startup reconcile (see StartLinkedWatch), cancelled and waited for when the root is torn down: left running, it
+        // held the index's write lock against a purge and could write a purged index back.
+        public CancellationTokenSource? LoadCts;
+        public Task? LoadReconcile;
+
+        // Stop the startup reconcile and wait it out (it never takes _linkedGate, so a caller holding that can wait).
+        public void StopLoadReconcile()
+        {
+            if (LoadCts is null) return;
+            LoadCts.Cancel();
+            try { LoadReconcile?.Wait(); } catch (AggregateException) { } // it logs its own failure
+            LoadCts.Dispose();
+            LoadCts = null;
+        }
     }
     private static List<LinkedRoot> _linked = new();
 
@@ -500,6 +514,7 @@ public static class ServerContext
             {
                 var w = lr.Watcher; lr.Watcher = null;
                 w?.Dispose();
+                lr.StopLoadReconcile();
                 var own = lr.Own; lr.Own = null;
                 own?.Dispose();
             }
@@ -539,7 +554,6 @@ public static class ServerContext
     private static bool StartLinkedWatch(LinkedRoot lr)
     {
         var linkedRoot = lr.Root;
-        var ct = ShutdownToken; // now: a re-point or shutdown before the reconcile task starts must still cancel it
         RepositoryWatcher? watcher = null;
         try
         {
@@ -556,7 +570,11 @@ public static class ServerContext
             return false;
         }
         lr.Watcher = watcher;
-        Task.Run(() => ReconcileLinkedOnLoad(linkedRoot, ct));
+        // ShutdownToken now: a re-point or shutdown before the reconcile task starts must still cancel it. Unlinking the root
+        // cancels it too, and waits for it (StopLoadReconcile).
+        lr.LoadCts = CancellationTokenSource.CreateLinkedTokenSource(ShutdownToken);
+        var ct = lr.LoadCts.Token;
+        lr.LoadReconcile = Task.Run(() => ReconcileLinkedOnLoad(linkedRoot, ct));
         return true;
     }
 
@@ -716,6 +734,7 @@ public static class ServerContext
             try { old = _linked; _linked = new List<LinkedRoot>(); } finally { Rw.ExitWriteLock(); }
             had = old.Count > 0;
             foreach (var lr in old) lr.Watcher?.Dispose();                      // off-lock: safe drain
+            foreach (var lr in old) lr.StopLoadReconcile();
             foreach (var lr in old) { lr.Text.Dispose(); lr.Symbols.Dispose(); lr.Own?.Dispose(); } // no reader holds these post-swap
             _linksChecked = false; // re-point: next query reloads the new project's link set from scratch
         }
@@ -796,6 +815,7 @@ public static class ServerContext
         try { _linked = next; } finally { Rw.ExitWriteLock(); }
 
         foreach (var lr in remove) lr.Watcher?.Dispose();                        // off-lock: safe drain (see note above)
+        foreach (var lr in remove) lr.StopLoadReconcile();                       // nothing writes it once it's unlinked
         foreach (var lr in remove) { lr.Text.Dispose(); lr.Symbols.Dispose(); lr.Own?.Dispose(); }
 
         foreach (var lr in added) // owners live-watch (off-lock) + reconcile out-of-session changes (gated)
@@ -974,6 +994,7 @@ public static class ServerContext
         try
         {
             using var wl = IndexWriteLock.Acquire(IndexStore.CacheDirPath(linkedRoot), ct);
+            LinkedReconcileHoldForTest?.Invoke(linkedRoot, ct);
             var u = RepositoryIndexer.Update(linkedRoot, ct: ct);
             bool changed = u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild;
             if (!changed) wl.SourcesUnchanged();
@@ -981,6 +1002,10 @@ public static class ServerContext
         }
         finally { BuildGate.Release(); }
     }
+
+    /// <summary>Test seam: runs inside a linked root's reconcile while it holds the root's write lock, given the reconcile's
+    /// cancellation token - a test parks it there to race an unlink against it.</summary>
+    internal static Action<string, CancellationToken>? LinkedReconcileHoldForTest;
 
     /// <summary>Test seam: run a linked root's startup reconcile synchronously, past its auto-reconcile gate.</summary>
     internal static void RunLinkedStartupReconcileNow(string linkedRoot) => ReconcileLinked(PathSafety.NormalizeDir(linkedRoot), ShutdownToken);
