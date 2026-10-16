@@ -32,7 +32,7 @@ public sealed class RepositoryWatcher : IDisposable
 
     private readonly object _timerGate = new();
     private readonly object _flushGate = new();
-    private readonly int _maxWaitMs;
+    private int _maxWaitMs;
     private long _firstPendingTick; // 0 = nothing pending since last flush
     private System.Threading.Timer? _timer;
     private volatile bool _disposed;
@@ -71,6 +71,14 @@ public sealed class RepositoryWatcher : IDisposable
     private int _restarts;
 
     internal void RaiseErrorForTest(Exception ex) => OnError(this, new ErrorEventArgs(ex));
+    internal void RecordForTest(string fullPath) => Record(fullPath, structural: true);
+    internal int MaxWaitMsForTest { set { lock (_timerGate) _maxWaitMs = value; } }
+    /// <summary>Paths held before the flush runs without waiting out the debounce (see Record).</summary>
+    internal const int MaxPendingPaths = 50_000;
+
+    /// <summary>Timer callbacks inside Flush right now, running or waiting (test hook).</summary>
+    internal int FlushCallbacksInside => Volatile.Read(ref _flushCallbacksInside);
+    private int _flushCallbacksInside;
 
     /// <summary>The rules events are filtered by - the watched root's own, when the caller passed them.</summary>
     public IgnoreRules Ignore => _ignore;
@@ -139,8 +147,16 @@ public sealed class RepositoryWatcher : IDisposable
 
     private void Record(string fullPath, bool structural)
     {
-        lock (_pendingGate) _pending[fullPath] = structural || (_pending.TryGetValue(fullPath, out var was) && was);
-        Schedule();
+        bool full;
+        lock (_pendingGate)
+        {
+            _pending[fullPath] = structural || (_pending.TryGetValue(fullPath, out var was) && was);
+            full = _pending.Count >= MaxPendingPaths;
+        }
+        // A long sync kept resetting the debounce and held every path until the max wait (one entry and string each), so
+        // a big enough burst grew without bound: past the cap, deliver what's held now. Not as a full reconcile instead -
+        // a network share or huge repo doesn't auto-reconcile, so that would drop the changes.
+        Schedule(now: full);
     }
 
     // A created or renamed-in path ShouldReact turned down. If it's an ignored file TYPE's name, it may be a FOLDER named like
@@ -180,17 +196,17 @@ public sealed class RepositoryWatcher : IDisposable
         return true;
     }
 
-    private void Schedule()
+    private void Schedule(bool now = false)
     {
         lock (_timerGate)
         {
             if (_disposed) return;
-            long now = Environment.TickCount64;
-            if (_firstPendingTick == 0) _firstPendingTick = now;
+            long tick = Environment.TickCount64;
+            if (_firstPendingTick == 0) _firstPendingTick = tick;
             // Normally reset the quiet window on each event; but if we've been continuously
             // deferring past the max wait (e.g. a long sync), fire now so a storm can't
             // starve the flush and let _pending grow without bound.
-            int due = now - _firstPendingTick >= _maxWaitMs ? 0 : _debounceMs;
+            int due = now || tick - _firstPendingTick >= _maxWaitMs ? 0 : _debounceMs;
             if (_timer is null)
                 _timer = new System.Threading.Timer(_ => Flush(), null, due, Timeout.Infinite);
             else
@@ -198,44 +214,66 @@ public sealed class RepositoryWatcher : IDisposable
         }
     }
 
+    // Single flight: a flush slower than the max wait (a big reindex during a sync) made each new event set the timer due
+    // NOW, and every firing parked a pool thread on _flushGate - 2 -> 202 threads in three minutes - until the pool starved.
+    // A callback that finds a flush running just leaves; the running one checks for new work AFTER letting go of the gate,
+    // so whatever arrived meanwhile is scheduled (an event recorded later schedules itself, and that callback finds the
+    // gate free or a flush that will check after it).
     private void Flush()
     {
-        lock (_flushGate)
+        Interlocked.Increment(ref _flushCallbacksInside);
+        try
         {
-            if (_disposed) return;
-            lock (_timerGate) _firstPendingTick = 0; // start a fresh max-wait window
-
-            List<KeyValuePair<string, bool>> pending;
-            List<string> ifFolder;
-            bool overflow;
+            if (!Monitor.TryEnter(_flushGate)) return;
+            try { FlushCore(); }
+            finally { Monitor.Exit(_flushGate); }
+            bool more, full;
             lock (_pendingGate)
             {
-                pending = _pending.ToList();
-                ifFolder = _ifFolder.ToList();
-                overflow = _overflow;
-                _pending.Clear();
-                _ifFolder.Clear();
-                _overflow = false;
+                more = _pending.Count > 0 || _ifFolder.Count > 0 || _overflow;
+                full = _pending.Count >= MaxPendingPaths;
             }
-            // Drop a folder that only reported Changed: its timestamp moved because an entry in it was added, removed or
-            // renamed, and that entry has its own event. Passed on, it re-walked the folder's whole subtree under the
-            // index write lock on every atomic save in it (a temp file + rename: Visual Studio, JetBrains, git, Claude
-            // Code's Edit/Write). Checked here, off the event thread, so a slow stat can't overflow the watcher's buffer.
-            // (Not after an overflow: the batch is then a full reconcile, and its paths go unused.)
-            var paths = overflow ? new List<string>()
-                                 : pending.Where(p => p.Value || !Directory.Exists(p.Key)).Select(p => p.Key).ToList();
-            if (!overflow)
-            {
-                // One listing per parent folder, not a stat per path: an in-tree build creates thousands of .o files.
-                var seen = new HashSet<string>(paths, StringComparer.Ordinal);
-                var unseen = ifFolder.Where(p => !seen.Contains(p)).ToList();
-                if (unseen.Count > 0) paths.AddRange(Storage.FolderProbe.Folders(unseen));
-            }
-            if (paths.Count == 0 && !overflow) return;
-
-            try { _onFlush(new ChangeBatch(paths, overflow)); }
-            catch { /* keep watching even if one reindex fails */ }
+            if (more) Schedule(now: full);
         }
+        finally { Interlocked.Decrement(ref _flushCallbacksInside); }
+    }
+
+    private void FlushCore()
+    {
+        if (_disposed) return;
+        lock (_timerGate) _firstPendingTick = 0; // start a fresh max-wait window
+
+        List<KeyValuePair<string, bool>> pending;
+        List<string> ifFolder;
+        bool overflow;
+        lock (_pendingGate)
+        {
+            pending = _pending.ToList();
+            ifFolder = _ifFolder.ToList();
+            overflow = _overflow;
+            // A burst (a checkout, a build) leaves the tables sized for it; give that back rather than hold it all session.
+            if (_pending.Count > 1024) { _pending.Clear(); _pending.TrimExcess(); } else _pending.Clear();
+            if (_ifFolder.Count > 1024) { _ifFolder.Clear(); _ifFolder.TrimExcess(); } else _ifFolder.Clear();
+            _overflow = false;
+        }
+        // Drop a folder that only reported Changed: its timestamp moved because an entry in it was added, removed or
+        // renamed, and that entry has its own event. Passed on, it re-walked the folder's whole subtree under the
+        // index write lock on every atomic save in it (a temp file + rename: Visual Studio, JetBrains, git, Claude
+        // Code's Edit/Write). Checked here, off the event thread, so a slow stat can't overflow the watcher's buffer.
+        // (Not after an overflow: the batch is then a full reconcile, and its paths go unused.)
+        var paths = overflow ? new List<string>()
+                             : pending.Where(p => p.Value || !Directory.Exists(p.Key)).Select(p => p.Key).ToList();
+        if (!overflow)
+        {
+            // One listing per parent folder, not a stat per path: an in-tree build creates thousands of .o files.
+            var seen = new HashSet<string>(paths, StringComparer.Ordinal);
+            var unseen = ifFolder.Where(p => !seen.Contains(p)).ToList();
+            if (unseen.Count > 0) paths.AddRange(Storage.FolderProbe.Folders(unseen));
+        }
+        if (paths.Count == 0 && !overflow) return;
+
+        try { _onFlush(new ChangeBatch(paths, overflow)); }
+        catch { /* keep watching even if one reindex fails */ }
     }
 
     public void Dispose()

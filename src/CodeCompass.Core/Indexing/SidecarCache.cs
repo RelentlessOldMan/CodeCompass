@@ -112,7 +112,7 @@ internal static class SidecarCache
         try
         {
             var fi = new FileInfo(scPath);
-            if (!fi.Exists) return null;
+            if (!fi.Exists) { Forget(scPath); return null; } // its file shrank under the cutoff, was deleted or unlinked
             len = fi.Length;
             mtime = fi.LastWriteTimeUtc.Ticks;
         }
@@ -224,6 +224,27 @@ internal static class SidecarCache
     }
 
     /// <summary>Drop everything (a cache-clear).</summary>
+    // Drop one path's entry (its sidecar file is gone), so it stops holding bytes and counting against the budget.
+    private static void Forget(string scPath)
+    {
+        lock (_gate)
+            if (_map.Remove(scPath, out var gone)) _residentBytes -= gone.ApproxBytes;
+    }
+
+    /// <summary>Hand the whole resident set back (an idle server: the next broad query re-reads what it needs). Returns
+    /// the bytes released. Readers already holding a parsed sidecar keep it; it's simply no longer cached.</summary>
+    internal static long Release()
+    {
+        lock (_gate)
+        {
+            long freed = _residentBytes;
+            _map.Clear();
+            _map.TrimExcess();
+            _residentBytes = 0;
+            return freed;
+        }
+    }
+
     public static void Clear()
     {
         lock (_gate) { _map.Clear(); _residentBytes = 0; }

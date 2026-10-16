@@ -33,10 +33,11 @@ public sealed class SegmentedIndex : IDisposable
     private readonly long _budget;
     private readonly List<SegmentReader> _segments = new();
     private readonly Dictionary<int, HashSet<int>> _tombstones = new();
-    private readonly Dictionary<string, (int Seg, int Local)> _pathToDoc = new(StringComparer.Ordinal);
+    private Dictionary<string, (int Seg, int Local)> _pathToDoc = new(StringComparer.Ordinal);
     private SegmentBuilder? _pending;
     private int _nextSegmentNumber;
     private bool _pathMapBuilt;
+    private long _pathMapUsedMs; // last write that needed the map (see ReleasePathMapIfIdle)
 
     public string Root => _root;
     public string Directory => _dir;
@@ -161,7 +162,7 @@ public sealed class SegmentedIndex : IDisposable
 
     /// <summary>Every live document path in the index (deduped; tombstoned paths already dropped from the
     /// map). Used by the stale-index ignore prune to find paths the CURRENT rules now exclude. Builds the
-    /// path map if not resident (serve-lean drops it); O(docs), no source reads.</summary>
+    /// path map if not resident (an idle index releases it); O(docs), no source reads.</summary>
     public IReadOnlyCollection<string> AllPaths()
     {
         if (_pending is { DocCount: > 0 }) FlushPending();
@@ -655,8 +656,7 @@ public sealed class SegmentedIndex : IDisposable
         _segments.Clear();
         _segments.AddRange(merged);
         _tombstones.Clear();
-        _pathToDoc.Clear();
-        _pathMapBuilt = false;
+        DropPathMap();
 
         SaveManifest();
         SaveTombstones();
@@ -827,6 +827,7 @@ public sealed class SegmentedIndex : IDisposable
     // O(docs) but reads paths only (mmap), not postings. Search never triggers it.
     public void EnsurePathMap()
     {
+        _pathMapUsedMs = Environment.TickCount64;
         if (_pathMapBuilt) return;
         _pathMapBuilt = true;
         for (int segId = 0; segId < _segments.Count; segId++)
@@ -839,6 +840,32 @@ public sealed class SegmentedIndex : IDisposable
                 _pathToDoc[seg.GetPath(local)] = (segId, local); // later segments win on duplicate paths
             }
         }
+    }
+
+    /// <summary>True while the write-side path map is built (diagnostics / tests).</summary>
+    internal bool PathMapResident => _pathMapBuilt;
+
+    /// <summary>Hand back the path map (~200 B per live doc: 15-30 MB on a 66k-150k-file repo) if no write has needed it
+    /// for <paramref name="idle"/>; the next write rebuilds it from the mapped segments. Returns whether it was released.
+    /// Same thread rules as the writes that use it (the caller serializes it with them).</summary>
+    /// <summary>Whether the path map is built and unused for <paramref name="idle"/> - a lock-free hint, so a caller can skip
+    /// taking the write gate when there's nothing to release; <see cref="ReleasePathMapIfIdle"/> decides.</summary>
+    public bool PathMapIdle(TimeSpan idle) =>
+        _pathMapBuilt && Environment.TickCount64 - _pathMapUsedMs >= (long)idle.TotalMilliseconds;
+
+    public bool ReleasePathMapIfIdle(TimeSpan idle)
+    {
+        if (_pending is { DocCount: > 0 }) return false; // pending docs live only in the map
+        if (!PathMapIdle(idle)) return false;
+        DropPathMap();
+        return true;
+    }
+
+    // A new dictionary, not Clear(): Clear keeps the bucket and entry arrays at their full size.
+    private void DropPathMap()
+    {
+        _pathToDoc = new Dictionary<string, (int Seg, int Local)>(StringComparer.Ordinal);
+        _pathMapBuilt = false;
     }
 
     public void Dispose()

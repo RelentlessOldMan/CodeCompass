@@ -56,9 +56,11 @@ public static class ServerContext
     // and a timer-less CancellationTokenSource is cheap to drop.
     private static void CancelInFlight() => Interlocked.Exchange(ref _shutdownCts, new CancellationTokenSource()).Cancel();
 
-    // Idle-eviction of the (large) semantic analyzers: a background timer drops them after a stretch
-    // with no semantic query so a long session doesn't pin hundreds of MB / GB it's no longer using.
+    // Idle release (see IdleRelease): a background timer hands back what the server holds only to go faster - the
+    // semantic analyzers, the sidecar cache, the write-side path maps - after a stretch without use, so a long session
+    // (one of many open at once) doesn't pin hundreds of MB / GB it's no longer using.
     private static long _lastSemanticUseMs;
+    private static long _lastQueryMs;
     private static Timer? _evictTimer;
 
     // Linked external roots (see LinkStore): each is an independently-built index opened read-only and
@@ -837,6 +839,7 @@ public static class ServerContext
         // Capture the teardown token BEFORE waiting: a re-point/shutdown re-arms ShutdownToken, so re-reading it after
         // the wait would hand this (now stale) callback an uncancelled token and run it to completion.
         var ct = ShutdownToken;
+        ArmIdleRelease();
         try { BuildGate.Wait(ct); } catch (OperationCanceledException) { return; }
         SegmentedIndex? nt = null;
         SegmentedSymbolIndex? ns = null;
@@ -1072,6 +1075,7 @@ public static class ServerContext
         var teardown = ShutdownToken;
         using var linkedCts = requestCt.CanBeCanceled ? CancellationTokenSource.CreateLinkedTokenSource(teardown, requestCt) : null;
         var ct = linkedCts?.Token ?? teardown;
+        TouchQuery();
         EnsureStartedLocked();
         MaybePromoteToOwner();  // take over live indexing if the session that held it has exited
         MaybeReloadExternal();  // another process (session / terminal command) committed a write -> serve it, not a stale copy
@@ -1273,40 +1277,112 @@ public static class ServerContext
         cs?.Dispose();
     }
 
-    // Stamp semantic use and make sure the eviction timer is running (armed once, on first semantic use).
+    // Stamp semantic use / any query, and make sure the idle-release timer is running (armed once, on first use).
     private static void TouchSemantic()
     {
         Volatile.Write(ref _lastSemanticUseMs, Environment.TickCount64);
-        if (_evictTimer is not null) return;
+        ArmIdleRelease();
+    }
+
+    private static void TouchQuery()
+    {
+        Volatile.Write(ref _lastQueryMs, Environment.TickCount64);
+        ArmIdleRelease();
+    }
+
+    private static void ArmIdleRelease()
+    {
+        if (Volatile.Read(ref _evictTimer) is not null) return;
         int idleMin = CodeCompassConfig.SemanticIdleMinutes();
-        if (idleMin <= 0) return; // eviction disabled -> keep resident
+        if (idleMin <= 0) return; // idle release disabled -> keep resident
         long periodMs = Math.Clamp(idleMin * 60_000L / 4, 15_000L, 60_000L); // check a few times per window
-        _evictTimer = new Timer(_ => EvictIdleAnalyzers(), null, periodMs, periodMs);
+        var timer = new Timer(_ => { try { IdleRelease(TimeSpan.FromMinutes(idleMin)); } catch { /* next tick */ } });
+        if (Interlocked.CompareExchange(ref _evictTimer, timer, null) is null) timer.Change(periodMs, periodMs);
+        else timer.Dispose(); // another thread armed it first
+    }
+
+    // Hand back what has gone unused for `idle`: the semantic analyzers (no semantic query), the sidecar cache (no query
+    // at all) and each index's write-side path map (no write). Then, if anything went, one compacting gen2 collection:
+    // an idle process allocates almost nothing, so without it nothing ever collects and the dropped model - GBs on a
+    // Roslyn-size repo - stays committed (measured: private bytes flat after an eviction). Runs on the timer thread, so
+    // the pause lands on an idle server, not a query. Returns whether anything was released.
+    private static bool IdleRelease(TimeSpan idle)
+    {
+        long idleMs = (long)idle.TotalMilliseconds;
+        bool analyzer = EvictIdleAnalyzers(idleMs);
+        long sidecarBytes = Environment.TickCount64 - Volatile.Read(ref _lastQueryMs) >= idleMs ? SidecarCache.Release() : 0;
+        int pathMaps = ReleaseIdlePathMaps(idle);
+        if (!analyzer && sidecarBytes == 0 && pathMaps == 0) return false;
+        GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+        var what = new List<string>();
+        if (analyzer) what.Add("the semantic analyzer");
+        if (sidecarBytes > 0) what.Add($"{sidecarBytes / (1024 * 1024)} MB of cached sidecars");
+        if (pathMaps > 0) what.Add($"{pathMaps} index path map(s)");
+        Log.For(Root).Info($"released idle memory ({string.Join(", ", what)}) after ~{idle.TotalMinutes:0} min unused");
+        return true;
     }
 
     // Drop the semantic analyzers if they've gone unused past the idle window, freeing their (large)
     // in-memory models. Takes the write lock so it can't dispose an analyzer mid-query (find_references
     // holds the read lock for its whole duration); the analyzers rebuild lazily on the next access.
-    private static void EvictIdleAnalyzers()
+    private static bool EvictIdleAnalyzers(long idleMs)
     {
-        int idleMin = CodeCompassConfig.SemanticIdleMinutes();
-        if (idleMin <= 0) return;
-        long idleMs = idleMin * 60_000L;
-        if (Environment.TickCount64 - Volatile.Read(ref _lastSemanticUseMs) < idleMs) return;
-        if (_csharp is null) return;
+        if (Environment.TickCount64 - Volatile.Read(ref _lastSemanticUseMs) < idleMs) return false;
+        if (_csharp is null) return false;
 
         RoslynCSharpAnalyzer? cs;
         Rw.EnterWriteLock();
         try
         {
-            if (Environment.TickCount64 - Volatile.Read(ref _lastSemanticUseMs) < idleMs) return; // used just now
+            if (Environment.TickCount64 - Volatile.Read(ref _lastSemanticUseMs) < idleMs) return false; // used just now
             cs = _csharp;
-            if (cs is null) return;
+            if (cs is null) return false;
             _csharp = null;
         }
         finally { Rw.ExitWriteLock(); }
-        cs?.Dispose(); // outside the lock; they're detached and unreachable now
-        Log.For(Root).Info($"evicted idle semantic analyzer(s) after ~{idleMin} min unused to free memory");
+        cs.Dispose(); // outside the lock; it's detached and unreachable now
+        return true;
+    }
+
+    // The path maps are touched only by writes, and every write holds BuildGate - so take it (without waiting: a write in
+    // progress means the map is in use) and release each index's map that no write has needed for `idle`. Only when one
+    // looks idle, and never waiting for the read lock while holding the gate: a reload that finds BuildGate busy takes it
+    // for this session's own write and skips, so holding it on every tick (or behind a long query) cost a stale answer.
+    private static int ReleaseIdlePathMaps(TimeSpan idle)
+    {
+        if (!TextIndexes(wait: true)!.Any(t => t.PathMapIdle(idle))) return 0;
+        if (!BuildGate.Wait(0)) return 0;
+        try
+        {
+            int n = 0;
+            foreach (var t in TextIndexes(wait: false) ?? []) if (t.ReleasePathMapIfIdle(idle)) n++;
+            return n;
+        }
+        finally { BuildGate.Release(); }
+    }
+
+    // The primary and linked text indexes, read under the read lock; null when !wait and the lock isn't free right now.
+    private static List<SegmentedIndex>? TextIndexes(bool wait)
+    {
+        if (wait) Rw.EnterReadLock();
+        else if (!Rw.TryEnterReadLock(0)) return null;
+        try
+        {
+            var texts = new List<SegmentedIndex>();
+            if (_text is not null) texts.Add(_text);
+            foreach (var lr in _linked) texts.Add(lr.Text);
+            return texts;
+        }
+        finally { Rw.ExitReadLock(); }
+    }
+
+    /// <summary>Test seam: run the idle release now with the given idle window.</summary>
+    internal static bool RunIdleReleaseNow(TimeSpan idle) => IdleRelease(idle);
+
+    /// <summary>Test seam: is the primary index's write-side path map built?</summary>
+    internal static bool PrimaryPathMapResidentForTest
+    {
+        get { Rw.EnterReadLock(); try { return _text?.PathMapResident ?? false; } finally { Rw.ExitReadLock(); } }
     }
 
     /// <summary>Test seam: are the semantic analyzers currently resident?</summary>
@@ -1790,6 +1866,7 @@ public static class ServerContext
         // (blocking the watcher's Dispose barrier, and building the new root's tree from an old root's event).
         var ct = ShutdownToken;
         int epoch = Volatile.Read(ref _epoch);
+        ArmIdleRelease(); // a write builds the path map: make sure an owner nobody queries still hands it back
         if (CaptureIfBusy(batch)) return;
         if (_state != IndexState.Ready) return;
 

@@ -16,6 +16,8 @@
        required IndexerContentVersion bump. -->
   <ItemGroup>
     <InternalsVisibleTo Include="CodeCompass.Core.Tests" />
+    <!-- The server hands idle caches back (SidecarCache.Release). -->
+    <InternalsVisibleTo Include="CodeCompass.Mcp" />
   </ItemGroup>
 
   <!-- The TRACE32 PRACTICE (.cmm) grammar isn't in TreeSitter.DotNet, so ship the vendored, pre-built

@@ -258,4 +258,24 @@ public class LexicalSpanFilterTests
         Assert.True(accept(new CodeCompass.Core.Indexing.SearchMatch("use.c", 1, 9, "int y = compute17(1);")));
         Assert.Equal(1, filter.FilesClassified);
     }
+
+    // The name search visits candidate files one at a time, so a query only ever needs the current file's spans. Caching
+    // every file's spans and token positions for the whole query held them all at once - on a broad name over a big tree,
+    // thousands of files' worth. Only the current file is held, and a file classified earlier still answers correctly.
+    [Fact]
+    public void ClassifyingManyFiles_HoldsOnlyTheCurrentFile()
+    {
+        using var repo = new TempRepo();
+        for (int i = 0; i < 20; i++) repo.Write($"f{i}.c", "// widget\nint widget(void);\n");
+        var filter = new LexicalSpanFilter("widget");
+        for (int i = 0; i < 20; i++)
+        {
+            var p = System.IO.Path.Combine(repo.Root, $"f{i}.c");
+            Assert.True(filter.IsInCommentOrString(p, 1, 4));
+            Assert.False(filter.IsInCommentOrString(p, 2, 5));
+        }
+        Assert.Equal(20, filter.FilesClassified);
+        Assert.Equal(1, filter.FilesHeld);
+        Assert.True(filter.IsInCommentOrString(System.IO.Path.Combine(repo.Root, "f0.c"), 1, 4)); // revisited: re-read, same answer
+    }
 }

@@ -225,4 +225,57 @@ public class WatcherTests
 
         Assert.False(fired.Wait(TimeSpan.FromSeconds(3)), "watcher reacted to an ignored directory");
     }
+
+    // A flush slower than the max wait (a big reindex under a sync storm): each new event then set the timer due NOW, and
+    // every firing parked a pool thread on the flush lock - 2 -> 202 threads in three minutes on a replica, each holding
+    // its stack, until the pool starved. Only one flush runs; the rest return, and what arrived meanwhile is delivered by
+    // the next one.
+    [Fact]
+    public void Watcher_SlowFlushUnderAStorm_ParksNoThreads_AndLosesNoEvents()
+    {
+        using var repo = new TempRepo();
+        using var release = new ManualResetEventSlim(false);
+        using var firstEntered = new ManualResetEventSlim(false);
+        var delivered = new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
+        int flushes = 0;
+        using var watcher = new RepositoryWatcher(repo.Root, batch =>
+        {
+            foreach (var p in batch.ChangedFullPaths) delivered[p] = true;
+            if (Interlocked.Increment(ref flushes) == 1) { firstEntered.Set(); release.Wait(TimeSpan.FromSeconds(30)); }
+        }, debounceMs: 20);
+        watcher.MaxWaitMsForTest = 20;
+
+        watcher.RecordForTest(Path.Combine(repo.Root, "first.cs"));
+        Assert.True(firstEntered.Wait(TimeSpan.FromSeconds(10)), "the first flush never ran");
+        int peakInside = 0;
+        for (int i = 0; i < 100; i++)
+        {
+            watcher.RecordForTest(Path.Combine(repo.Root, $"storm{i}.cs"));
+            Thread.Sleep(10);
+            peakInside = Math.Max(peakInside, watcher.FlushCallbacksInside);
+        }
+        Assert.True(peakInside <= 2, $"{peakInside} timer callbacks were inside Flush at once (one flush runs; the rest must leave)");
+
+        release.Set();
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (delivered.Count < 101 && DateTime.UtcNow < deadline) Thread.Sleep(20);
+        Assert.Equal(101, delivered.Count); // the storm that arrived during the slow flush still got delivered
+    }
+
+    // A sync of millions of files held every path until the debounce ran out. Past the cap the batch is delivered NOW, as
+    // paths - not turned into a full reconcile: a network share or huge repo doesn't auto-reconcile, so that would drop
+    // the changes and leave the index stale.
+    [Fact]
+    public void Watcher_PendingReachesTheCap_FlushesThePathsNow()
+    {
+        using var repo = new TempRepo();
+        ChangeBatch? got = null;
+        using var flushed = new ManualResetEventSlim(false);
+        using var watcher = new RepositoryWatcher(repo.Root, b => { got = b; flushed.Set(); }, debounceMs: 60_000);
+        for (int i = 0; i < RepositoryWatcher.MaxPendingPaths; i++)
+            watcher.RecordForTest(Path.Combine(repo.Root, $"f{i}.cs"));
+        Assert.True(flushed.Wait(TimeSpan.FromSeconds(15)), "no flush at the cap (the debounce is a minute)");
+        Assert.False(got!.FullReconcile);
+        Assert.Equal(RepositoryWatcher.MaxPendingPaths, got.ChangedFullPaths.Count);
+    }
 }

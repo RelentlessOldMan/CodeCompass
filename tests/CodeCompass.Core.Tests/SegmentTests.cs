@@ -97,4 +97,29 @@ public class SegmentTests
         Assert.Throws<InvalidDataException>(
             () => Varint.Read(new byte[] { 0x80, 0x80, 0x80, 0x80, 0x80, 0x80 }, ref offset));
     }
+
+    // The build flushes a segment when ApproxBytes reaches its budget, so the estimate is what keeps a build's memory
+    // inside it. It charged 5 bytes per (term, doc) pair and nothing per term - but each new term costs a dictionary
+    // entry, a List object and its array (~100 bytes), so a segment of mostly-new terms (a fresh worker, source with
+    // many rare identifiers) held about twice its budget. Compared against what the builder really allocates.
+    [Theory]
+    [InlineData(300, 2_000_000)] // mostly new terms per doc (a wide trigram space)
+    [InlineData(300, 20_000)]    // terms shared by many docs (long postings)
+    public void ApproxBytes_TracksWhatTheBuilderHolds(int trigramsPerDoc, int trigramSpace)
+    {
+        var rng = new System.Random(11);
+        var docs = Enumerable.Range(0, 2000).Select(_ =>
+            Enumerable.Range(0, trigramsPerDoc).Select(_ => (long)rng.Next(trigramSpace)).Distinct().ToArray()).ToList();
+        var paths = Enumerable.Range(0, docs.Count).Select(i => $"src/dir{i % 50}/file{i}.cs").ToList();
+
+        var b = new SegmentBuilder();
+        long before = System.GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < docs.Count; i++) b.AddDocument(paths[i], docs[i]);
+        long allocated = System.GC.GetAllocatedBytesForCurrentThread() - before;
+
+        // Allocation also counts the arrays a growing List or Dictionary left behind (doubling: about as much again as the
+        // final arrays), so what's held is roughly a third to all of it; the estimate must land there, not far below.
+        Assert.True(b.ApproxBytes >= allocated / 3 && b.ApproxBytes <= allocated * 1.2,
+                    $"ApproxBytes {b.ApproxBytes:N0} vs {allocated:N0} allocated");
+    }
 }

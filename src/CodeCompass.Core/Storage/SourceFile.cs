@@ -37,23 +37,11 @@ public static class SourceFile
         {
             var bytes = new byte[len];
             int got = fs.ReadAtLeast(bytes, bytes.Length, throwOnEndOfStream: false);
-            if (got == bytes.Length && fs.ReadByte() < 0) return Decode(bytes.AsSpan(0, got));
+            if (got == bytes.Length && fs.ReadByte() < 0) return Text.TextDecoder.FromBytes(bytes.AsSpan(0, got));
             fs.Position = start; // the file changed size while we read it: take the streaming path from the start
         }
         using var reader = new StreamReader(fs, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
         return reader.ReadToEnd();
-    }
-
-    // StreamReader's detectEncodingFromByteOrderMarks, applied to the whole file: UTF-16 BE/LE, UTF-32 LE/BE, UTF-8 BOMs.
-    private static string Decode(ReadOnlySpan<byte> b)
-    {
-        if (b.Length >= 2 && b[0] == 0xFE && b[1] == 0xFF) return Encoding.BigEndianUnicode.GetString(b[2..]);
-        if (b.Length >= 2 && b[0] == 0xFF && b[1] == 0xFE)
-            return b.Length >= 4 && b[2] == 0 && b[3] == 0 ? Encoding.UTF32.GetString(b[4..]) : Encoding.Unicode.GetString(b[2..]);
-        if (b.Length >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF) return Encoding.UTF8.GetString(b[3..]);
-        if (b.Length >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 0xFE && b[3] == 0xFF)
-            return new UTF32Encoding(bigEndian: true, byteOrderMark: false).GetString(b[4..]);
-        return Encoding.UTF8.GetString(b);
     }
 
     /// <summary>Stream a source file line by line, BOM-aware, with a network-tuned buffer when

@@ -157,4 +157,39 @@ public class SegmentedIndexTests
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    // The path -> doc map (every live path, ~200 B each: 15-30 MB on a 66k-150k-file repo) exists only for writes. It was
+    // built on a session's first edit and kept for the life of the process; an idle index now hands it back, and the next
+    // write rebuilds it from the mapped segments with the same result.
+    [Fact]
+    public void PathMap_ReleasedWhenIdle_AndRebuiltCorrectlyOnTheNextWrite()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class Alpha {}");
+        repo.Write("b.cs", "class Beta {}");
+        var dir = NewTempDir();
+        try
+        {
+            using var idx = Build(repo, dir, 1 << 20);
+            idx.RemovePath("a.cs"); // a write builds the map
+            idx.Flush();
+            Assert.True(idx.PathMapResident);
+
+            Assert.False(idx.ReleasePathMapIfIdle(TimeSpan.FromHours(1)), "used just now: kept");
+            Assert.True(idx.PathMapResident);
+            Assert.True(idx.ReleasePathMapIfIdle(TimeSpan.Zero));
+            Assert.False(idx.PathMapResident);
+            Assert.False(idx.ReleasePathMapIfIdle(TimeSpan.Zero), "nothing left to release");
+
+            idx.RemovePath("b.cs"); // rebuilt from the segments, honouring the earlier tombstone
+            repo.Write("c.cs", "class Gamma {}"); // search verifies hits against the file on disk
+            idx.AddDocumentText("c.cs", "class Gamma {}");
+            idx.Flush();
+            Assert.Empty(idx.Search("Alpha"));
+            Assert.Empty(idx.Search("Beta"));
+            Assert.Single(idx.Search("Gamma"));
+            Assert.Equal(new[] { "c.cs" }, idx.AllPaths().OrderBy(p => p).ToArray());
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }

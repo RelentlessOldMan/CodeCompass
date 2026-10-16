@@ -67,6 +67,23 @@ public class CSharpConditionalRefsTests
         Assert.True(m.Success && int.Parse(m.Groups[1].Value) > 0, $"expected a lexical backfill for the guarded ref:\n{all}");
     }
 
+    // A dotted name can't resolve semantically (the CLI twin of the MCP test): C# is matched by name and said so, rather
+    // than an empty semantic pass filtering every .cs file out of the name search.
+    [Fact]
+    public void Cli_Refs_DottedName_MatchesCSharpByName_AndSaysSo()
+    {
+        var cli = TestCli.Find();
+
+        using var repo = new TempRepo();
+        repo.Write("w.cs", "namespace App { public class Widget { } }\n");
+        repo.Write("use.cs", "namespace Other { class U { object M() => new App.Widget(); } }\n");
+
+        Assert.Equal(0, RunCli(cli, "index", repo.Root, out _, out _));
+        Assert.Equal(0, RunCli(cli, "refs", repo.Root, out var stdout, out _, "App.Widget"));
+        Assert.Contains("use.cs:1:", stdout);
+        Assert.Contains("isn't a C# identifier", stdout);
+    }
+
     // The complement: a clean C# repo (no conditional compilation) must resolve semantically only - no lexical
     // backfill, no disclosure. Guards against over-firing the fallback (which would re-introduce comment/string
     // false positives the semantic pass carefully excludes).

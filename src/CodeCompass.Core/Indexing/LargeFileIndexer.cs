@@ -148,28 +148,29 @@ public static class LargeFileIndexer
             bool utf8 = ReferenceEquals(enc, Encoding.UTF8) || bomLen == 3 || bomLen == 0;
             if (!utf8) return null; // non-UTF-8: 0x0A isn't a line boundary, so no positional index (matches streaming)
 
-            var whole = new TrigramAccumulator();       // discarded; blocks carry their own Blooms
             var blockList = new List<BlockEntry>();
             using var blockBuf = new MemoryStream(BlockTargetBytes + ChunkBytes);
             long blockStartByte = 0;
             int blockStartLine = 0;
             byte[]? seamTail = null;
+            // No whole-doc trigram set (null): the caller computes the file's trigrams itself, so filling one here
+            // only cost 2-30 MB per file and a second trigram pass. Blocks carry their own Blooms.
             for (int off = 0; off < bytes.Length; off += ChunkBytes)
             {
                 int n = Math.Min(ChunkBytes, bytes.Length - off);
                 blockBuf.Write(bytes, off, n);
-                DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: false);
+                DrainFullBlocks(blockBuf, null, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: false);
             }
-            DrainFullBlocks(blockBuf, whole, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: true);
+            DrainFullBlocks(blockBuf, null, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: true);
             return blockList.Count > 0 ? new LargeFileBlocks(BloomBytes, BloomK, bomLen, blockList) : null;
         }
         catch { return null; }
     }
 
     // Close every full (>= target, line-aligned) block currently buffered; on force, close whatever
-    // remains. Each closed block feeds the whole-doc trigram accumulator (persistent carry, so cross-
+    // remains. Each closed block feeds the whole-doc trigram accumulator if given (persistent carry, so cross-
     // block trigrams are kept) and gets its own Bloom over its own trigrams.
-    private static void DrainFullBlocks(MemoryStream blockBuf, TrigramAccumulator whole, List<BlockEntry> blocks,
+    private static void DrainFullBlocks(MemoryStream blockBuf, TrigramAccumulator? whole, List<BlockEntry> blocks,
                                         ref long blockStartByte, ref int blockStartLine, ref byte[]? seamTail, int bomLen, bool force)
     {
         while (true)
@@ -192,7 +193,7 @@ public static class LargeFileIndexer
             if (cut <= 0) return; // nothing to close yet
 
             var chars = DecodeBlock(data, skip, cut - skip);
-            whole.Add(chars);
+            whole?.Add(chars);
 
             var bloom = BloomFilter.Create(BloomBytes, BloomK);
             AddTrigramsToBloom(chars, bloom);

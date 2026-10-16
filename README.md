@@ -496,18 +496,23 @@ median and the max; **refs 1st-call** is the one-time analyzer build paid on the
 
 | Repo | Lang | Files | Size | Build | search_code | find_definition | search_symbols | find_references (med) | find_references (max) | refs 1st-call |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| requests | Python | 118 | 4.9 MB | 1.9 s | 219 / 3 | 219 / 1 | 217 / 1 | 855 / 4 | 1690 / 74 | 0.7 s |
-| fmt | C++ | 207 | 3.2 MB | 1.6 s | 216 / 3 | 217 / 2 | 217 / 2 | 1033 / 11 | 1266 / 19 | 0.7 s |
-| EF Core ¹ | C# | 5,002 | 82 MB | 5.3 s | 423 / 8 | 218 / 2 | 422 / 13 | 18860 / 623 | 44555 / 23991 | 20.5 s |
-| TypeScript | TS | 72,171 | 349 MB | 26.8 s | 424 / 33 | 422 / 3 | 422 / 11 | 1479 / 49 | 1941 / 509 | 1.1 s |
-| Godot | C++ | 9,937 | 196 MB | 12.5 s | 434 / 11 | 226 / 3 | 415 / 22 | 2491 / 43 | 3623 / 113 | 2.2 s |
-| Roslyn ¹ | C# | 19,980 | 372 MB | 16.7 s | 432 / 21 | 434 / 4 | 422 / 30 | 46902 / 1105 | 59792 / 18221 | 34.3 s |
-| LLVM | C/C++ | 132,213 | 1.5 GB | 57.9 s | 872 / 93 | 639 / 7 | 848 / 4 | 3034 / 141 | 4472 / 247 | 2.0 s |
-| generated C/C++ — **local** | C/C++ | 66,337 | 88 GB | 16m 54s | 1018 / 11 | 881 / 8 | 878 / 2 | 2329 / 459 | 3293 / 617 | 1.4 s |
-| generated C/C++ — **SMB/UNC** | C/C++ | 66,337 | 88 GB | 22m 11s | 2259 / 10 | 2053 / 11 | 2063 / 2 | 11600 / 1785 | 13486 / 3945 | 9.6 s |
+| requests | Python | 118 | 4.9 MB | 1.4 s | 204 / 3 | 204 / 1 | 205 / 1 | 619 / 2 | 632 / 27 | 0.3 s |
+| fmt | C++ | 207 | 3.2 MB | 1.5 s | 204 / 3 | 205 / 1 | 205 / 2 | 615 / 11 | 634 / 257 | 0.4 s |
+| EF Core ¹ ² | C# | 5,002 | 82 MB | 3.9 s | 203 / 6 | 217 / 1 | 204 / 15 | 16897 / 473 | 40086 / 22644 | 60.9 s |
+| TypeScript | TS | 72,171 | 349 MB | 23.4 s | 204 / 25 | 205 / 2 | 206 / 13 | 1023 / 251 | 1043 / 4192 | 2.4 s |
+| Godot | C++ | 9,937 | 196 MB | 10.1 s | 215 / 8 | 205 / 2 | 205 / 19 | 1845 / 127 | 1883 / 254 | 4.5 s |
+| Roslyn ¹ ² | C# | 19,980 | 372 MB | 12.1 s | 418 / 19 | 205 / 2 | 207 / 33 | 416758 / 900 | 599291 / >300000 | >300 s |
+| LLVM | C/C++ | 132,213 | 1.5 GB | 52.2 s | 204 / 34 | 205 / 1 | 410 / 73 | 1435 / 17 | 1447 / 58 | 1.1 s |
+| generated C/C++ — **local** | C/C++ | 66,337 | 88 GB | 16m 59s | 410 / 4 | 205 / 4 | 206 / 6 | 1030 / 475 | 1043 / 524 | 1.1 s |
+| generated C/C++ — **SMB/UNC** | C/C++ | 66,337 | 88 GB | 22m 21s | 409 / 2 | 205 / 3 | 206 / 5 | 3927 / 285 | 4951 / 309 | 3.9 s |
 
 ¹ The broadest names the battery picks in EF Core and Roslyn include ones declared many times over (`Add`,
 `Contains`), so their *max* is the many-declarations case described below, not a typical lookup.
+
+² C# `find_references` *cold* calls on large solutions regressed in v1.0.271, which added a check that binds
+every C# file in the solution on each cold query. That is why Roslyn's cold refs take minutes and its warm
+1st-call (and one warm max) passed the battery's 300 s timeout (`>300000`); warm repeats stay under a second.
+The next release targets it.
 
 The **generated C/C++** corpus is a synthetic stress tree — **66,337 files / ~88 GB**, with single
 source files up to **1.4 GB** — indexed once on local disk and once over an SMB/UNC share, to show

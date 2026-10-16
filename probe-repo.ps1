@@ -173,13 +173,19 @@ $symbolSet = @($symbolSet | Select-Object -Unique)
 if ($symbolSet.Count -eq 0) {
     Write-Host "no -Symbols given; auto-deriving the $AutoTop broadest symbols (approximate)..." -ForegroundColor Yellow
     $names = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($c in @([char[]]'abcdefghijklmnopqrstuvwxyz_0123456789')) {
+    # An even share per query character: the symbols listing comes back in index storage order (name-sorted within a
+    # segment), so filling the pool from the first queries would pick only names starting with "A" - and which ones
+    # would follow the segment layout, not the code.
+    $prefixes = @([char[]]'abcdefghijklmnopqrstuvwxyz_0123456789')
+    $perPrefix = [math]::Max(1, [math]::Ceiling($AutoPool / $prefixes.Count))
+    foreach ($c in $prefixes) {
         if ($names.Count -ge $AutoPool) { break }
         $r = Invoke-Sampled @('symbols', $Repo, "$c")
+        $taken = 0
         foreach ($ln in ($r.Stdout -split "`n")) {
             if ($ln -match ':\d+:\d+:\s+\S+\s+(\S+)\s*$') {
-                [void]$names.Add($Matches[1])
-                if ($names.Count -ge $AutoPool) { break }
+                if ($names.Add($Matches[1])) { $taken++ }
+                if ($taken -ge $perPrefix -or $names.Count -ge $AutoPool) { break }
             }
         }
     }

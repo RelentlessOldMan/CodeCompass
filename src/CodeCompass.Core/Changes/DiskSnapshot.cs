@@ -199,8 +199,9 @@ public sealed class DiskSnapshot : IDisposable
         var old = _base;
         _base = new SnapshotBaseReader(full);
         old?.Dispose();
-        _overlay.Clear();
-        _removed.Clear();
+        // Folded into the base: the overlay is empty again, so hand back the capacity the burst before this grew it to.
+        _overlay.Clear(); _overlay.TrimExcess();
+        _removed.Clear(); _removed.TrimExcess();
         CleanupOrphans(name);
     }
 

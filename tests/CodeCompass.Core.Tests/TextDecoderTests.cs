@@ -62,6 +62,40 @@ public class TextDecoderTests
         Assert.Null(ex);
         AssertMatchesReadAllText(bytes);
     }
+
+    [Fact]
+    public void Utf32_WithBom_BothEndians_MatchReadAllText()
+    {
+        AssertMatchesReadAllText(new UTF32Encoding(false, true).GetPreamble().Concat(new UTF32Encoding(false, false).GetBytes("a€😀\nz")));
+        AssertMatchesReadAllText(new UTF32Encoding(true, true).GetPreamble().Concat(new UTF32Encoding(true, false).GetBytes("a€😀\nz")));
+    }
+
+    [Fact]
+    public void LargeText_WithInvalidSequencesAcrossBufferBoundaries_MatchesReadAllText()
+    {
+        // StreamReader decodes in buffer-sized chunks; a one-pass decode must still agree where an invalid or
+        // multibyte sequence straddles a chunk edge.
+        var rng = new Random(7);
+        var bytes = new byte[3 * 1024 * 1024 + 17];
+        for (int i = 0; i < bytes.Length; i++)
+            bytes[i] = (i % 97) switch { 0 => 0xE2, 1 => 0x82, 2 => 0xAC, 50 => (byte)(0x80 + rng.Next(64)), 51 => 0xC3, _ => (byte)('a' + rng.Next(26)) };
+        AssertMatchesReadAllText(bytes);
+    }
+
+    [Fact]
+    public void FromBytes_AllocatesAboutOneCopyOfTheText()
+    {
+        // The build's read budget reserves 3x a file's size (raw bytes + decode). StreamReader.ReadToEnd decoded into a
+        // growing StringBuilder and then copied it into the final string - about two text copies (~4x the bytes for
+        // ASCII) on top of the raw bytes, past the reservation. A one-pass decode allocates just the string (~2x).
+        var bytes = Encoding.ASCII.GetBytes(new string('x', 4 * 1024 * 1024));
+        TextDecoder.FromBytes(bytes); // warm up
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        var s = TextDecoder.FromBytes(bytes);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Equal(bytes.Length, s.Length);
+        Assert.True(allocated < 2.5 * bytes.Length, $"allocated {allocated:N0} bytes to decode {bytes.Length:N0}");
+    }
 }
 
 internal static class ByteConcatExtensions

@@ -378,4 +378,48 @@ public class RoslynSemanticTests
         var refs = analyzer.FindReferences("Equals", max: 1000);
         return (refs.Count(r => r.LineText.Contains("// CALL")), analyzer.ReferenceSearches);
     }
+
+    // The framework reference set (every assembly on the TPA list - in the self-contained server, the whole app folder,
+    // ~80 MB) lives for the process. MetadataReference.CreateFromFile copied each file into private native memory, so
+    // every session that ever ran a C# query held its own ~80 MB copy for good. Mapped from the files instead, the pages
+    // are file-backed: shared between sessions and reclaimable, not private.
+    [Fact]
+    public void FrameworkReferences_AreMappedFromTheirFiles_NotCopiedIntoPrivateMemory()
+    {
+        var tpa = ((string)System.AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(System.IO.Path.PathSeparator)
+            .Where(p => p.EndsWith(".dll", System.StringComparison.OrdinalIgnoreCase) && System.IO.File.Exists(p)).ToList();
+        long tpaBytes = tpa.Sum(p => new System.IO.FileInfo(p).Length);
+        Assert.True(tpaBytes > 20L * 1024 * 1024, $"too few framework bytes to measure ({tpaBytes:N0})");
+
+        using var proc = System.Diagnostics.Process.GetCurrentProcess();
+        System.GC.Collect(); System.GC.WaitForPendingFinalizers(); System.GC.Collect();
+        proc.Refresh();
+        long before = proc.PrivateMemorySize64;
+        var refs = RoslynCSharpAnalyzer.BuildFrameworkReferences();
+        foreach (var r in refs.OfType<Microsoft.CodeAnalysis.PortableExecutableReference>()) r.GetMetadata(); // force the load
+        proc.Refresh();
+        long grew = proc.PrivateMemorySize64 - before;
+        System.GC.KeepAlive(refs);
+
+        Assert.True(refs.Count >= tpa.Count / 2, $"only {refs.Count} of {tpa.Count} references built");
+        Assert.True(grew < tpaBytes / 3, $"building the references grew private memory by {grew:N0} bytes for {tpaBytes:N0} bytes of assemblies");
+    }
+
+    // A tree with no C# (llvm, a C corpus) has nothing for the semantic pass to bind: it must not load the framework
+    // reference set or compile an empty project against it on every find_references.
+    [Fact]
+    public void NoCSharpFiles_TheModelLoadsNoFrameworkReferences()
+    {
+        using var repo = new TempRepo();
+        repo.Write("calc.cpp", "int square(int x) { return x * x; }");
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        Assert.Empty(analyzer.FindReferences("square"));
+        Assert.Equal(0, analyzer.MetadataReferenceCount);
+
+        using var withCs = new TempRepo();
+        withCs.Write("A.cs", "class A { void M() { M(); } }");
+        using var csAnalyzer = new RoslynCSharpAnalyzer(withCs.Root);
+        Assert.NotEmpty(csAnalyzer.FindReferences("M"));
+        Assert.True(csAnalyzer.MetadataReferenceCount > 0);
+    }
 }

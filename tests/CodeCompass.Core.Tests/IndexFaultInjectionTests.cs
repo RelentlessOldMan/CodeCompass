@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using CodeCompass.Core.Diagnostics;
 using CodeCompass.Core.Indexing;
 using CodeCompass.Core.Storage;
@@ -155,5 +156,29 @@ public class IndexFaultInjectionTests
             Assert.Single(t1.Search("marker_victim_zq", 100));
             Assert.NotEmpty(s1.FindByName("Victim"));
         }
+    }
+
+    // Parallel.ForEach retires each worker about every 100 ms and starts a fresh one, running localInit/localFinally each
+    // time - and localFinally flushed the worker's segments. So a build wrote a segment per time slice, not per budget:
+    // 1,515 text segments for llvm, 10,370 for a 66k-file share, and every query then probes each one. Workers are now
+    // pooled and flushed once at the end (or at their budget): a build that fits the budget writes one per worker.
+    [Fact]
+    public void Build_SpanningManyTimeSlices_WritesAtMostOneSegmentPerWorker()
+    {
+        using var repo = new TempRepo();
+        for (int i = 0; i < 400; i++) repo.Write($"d{i % 20}/f{i}.cs", $"namespace N{i} {{ class C{i} {{ void M{i}() {{ }} }} }}");
+        RepositoryIndexer.OnFileStartForTests = _ => Thread.Sleep(15); // each worker outlives many ~100 ms slices
+        try
+        {
+            var (t, s, stats) = RepositoryIndexer.Build(repo.Root);
+            using (t) using (s)
+            {
+                Assert.Equal(400, t.DocumentCount);
+                Assert.True(t.SegmentCount <= stats.Cores, $"{t.SegmentCount} text segments for {stats.Cores} worker(s)");
+                Assert.True(s.SegmentCount <= stats.Cores, $"{s.SegmentCount} symbol segments for {stats.Cores} worker(s)");
+                Assert.Single(s.FindByName("M399"));
+            }
+        }
+        finally { RepositoryIndexer.OnFileStartForTests = null; }
     }
 }

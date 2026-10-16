@@ -158,4 +158,64 @@ public class SidecarCacheTests
         }
         finally { Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prev); }
     }
+
+    // A cached entry whose sidecar file is gone (the file shrank under the cutoff, was deleted, or its root was unlinked)
+    // must leave the cache: it kept counting against the budget - and holding its bytes - for the life of the process.
+    [Fact]
+    public void Get_WhenTheSidecarFileIsGone_DropsItsEntry()
+    {
+        using var repo = new TempRepo();
+        repo.Write("reg/map.h", MidText());
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+            var (t, s, _) = RepositoryIndexer.Build(repo.Root);
+            t.Dispose(); s.Dispose();
+            var dir = IndexStore.GetCacheDir(repo.Root);
+            const string rel = "reg/map.h";
+            SidecarCache.Clear();
+            var scPath = System.IO.Path.Combine(dir, PositionalSidecar.SidecarName(rel));
+            Assert.NotNull(SidecarCache.Get(scPath, rel, out _));
+            Assert.True(SidecarCache.ResidentBytes > 0);
+
+            System.IO.File.Delete(scPath);
+            Assert.Null(SidecarCache.Get(scPath, rel, out _));
+            Assert.Equal(0, SidecarCache.ResidentBytes);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prev);
+            SidecarCache.Clear();
+        }
+    }
+
+    // An idle server hands the cache back (it re-reads on the next broad query): Release reports what it freed.
+    [Fact]
+    public void Release_FreesTheResidentSet_AndReportsTheBytes()
+    {
+        using var repo = new TempRepo();
+        repo.Write("reg/map.h", MidText());
+        var prev = Environment.GetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", "1");
+            var (t, s, _) = RepositoryIndexer.Build(repo.Root);
+            t.Dispose(); s.Dispose();
+            var dir = IndexStore.GetCacheDir(repo.Root);
+            SidecarCache.Clear();
+            Assert.NotNull(SidecarCache.Get(System.IO.Path.Combine(dir, PositionalSidecar.SidecarName("reg/map.h")), "reg/map.h", out _));
+            long resident = SidecarCache.ResidentBytes;
+            Assert.True(resident > 0);
+
+            Assert.Equal(resident, SidecarCache.Release());
+            Assert.Equal(0, SidecarCache.ResidentBytes);
+            Assert.Equal(0, SidecarCache.Release()); // nothing left
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_FORCE_NETWORK", prev);
+            SidecarCache.Clear();
+        }
+    }
 }

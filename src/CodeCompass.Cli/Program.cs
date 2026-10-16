@@ -1222,9 +1222,10 @@ static int CmdRefs(string[] args)
 
     // C# references are semantic (comments/strings excluded). Note: from the CLI the Roslyn model builds fresh each
     // run; the MCP server keeps it warm across calls.
-    var csAnalyzer = new RoslynCSharpAnalyzer(root);
+    // A name the semantic pass can't resolve (App.Widget) builds no model: its C# is matched by name below.
+    using var csAnalyzer = RoslynCSharpAnalyzer.CanResolve(name) ? new RoslynCSharpAnalyzer(root) : null;
     const int maxSemantic = 200;
-    var csProbe = csAnalyzer.FindReferences(name, maxSemantic + 1); // one extra: a cut-off list must say so, not pose as complete
+    var csProbe = csAnalyzer?.FindReferences(name, maxSemantic + 1) ?? []; // one extra: a cut-off list must say so, not pose as complete
     var cs = csProbe.Take(maxSemantic).ToList();
     foreach (var s in cs)
         Console.WriteLine($"{s.RelativePath}:{s.Line}:{s.Column}: {s.LineText}");
@@ -1238,9 +1239,9 @@ static int CmdRefs(string[] args)
         Console.Out.WriteLine($"-- \"{name}\" is under {TrigramIndex.MinQueryLength} characters, too short for the text index: only C# semantic " +
                               "references were searched; C/C++ and other languages were NOT (use `search` with surrounding text).");
         // ...and that pass's own gaps, as below.
-        if (csAnalyzer.UnreadableFiles.Count > 0)
+        if (csAnalyzer?.UnreadableFiles.Count > 0)
             Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUnreadableNote(csAnalyzer.UnreadableFiles.Select(f => Path.GetRelativePath(root, f)).ToList()));
-        if (csAnalyzer.DroppedDirs > 0)
+        if (csAnalyzer?.DroppedDirs > 0)
             Console.Out.WriteLine("-- " + ReferenceMerge.CSharpDroppedDirsNote(csAnalyzer.DroppedDirs));
         Console.Error.WriteLine($"-- {cs.Count} C# semantic + 0 name-matched reference(s)");
         return 0;
@@ -1271,12 +1272,14 @@ static int CmdRefs(string[] args)
     // SILENTLY misses references guarded by conditional compilation. When any candidate .cs uses it, treat the C#
     // pass as incomplete: let .cs name matches backfill it (deduped) and disclose.
     var csConditional = SemanticCoverage.CSharpConditionalFiles(csCandidates);
-    var csUnreadable = csAnalyzer.UnreadableFiles; // absent from the semantic model -> incomplete, backfill + name them
-    int csDroppedDirs = csAnalyzer.DroppedDirs;      // folders the model's walk couldn't list: which files are missing is unknown
+    IReadOnlyList<string> csUnreadable = csAnalyzer?.UnreadableFiles ?? []; // absent from the semantic model -> incomplete, backfill + name them
+    int csDroppedDirs = csAnalyzer?.DroppedDirs ?? 0;     // folders the model's walk couldn't list: which files are missing is unknown
     // Global usings injected for SDK projects can make a name ambiguous in a legacy project's file (same rule as MCP).
-    var csClash = csAnalyzer.UsingsClash(csCandidates);
+    var csClash = csAnalyzer?.UsingsClash(csCandidates) ?? ([], []);
+    // The semantic part is done: drop the model (hundreds of MB to GBs) before the name search reads candidate files.
+    csAnalyzer?.Dispose();
     var csBackfill = new HashSet<string>(csClash.Files, StringComparer.OrdinalIgnoreCase);
-    bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0 || csDroppedDirs > 0 || csClash.Declarations.Count > 0;
+    bool csharpIncomplete = csAnalyzer is null || csConditional.Count > 0 || csUnreadable.Count > 0 || csDroppedDirs > 0 || csClash.Declarations.Count > 0;
     // Classifies comment/string spans in C#/C/C++ candidate files so the name search skips hits inside them.
     var spanFilter = new LexicalSpanFilter(name);
     var seenKeys = new HashSet<string>(StringComparer.Ordinal); // exact: on a case-sensitive tree Reg.h and reg.h differ
@@ -1310,6 +1313,7 @@ static int CmdRefs(string[] args)
 
     // Qualifiers on the answer go to STDOUT alongside the hits, so a `refs ... > out.txt` keeps them.
     if (anyCFamily || namedCFamily > 0) Console.Out.WriteLine("-- " + ReferenceMerge.CppByNameNote + ".");
+    if (csAnalyzer is null && csCandidates.Count > 0) Console.Out.WriteLine("-- " + ReferenceMerge.CSharpNotIdentifierNote(name) + ".");
     if (csConditional.Count > 0)
         Console.Out.WriteLine("-- " + ReferenceMerge.CSharpConditionalNote(
             csConditional.Select(f => Path.GetRelativePath(root, f)).ToList()));
@@ -1347,7 +1351,7 @@ static int CmdCallees(string[] args)
 
     // The in-repo methods a C# method calls, resolved semantically (C# only - the MCP find_callees twin).
     // Cold-built each run from the CLI; the MCP server keeps the analyzer warm across calls.
-    var analyzer = new RoslynCSharpAnalyzer(root);
+    using var analyzer = new RoslynCSharpAnalyzer(root);
     const int maxCallees = 100;
     var calleeProbe = analyzer.FindCallees(name, maxCallees + 1); // one extra: a cut-off list must say so, not pose as complete
     var callees = calleeProbe.Take(maxCallees).ToList();
@@ -1371,6 +1375,7 @@ static int CmdCallees(string[] args)
                 .Select(rel => Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)))))
         : (IReadOnlyList<string>)Array.Empty<string>();
     var recovered = calleeCond.Count > 0 ? analyzer.FindCalleesInInactiveBranches(name) : (IReadOnlyList<SemanticLocation>)Array.Empty<SemanticLocation>();
+    analyzer.Dispose(); // the semantic part is done: the rest only prints
     // Dedup recovered vs the semantic callees (so a call in both an active and an inactive branch isn't doubled),
     // then disclose using the count actually shown.
     var extra = new List<SemanticLocation>();

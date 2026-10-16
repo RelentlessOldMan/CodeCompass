@@ -196,6 +196,17 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         return hits;
     }
 
+    /// <summary>Whether the semantic pass can resolve <paramref name="name"/> at all: Roslyn's declaration search matches a
+    /// simple C# identifier, so a dotted (<c>App.Widget</c>), generic or operator name finds nothing - callers match C# by
+    /// name instead, without building the model (on the Roslyn repo, 2.6 GB for a guaranteed empty answer).</summary>
+    public static bool CanResolve(string name) => SyntaxFacts.IsValidIdentifier(name);
+
+    /// <summary>Metadata references the built model compiles against (test hook; 0 before a build or for a tree without C#).</summary>
+    internal int MetadataReferenceCount
+    {
+        get { lock (_gate) return _solution is not null && _projectId is not null ? _solution.GetProject(_projectId)!.MetadataReferences.Count : 0; }
+    }
+
     /// <summary>Whole-solution Roslyn reference searches run so far (test hook: the cost driver of FindReferences).</summary>
     internal int ReferenceSearches => Volatile.Read(ref _referenceSearches);
     private int _referenceSearches;
@@ -213,6 +224,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     public IReadOnlyList<SemanticLocation> FindReferences(string name, int max = 200, System.Threading.CancellationToken ct = default,
         Func<SemanticLocation, bool>? include = null)
     {
+        if (!CanResolve(name)) return Array.Empty<SemanticLocation>(); // don't build a model that can't answer
         var (solution, project) = EnsureBuilt(ct);
         var all = new List<SemanticLocation>();
 
@@ -279,6 +291,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     public IReadOnlyList<SemanticLocation> FindCallees(string name, int max = 100, System.Threading.CancellationToken ct = default,
         Func<SemanticLocation, bool>? include = null)
     {
+        if (!CanResolve(name)) return Array.Empty<SemanticLocation>(); // a method name is an identifier
         var (_, project) = EnsureBuilt(ct);
         var result = new List<SemanticLocation>();
         var compilation = project.GetCompilationAsync(ct).GetAwaiter().GetResult();
@@ -331,6 +344,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     public IReadOnlyList<SemanticLocation> FindCalleesInInactiveBranches(string name, int max = 100, System.Threading.CancellationToken ct = default,
         Func<SemanticLocation, bool>? include = null)
     {
+        if (!CanResolve(name)) return Array.Empty<SemanticLocation>(); // a method name is an identifier
         var (_, project) = EnsureBuilt(ct);
         var result = new List<SemanticLocation>();
 
@@ -481,9 +495,10 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             var workspace = new AdhocWorkspace();
             var projectId = ProjectId.CreateNewId();
 
+            // The framework references are attached after the walk, and only if it found C#: a tree without any (llvm, a
+            // C corpus) has nothing to bind, so it shouldn't load the reference set or compile against it.
             var info = ProjectInfo.Create(
                     projectId, VersionStamp.Create(), "Repo", "Repo", LanguageNames.CSharp)
-                .WithMetadataReferences(FrameworkReferences())
                 .WithCompilationOptions(new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
             var solution = workspace.CurrentSolution.AddProject(info);
@@ -535,6 +550,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                 // A folder the walk couldn't list (a share hiccup): its .cs files are missing from the model (see DroppedDirs).
                 droppedDirs += walker.DroppedDirs;
             }
+
+            if (csFiles.Count > 0) solution = solution.WithProjectMetadataReferences(projectId, FrameworkReferences());
 
             // The build injects these as an invisible generated file (obj/*.GlobalUsings.g.cs); without them every type
             // they bring in (List<T>, IReadOnlyDictionary<,>, ...) is an error type here and references through it vanish.
@@ -612,24 +629,30 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
 
     private static IReadOnlyList<MetadataReference> FrameworkReferences() => CachedFrameworkRefs.Value;
 
-    private static IReadOnlyList<MetadataReference> BuildFrameworkReferences()
+    internal static IReadOnlyList<MetadataReference> BuildFrameworkReferences()
     {
         // Reference the whole running framework so binding is as accurate as possible.
+        // Mapped, not copied: MetadataReference.CreateFromFile reads each whole file into private native memory, and this
+        // set lives for the process - ~80 MB per session that ever ran a C# query (the self-contained server's TPA list is
+        // its whole app folder). AssemblyMetadata.CreateFromFile maps the file, so the pages are file-backed: shared by
+        // every session on the box and reclaimable. Same metadata, same binding.
         var tpa = AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") as string;
         if (string.IsNullOrEmpty(tpa))
-            return new[] { MetadataReference.CreateFromFile(typeof(object).Assembly.Location) };
+            return new[] { Mapped(typeof(object).Assembly.Location) };
 
         var refs = new List<MetadataReference>();
         foreach (var path in tpa.Split(Path.PathSeparator))
         {
             if (path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) && File.Exists(path))
             {
-                try { refs.Add(MetadataReference.CreateFromFile(path)); }
+                try { refs.Add(Mapped(path)); }
                 catch { /* skip unreadable */ }
             }
         }
         return refs;
     }
+
+    private static MetadataReference Mapped(string path) => AssemblyMetadata.CreateFromFile(path).GetReference(filePath: path);
 
     private SemanticLocation ToLocation(Location location)
     {

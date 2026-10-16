@@ -134,6 +134,11 @@ public static class ReferenceMerge
         return startOk && endOk;
     }
 
+    /// <summary>Said when the name can't be resolved semantically (see <see cref="RoslynCSharpAnalyzer.CanResolve"/>), so
+    /// its C# lines came from the name search like any other language's.</summary>
+    public static string CSharpNotIdentifierNote(string name) =>
+        $"\"{name}\" isn't a C# identifier, so C# was matched by NAME (comments and strings excluded), not resolved semantically";
+
     /// <summary>What C/C++ reference lines are, said once per answer that has any.</summary>
     public const string CppByNameNote =
         "C/C++ references are matched by NAME in code (comments and strings excluded; C/C++ is not compiled), " +

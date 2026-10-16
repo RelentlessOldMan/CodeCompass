@@ -244,9 +244,11 @@ public static class CodeCompassTools
         var hits = new List<(string Line, char Kind)>();
         // The analyzer spans every root (so cross-root references resolve); under a focus only in-scope hits count -
         // filtered INSIDE the analyzer, before its `probe` cut, so out-of-scope hits can't crowd in-scope ones out.
-        var csharp = ServerContext.CSharp;
-        foreach (var s in csharp.FindReferences(name, probe, ct, s => InScope(handles, s.Root)))
-            hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
+        // A name the semantic pass can't resolve (App.Widget) gets no model at all: its C# is matched by name below.
+        var csharp = RoslynCSharpAnalyzer.CanResolve(name) ? ServerContext.CSharp : null;
+        if (csharp is not null)
+            foreach (var s in csharp.FindReferences(name, probe, ct, s => InScope(handles, s.Root)))
+                hits.Add(($"{DisplayPath(s)}:{s.Line}:{s.Column}: {s.LineText}", 'c'));
 
         // A name shorter than one trigram makes EVERY file a candidate: the name search would read the whole corpus.
         // Only the C# semantic pass (which doesn't use the index) runs; the result says so.
@@ -265,16 +267,16 @@ public static class CodeCompassTools
         // Roslyn parses with an empty preprocessor set, so it silently misses references in inactive #if/#elif
         // branches. When any candidate .cs uses conditional compilation, treat the C# pass as incomplete so .cs name
         // matches backfill it (deduped) and we disclose it.
-        var csConditional = csharp.ConditionalFiles(csCandidates, ct); // from the analyzer's text: no per-query disk re-read
+        IReadOnlyList<string> csConditional = csharp?.ConditionalFiles(csCandidates, ct) ?? []; // from the analyzer's text: no per-query disk re-read
         // .cs files the semantic model couldn't read are absent from it - incomplete, so backfill + name them.
-        var csUnreadable = csharp.UnreadableFiles;
-        int csDroppedDirs = csharp.DroppedDirs; // folders its walk couldn't list: which files are missing is unknown
+        IReadOnlyList<string> csUnreadable = csharp?.UnreadableFiles ?? [];
+        int csDroppedDirs = csharp?.DroppedDirs ?? 0; // folders its walk couldn't list: which files are missing is unknown
         // A legacy project (no ImplicitUsings) next to SDK ones: the injected global usings can make a name ambiguous in
         // its files. A clash in a declaration reaches other files (the whole C# pass is incomplete); one only in a
         // candidate's code is backfilled in that file alone.
-        var csClash = csharp.UsingsClash(csCandidates, ct);
+        var csClash = csharp?.UsingsClash(csCandidates, ct) ?? ([], []);
         var csBackfill = new System.Collections.Generic.HashSet<string>(csClash.Files, System.StringComparer.OrdinalIgnoreCase);
-        bool csharpIncomplete = csConditional.Count > 0 || csUnreadable.Count > 0 || csDroppedDirs > 0 || csClash.Declarations.Count > 0;
+        bool csharpIncomplete = csharp is null || csConditional.Count > 0 || csUnreadable.Count > 0 || csDroppedDirs > 0 || csClash.Declarations.Count > 0;
         // Per-query comment/string classifier for C#/C/C++ name matches; classifies each file once, from the text the name
         // search already read when it read the file whole (ReferenceTextSink), so the file isn't read twice.
         var spanFilter = new LexicalSpanFilter(name);
@@ -324,6 +326,7 @@ public static class CodeCompassTools
 
         var notes = new StringBuilder();
         if (qualifiedNote is not null) notes.Append(" (Note: " + qualifiedNote + ".)");
+        if (csharp is null && csCandidates.Count > 0) notes.Append(" (Note: " + ReferenceMerge.CSharpNotIdentifierNote(name) + ".)");
         if (anyCFamily || namedCFamily > 0) notes.Append(" (Note: " + ReferenceMerge.CppByNameNote + ".)");
         // C# conditional-compilation disclosure: Roslyn can't see inactive #if/#elif branches, so a semantic count may
         // miss #if-guarded references (shown by name where the backfill found them).
@@ -386,7 +389,8 @@ public static class CodeCompassTools
         // Callees are resolved across the project + linked roots (the analyzer spans them all), so a call
         // chain that crosses into a linked root is walkable; each callee is shown at its owning root.
         // The analyzer spans every root; under an active focus keep only callees whose DEFINITION is in scope.
-        var callees = ServerContext.CSharp.FindCallees(name, maxResults + 1, ct, c => InScope(handles, c.Root)).ToList();
+        // Not an identifier (App.Widget.Run): nothing can resolve, so don't build the model to find that out.
+        var callees = !RoslynCSharpAnalyzer.CanResolve(name) ? [] : ServerContext.CSharp.FindCallees(name, maxResults + 1, ct, c => InScope(handles, c.Root)).ToList();
         // Conditional-compilation handling (see find_references): FindCallees walks the method body via Roslyn,
         // which parses with an empty preprocessor set and can't see inactive #if/#elif branches - so a call
         // guarded by conditional compilation is SILENTLY missing (the forward/reverse asymmetry: refs finds the
@@ -404,7 +408,7 @@ public static class CodeCompassTools
                     var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
                     calleeCsCands.Add(full); calleeCsDisplay[full] = DisplayPath(h, rel);
                 }
-        var calleeCond = ServerContext.CSharp.ConditionalFiles(calleeCsCands, ct);
+        IReadOnlyList<string> calleeCond = RoslynCSharpAnalyzer.CanResolve(name) ? ServerContext.CSharp.ConditionalFiles(calleeCsCands, ct) : [];
         var recovered = calleeCond.Count > 0
             ? ServerContext.CSharp.FindCalleesInInactiveBranches(name, maxResults + 1, ct, r => InScope(handles, r.Root)).ToList()
             : (IReadOnlyList<SemanticLocation>)System.Array.Empty<SemanticLocation>();

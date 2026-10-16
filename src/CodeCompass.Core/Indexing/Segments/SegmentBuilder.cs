@@ -31,16 +31,21 @@ public sealed class SegmentBuilder
     {
         int id = _paths.Count;
         _paths.Add(relPath);
+        int newTerms = 0;
         foreach (var t in distinctTrigrams)
         {
             if (!_postings.TryGetValue(t, out var list))
             {
                 list = new List<int>();
                 _postings[t] = list;
+                newTerms++;
             }
             list.Add(id); // ids added in increasing order -> lists stay sorted
         }
-        ApproxBytes += (long)distinctTrigrams.Length * 5 + relPath.Length * 2 + 24;
+        // A new term holds a dictionary entry, a List and its first array (~96 bytes); each posting an int with the List's
+        // growth slack (~6). Charging the postings alone undercounted a segment of mostly-new terms about 2x, and the build
+        // flushes on this number - so its memory ran past the budget it promised.
+        ApproxBytes += (long)newTerms * 96 + (long)distinctTrigrams.Length * 6 + relPath.Length * 2 + 24;
     }
 
     public void WriteTo(string filePath)

@@ -287,6 +287,57 @@ public class McpToolsTests
         finally { ServerContext.Init(repo.Root); } // reset shared static state
     }
 
+    // A dotted name (App.Widget) isn't a C# identifier: Roslyn's declaration search matches simple names only, so the
+    // semantic pass could never find it - yet it built the whole model first (2.6 GB peak on the Roslyn repo) and then,
+    // trusting that empty pass, filtered every .cs file out of the name search. The C# files are matched by name instead,
+    // and the answer says so.
+    [Fact]
+    public void FindReferences_DottedName_MatchesCSharpByName_WithoutBuildingTheModel()
+    {
+        using var repo = NewIndexedRepo();
+        try
+        {
+            repo.Write("src/Use.cs", "namespace Other { class U { object M() => new App.Widget(); } }");
+            CodeCompassTools.Reindex();
+            ServerContext.EvictSemanticAnalyzersNow();
+
+            var result = CodeCompassTools.FindReferences("App.Widget");
+            Assert.Contains("src/Use.cs:1:", result);
+            Assert.Contains("isn't a C# identifier", result);
+            Assert.False(ServerContext.HasResidentSemanticAnalyzers(), "no semantic model for a name it can't resolve");
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    // An idle server hands back what it holds only to go faster: the semantic model, the sidecar cache and the write-side
+    // path map - then collects, so the memory actually returns to the OS (an idle process allocates almost nothing, so no
+    // collection ever ran: a dropped model stayed committed). Not before the idle window, and results don't change.
+    [Fact]
+    public void IdleRelease_HandsBackTheModelAndPathMap_OnlyOnceIdle()
+    {
+        using var repo = NewIndexedRepo();
+        try
+        {
+            repo.Write("src/Extra.cs", "namespace App { public class Extra { } }");
+            ServerContext.OnChangesForTest(new CodeCompass.Core.Changes.ChangeBatch(new[] { repo.FullPath("src/Extra.cs") }, FullReconcile: false));
+            Assert.True(ServerContext.PrimaryPathMapResidentForTest, "a write builds the path map");
+            var first = CodeCompassTools.FindReferences("Run");
+            Assert.True(ServerContext.HasResidentSemanticAnalyzers());
+
+            Assert.False(ServerContext.RunIdleReleaseNow(TimeSpan.FromHours(1)), "used just now: nothing released");
+            Assert.True(ServerContext.HasResidentSemanticAnalyzers());
+            Assert.True(ServerContext.PrimaryPathMapResidentForTest);
+
+            Assert.True(ServerContext.RunIdleReleaseNow(TimeSpan.Zero));
+            Assert.False(ServerContext.HasResidentSemanticAnalyzers());
+            Assert.False(ServerContext.PrimaryPathMapResidentForTest);
+
+            Assert.Equal(first, CodeCompassTools.FindReferences("Run"));
+            Assert.Contains("src/Extra.cs", CodeCompassTools.SearchCode("Extra"));
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
     [Fact]
     public void SearchCode_SignalsTruncationVsExactCount()
     {

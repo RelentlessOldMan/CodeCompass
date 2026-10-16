@@ -15,23 +15,26 @@ namespace CodeCompass.Semantics;
 ///
 /// <para>Bias on ANY uncertainty (parse/read failure, a construct the scanner doesn't model): DO NOT suppress.
 /// Keeping a stray comment/string hit is cheaper than dropping a real reference - find_references must never go
-/// quiet on a genuine use. Spans are computed once per path and cached for the lifetime of a single query.</para>
+/// quiet on a genuine use. Spans are computed once per path; only the current file's are held, as the name search
+/// classifies a file's hits together and then moves on.</para>
 /// </summary>
 public sealed class LexicalSpanFilter
 {
     // Half-open spans (startLine, startChar, endLine, endChar), all 0-based - matching Roslyn's LinePosition and
     // the index's 1-based line/col after a -1 shift. Per file, sorted by start and non-overlapping (a single lex
     // never nests a comment inside a string or vice-versa), so a point lands in at most one span.
-    // Keyed by EXACT path: on a case-sensitive tree (Linux Samba share, WSL) Reg.h and reg.h are different files, and the
-    // paths all come from one index, so their spelling is consistent.
-    private readonly Dictionary<string, (int sl, int sc, int el, int ec)[]> _cache = new(StringComparer.Ordinal);
+    // Matched by EXACT path: on a case-sensitive tree (Linux Samba share, WSL) Reg.h and reg.h are different files, and
+    // the paths all come from one index, so their spelling is consistent. One file at a time: holding every candidate's
+    // spans and token positions for the whole query kept thousands of files' worth on a broad name.
+    private string? _currentPath;
+    private (int sl, int sc, int el, int ec)[] _currentSpans = System.Array.Empty<(int, int, int, int)>();
 
     // The symbol this query is about, and where it occurs in each file's CURRENT text (0-based line, col). The hits being
     // classified carry the INDEX's coordinates; if the file changed since, those coordinates may now land inside a
     // comment/string that wasn't there - suppressing a real reference. A position where the token no longer sits is
     // stale: keep the hit (fail open).
     private readonly string? _token;
-    private readonly Dictionary<string, HashSet<(int, int)>> _occurrences = new(StringComparer.Ordinal);
+    private HashSet<(int, int)>? _currentOccurrences;
 
     public LexicalSpanFilter() { }
 
@@ -39,7 +42,10 @@ public sealed class LexicalSpanFilter
     public LexicalSpanFilter(string token) => _token = string.IsNullOrEmpty(token) ? null : token;
 
     /// <summary>Files read and classified so far (test hook: each one is a whole-file read plus a lex).</summary>
-    internal int FilesClassified => _cache.Count;
+    internal int FilesClassified { get; private set; }
+
+    /// <summary>Files whose spans are held right now (test hook).</summary>
+    internal int FilesHeld => _currentPath is null ? 0 : 1;
 
     /// <summary>Files this filter had to read itself (test hook): a file whose text was <see cref="Offer"/>ed isn't one.</summary>
     internal int FilesReadFromDisk { get; private set; }
@@ -69,7 +75,7 @@ public sealed class LexicalSpanFilter
         if (spans.Length == 0) return false;
 
         int l = line1Based - 1, c = column1Based - 1;
-        if (_token is not null && (!_occurrences.TryGetValue(path, out var occ) || !occ.Contains((l, c))))
+        if (_token is not null && _currentOccurrences?.Contains((l, c)) != true)
             return false; // the index's position no longer holds the token (file changed): don't trust the classification
         // Binary-search the last span whose start <= (l,c); since spans are disjoint and sorted, only it can
         // contain the point.
@@ -88,22 +94,24 @@ public sealed class LexicalSpanFilter
 
     private (int sl, int sc, int el, int ec)[] SpansFor(string path)
     {
-        if (_cache.TryGetValue(path, out var cached)) return cached;
+        if (string.Equals(_currentPath, path, StringComparison.Ordinal)) return _currentSpans;
         (int, int, int, int)[] spans;
+        HashSet<(int, int)>? occurrences = null;
         try
         {
             string text;
             if (_offered is { } o && string.Equals(o.Path, path, StringComparison.Ordinal)) text = o.Text;
             else { text = File.ReadAllText(path); FilesReadFromDisk++; System.Threading.Interlocked.Increment(ref s_readFromDisk); }
             spans = SemanticCoverage.IsCSharp(path) ? CSharpSpans(text) : CFamilySpans(text);
-            if (_token is not null) _occurrences[path] = Occurrences(text, _token);
+            if (_token is not null) occurrences = Occurrences(text, _token);
         }
         catch
         {
             spans = System.Array.Empty<(int, int, int, int)>();   // unreadable/unparsable -> suppress nothing
         }
         if (_offered is { } done && string.Equals(done.Path, path, StringComparison.Ordinal)) _offered = null; // classified: drop it
-        _cache[path] = spans;
+        (_currentPath, _currentSpans, _currentOccurrences) = (path, spans, occurrences);
+        FilesClassified++;
         System.Threading.Interlocked.Increment(ref s_classified);
         return spans;
     }

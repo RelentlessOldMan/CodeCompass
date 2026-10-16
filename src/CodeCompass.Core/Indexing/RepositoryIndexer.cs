@@ -179,6 +179,14 @@ public static class RepositoryIndexer
         // Each worker fills private trigram + symbol segment buffers lock-free and flushes them
         // to disk at their byte budgets, so build RAM is bounded regardless of repo size.
         //
+        // Workers are POOLED, and flushed once after the loop (or when they reach their budget). Parallel.ForEach retires
+        // each of its tasks about every 100 ms and starts a fresh one, calling localInit/localFinally every time - so when
+        // localFinally flushed, a build wrote a segment per time slice instead of per budget (1,515 text segments for llvm,
+        // 10,370 for a 66k-file share; each query probes every one, and each held its own term table). A retiring task
+        // hands its worker back, and the next one picks it up with its buffers (and its tree-sitter parser) intact.
+        var workers = new ConcurrentBag<BuildWorker>();     // every worker created (flushed and merged after the loop)
+        var idleWorkers = new ConcurrentBag<BuildWorker>(); // handed back by a retired task, for the next one
+        //
         // NoBuffering (one item at a time) instead of the default growing-chunk partitioner: general
         // load-balancing hygiene for variable-cost files. When expensive files CLUSTER in directory
         // order (e.g. a vendored minified-JS or generated dir), chunking hands one worker an all-
@@ -196,7 +204,13 @@ public static class RepositoryIndexer
             // running to completion. ParallelOptions stops scheduling further files and throws
             // OperationCanceledException once the token trips; the finally below still tears the build down.
             new ParallelOptions { MaxDegreeOfParallelism = cores, CancellationToken = ct },
-            () => new BuildWorker(),
+            () =>
+            {
+                if (idleWorkers.TryTake(out var w)) return w;
+                w = new BuildWorker();
+                workers.Add(w);
+                return w;
+            },
             (file, _, worker) =>
             {
                 int tid = Environment.CurrentManagedThreadId;
@@ -345,7 +359,12 @@ public static class RepositoryIndexer
                 }
                 finally { inFlight.TryRemove(tid, out var _gone); reads.Release(footprint); }
             },
-            worker =>
+            worker => idleWorkers.Add(worker));
+            ct.ThrowIfCancellationRequested(); // cancelled during, or right after, the loop (before the persist below)
+
+            // Each worker's last partial segments, and its share of the snapshot and counts. The loop is done, so
+            // these run in parallel without the loop's contention (one segment write per worker).
+            Parallel.ForEach(workers, new ParallelOptions { MaxDegreeOfParallelism = cores, CancellationToken = ct }, worker =>
             {
                 FlushText(worker, dir, ref textSegCounter, textSegFiles);
                 FlushSymbols(worker, dir, ref symSegCounter, symSegFiles);
@@ -357,9 +376,9 @@ public static class RepositoryIndexer
                     totalSymbolSkipped += worker.SymbolSkipped;
                     totalMemorySkipped += worker.MemorySkipped;
                 }
-                worker.Extractor.Dispose();
+                worker.Snapshot.Clear(); worker.Snapshot.TrimExcess(); // merged: don't hold the build's file list twice
             });
-            ct.ThrowIfCancellationRequested(); // cancelled during, or right after, the loop (before the persist below)
+            ct.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException)
         {
@@ -379,6 +398,7 @@ public static class RepositoryIndexer
             // (including OperationCanceledException on a re-point/shutdown) - otherwise a cancelled build
             // would leak the dedicated watchdog thread and the progress Timer.
             sw.Stop();
+            foreach (var w in workers) w.Extractor.Dispose(); // the tree-sitter parsers (native), however the build ended
             progressTimer?.Dispose();
             buildDone.Set();           // stop the watchdog thread
             watchdog.Join(1000);
