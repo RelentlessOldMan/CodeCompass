@@ -1,3 +1,4 @@
+using CodeCompass.Core.Storage;
 using System.IO.MemoryMappedFiles;
 using System.Text;
 
@@ -166,27 +167,43 @@ public sealed class SnapshotBaseReader : IDisposable
 
     public string GetPath(int i)
     {
+        int len = PathSpan(i, out long off);
+        if (len == 0) return "";
+        var buf = new byte[len];
+        _view.ReadArray(off, buf, 0, len);
+        return Encoding.UTF8.GetString(buf);
+    }
+
+    // Where path i's UTF-8 bytes are. The two offsets are read from the (untrusted) path-offsets column, which the
+    // open-time header check does not cover: reject a non-monotonic or out-of-blob span rather than let a negative/
+    // truncated length reach a read. The path blob is [_pathBlobOff, _sizesOff).
+    private int PathSpan(int i, out long off)
+    {
         if ((uint)i >= (uint)Count) throw new InvalidDataException("snapshot base: path index out of range");
         long o0 = _view.ReadInt64(_pathOffsetsOff + (long)i * 8);
         long o1 = _view.ReadInt64(_pathOffsetsOff + (long)(i + 1) * 8);
         long len = o1 - o0;
-        if (len == 0) return "";
-        // The two offsets are read from the (untrusted) path-offsets column, which the open-time header
-        // check does not cover: reject a non-monotonic or out-of-blob span rather than let a negative/
-        // truncated length hit new byte[]/ReadArray. The path blob is [_pathBlobOff, _sizesOff).
+        off = _pathBlobOff + o0;
+        if (len == 0) return 0;
         if (o0 < 0 || len < 0 || len > int.MaxValue || _pathBlobOff + o1 > _sizesOff)
             throw new InvalidDataException("corrupt CodeCompass snapshot base (bad path offsets)");
-        var buf = new byte[len];
-        _view.ReadArray(_pathBlobOff + o0, buf, 0, (int)len);
-        return Encoding.UTF8.GetString(buf);
+        return (int)len;
+    }
+
+    // string.CompareOrdinal(GetPath(i), key)'s sign, without building the string: a lookup binary-searches ~17 paths
+    // in a 150k base, and a full Update or a big batch looks up every file.
+    private int ComparePath(int i, string key)
+    {
+        int len = PathSpan(i, out long off);
+        return MappedUtf8.CompareOrdinal(_view, off, len, key);
     }
 
     public FileState GetState(int i)
     {
         long size = _view.ReadInt64(_sizesOff + (long)i * 8);
         long mtime = _view.ReadInt64(_mtimesOff + (long)i * 8);
-        var hb = new byte[SnapshotBaseFile.HashBytes];
-        _view.ReadArray(_hashesOff + (long)i * SnapshotBaseFile.HashBytes, hb, 0, hb.Length);
+        Span<byte> hb = stackalloc byte[SnapshotBaseFile.HashBytes];
+        _view.SafeMemoryMappedViewHandle.ReadSpan((ulong)(_view.PointerOffset + _hashesOff + (long)i * SnapshotBaseFile.HashBytes), hb);
         if (Version == 1) return new FileState(size, mtime, Convert.ToHexString(hb));
         return new FileState(size, mtime, Convert.ToHexString(hb),
                              _view.ReadInt64(_ctimesOff + (long)i * 8),
@@ -211,7 +228,7 @@ public sealed class SnapshotBaseReader : IDisposable
         while (lo <= hi)
         {
             int mid = (int)(((uint)lo + (uint)hi) >> 1);
-            int cmp = string.CompareOrdinal(GetPath(mid), path);
+            int cmp = ComparePath(mid, path);
             if (cmp == 0) return mid;
             if (cmp < 0) lo = mid + 1; else hi = mid - 1;
         }
@@ -225,7 +242,7 @@ public sealed class SnapshotBaseReader : IDisposable
         while (lo < hi)
         {
             int mid = (int)(((uint)lo + (uint)hi) >> 1);
-            if (string.CompareOrdinal(GetPath(mid), key) < 0) lo = mid + 1; else hi = mid;
+            if (ComparePath(mid, key) < 0) lo = mid + 1; else hi = mid;
         }
         return lo;
     }

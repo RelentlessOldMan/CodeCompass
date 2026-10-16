@@ -693,6 +693,16 @@ public static class ServerContext
             _holdWantsRebuild = true; // ...unless a reload succeeds first (see ClearHoldLocked)
         }
         _heldBack = true;
+        // A long unreadable spell can pile up a whole tree of edits: past the cap, rebuild instead (see CaptureIfBusy). Which
+        // ones are held is no longer known, so the model goes too.
+        if (_heldPaths.Count > MaxPendingPaths || _pendingPaths.Count > MaxPendingPaths)
+        {
+            _heldPaths.Clear(); _heldPaths.TrimExcess();
+            _pendingPaths.Clear(); _pendingPaths.TrimExcess();
+            _pendingReconcile = true;
+            _holdWantsRebuild = false; // wanted for its own sake now: a reload mustn't cancel it
+            fresh = paths.ToList();
+        }
         if (MayAffectUnindexed(fresh)) { _csharp?.Dispose(); _csharp = null; }
     }
 
@@ -846,6 +856,13 @@ public static class ServerContext
         var lr = FindLinked(linkedRoot); // null: unlinked meanwhile
         var held = lr?.HeldBack;
         IReadOnlyCollection<string> paths = batch.ChangedFullPaths;
+        // Too many held to keep listing (a long unreadable spell under churn): lost events, reconciled like any (see
+        // CaptureIfBusy). Gated off on a network/huge root, which then keeps only this batch's paths.
+        if (held is { Count: > 0 } && held.Count + paths.Count > MaxPendingPaths)
+        {
+            held.Clear(); held.TrimExcess();
+            batch = batch with { FullReconcile = true };
+        }
         if (held is { Count: > 0 })
         {
             var all = new HashSet<string>(held, StringComparer.Ordinal);
@@ -1308,6 +1325,9 @@ public static class ServerContext
     // the pause lands on an idle server, not a query. Returns whether anything was released.
     private static bool IdleRelease(TimeSpan idle)
     {
+        // A box short of memory wants it back sooner: every session keeps its own model of the same repo, GBs each on a
+        // Roslyn-size one. Then a minute unused is idle enough - the next C# query rebuilds, as after any release.
+        if (idle > PressureIdle && UnderMemoryPressure()) idle = PressureIdle;
         long idleMs = (long)idle.TotalMilliseconds;
         bool analyzer = EvictIdleAnalyzers(idleMs);
         long sidecarBytes = Environment.TickCount64 - Volatile.Read(ref _lastQueryMs) >= idleMs ? SidecarCache.Release() : 0;
@@ -1378,6 +1398,16 @@ public static class ServerContext
 
     /// <summary>Test seam: run the idle release now with the given idle window.</summary>
     internal static bool RunIdleReleaseNow(TimeSpan idle) => IdleRelease(idle);
+
+    internal static TimeSpan PressureIdle = TimeSpan.FromMinutes(1); // a test shortens it
+    internal static Func<bool>? PressureProbeForTest;
+    private const int PressureLoadPercent = 85; // a little under the GC's own high-memory-load mark (90%)
+
+    private static bool UnderMemoryPressure()
+    {
+        if (PressureProbeForTest is { } probe) return probe();
+        return SystemMemory.MemoryLoadPercent() >= PressureLoadPercent;
+    }
 
     /// <summary>Test seam: is the primary index's write-side path map built?</summary>
     internal static bool PrimaryPathMapResidentForTest
@@ -1857,7 +1887,10 @@ public static class ServerContext
     // A long wait (for a terminal build) can pile up a whole tree of edits: past this many, rebuild instead. Below it they're
     // applied like any batch - a 2,500-file `git pull` during a build mustn't cost a second full build, or (where in-session
     // rebuilds are gated off) be dropped.
-    private const int MaxPendingPaths = 50_000;
+    private static int MaxPendingPaths = 50_000; // not const: a test lowers it
+    internal static int MaxPendingPathsForTest { get => MaxPendingPaths; set => MaxPendingPaths = value; }
+    internal static int HeldPathCountForTest { get { Rw.EnterReadLock(); try { return _heldPaths.Count; } finally { Rw.ExitReadLock(); } } }
+    internal static int LinkedHeldCountForTest(string root) => FindLinked(PathSafety.NormalizeDir(root))?.HeldBack.Count ?? -1;
 
     private static void OnChanges(ChangeBatch batch)
     {

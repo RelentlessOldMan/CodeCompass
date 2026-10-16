@@ -58,4 +58,27 @@ public static class SystemMemory
         catch { /* ignore */ }
         return 0;
     }
+
+    /// <summary>The machine's physical memory in use right now, 0-100, or -1 if unknown. Live, unlike
+    /// <see cref="GCMemoryInfo.MemoryLoadBytes"/>, which is from the last GC - and an idle process may not have had one
+    /// for hours.</summary>
+    public static int MemoryLoadPercent()
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var s = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
+                if (GlobalMemoryStatusEx(ref s)) return (int)s.dwMemoryLoad;
+            }
+        }
+        catch { /* P/Invoke unavailable - fall through */ }
+        try
+        {
+            var gi = GC.GetGCMemoryInfo();
+            if (gi.TotalAvailableMemoryBytes > 0) return (int)(100 * gi.MemoryLoadBytes / gi.TotalAvailableMemoryBytes);
+        }
+        catch { /* ignore */ }
+        return -1;
+    }
 }

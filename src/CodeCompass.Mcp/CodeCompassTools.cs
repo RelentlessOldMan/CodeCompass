@@ -256,14 +256,20 @@ public static class CodeCompassTools
         var csCandidates = new List<string>();
         var csDisplay = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
         bool anyCFamily = false;
+        // Each root's candidate collection, reused by its name search below instead of collected again.
+        var collected = new System.Collections.Generic.Dictionary<ServerContext.IndexHandle, CodeCompass.Core.Indexing.Segments.SegmentedIndex.Collected?>();
         foreach (var h in indexable ? handles : Array.Empty<ServerContext.IndexHandle>())
-            foreach (var rel in h.Text.CandidateFiles(name))
+        {
+            var files = h.Text.CandidateFiles(name, out var c);
+            collected[h] = c;
+            foreach (var rel in files)
             {
                 if (SemanticCoverage.IsCFamily(rel)) { anyCFamily = true; continue; }
                 if (!SemanticCoverage.IsCSharp(rel)) continue;
                 var full = System.IO.Path.GetFullPath(System.IO.Path.Combine(h.Root, rel.Replace('/', System.IO.Path.DirectorySeparatorChar)));
                 csCandidates.Add(full); csDisplay[full] = DisplayPath(h, rel);
             }
+        }
         // Roslyn parses with an empty preprocessor set, so it silently misses references in inactive #if/#elif
         // branches. When any candidate .cs uses conditional compilation, treat the C# pass as incomplete so .cs name
         // matches backfill it (deduped) and we disclose it.
@@ -303,7 +309,7 @@ public static class CodeCompassTools
                                                             csBackfill);
                 foreach (var m in h.Text.Search(name, probe, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
                                                 limits: lexLimits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete, h.Root, csBackfill), accept: accept, ct: ct,
-                                                textSink: ReferenceMerge.ReferenceTextSink(h.Root, spanFilter)))
+                                                textSink: ReferenceMerge.ReferenceTextSink(h.Root, spanFilter), collected: collected.GetValueOrDefault(h)))
                 {
                     // `accept` (shared with the CLI) already applied the reference filter during the scan.
                     var key = $"{DisplayPath(h, m.Path)}:{m.Line}:{m.Column}";

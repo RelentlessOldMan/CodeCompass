@@ -388,11 +388,26 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                 continue;
             }
             var text = solution.GetDocument(id)!.GetTextAsync(ct).GetAwaiter().GetResult();
-            conditional = SemanticCoverage.HasCSharpConditionalCompilation(text.ToString());
+            conditional = HasConditionalCompilation(text);
             lock (_gate) _conditionalByFile[p] = conditional;
             if (conditional) hits.Add(p);
         }
         return hits;
+    }
+
+    // SemanticCoverage.HasCSharpConditionalCompilation over the model's text a line at a time: ToString() copied each whole
+    // candidate file (on the large object heap past ~42k chars) just to look for #if. A directive is one line.
+    private static bool HasConditionalCompilation(SourceText text)
+    {
+        foreach (var line in text.Lines)
+        {
+            var span = line.Span;
+            int i = span.Start, end = span.End;
+            while (i < end && (text[i] == ' ' || text[i] == '\t')) i++;
+            if (i < end && text[i] == '#' && SemanticCoverage.HasCSharpConditionalCompilation(text.ToString(TextSpan.FromBounds(i, end))))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>Whether the semantic pass can resolve <paramref name="name"/> at all: Roslyn's declaration search matches a

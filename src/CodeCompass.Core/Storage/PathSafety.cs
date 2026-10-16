@@ -18,8 +18,20 @@ public static class PathSafety
     /// also (wrongly) reject a real file literally named <c>"..foo"</c>.
     /// </summary>
     public static bool IsOutsideRepo(string rel) =>
-        rel.Length == 0 || rel == "." || Path.IsPathRooted(rel) ||
-        rel.Split('/', '\\').Any(p => p == "..");
+        rel.Length == 0 || rel == "." || Path.IsPathRooted(rel) || HasParentSegment(rel);
+
+    // Any segment exactly "..", walked in place: this runs per candidate file on every query, where a Split made a
+    // string[] and a string per segment.
+    private static bool HasParentSegment(ReadOnlySpan<char> rel)
+    {
+        while (true)
+        {
+            int sep = rel.IndexOfAny('/', '\\');
+            if ((sep < 0 ? rel : rel[..sep]) is "..") return true;
+            if (sep < 0) return false;
+            rel = rel[(sep + 1)..];
+        }
+    }
 
     /// <summary>A relative, in-repo path: the negation of <see cref="IsOutsideRepo"/>.</summary>
     public static bool IsInsideRepo(string rel) => !IsOutsideRepo(rel);

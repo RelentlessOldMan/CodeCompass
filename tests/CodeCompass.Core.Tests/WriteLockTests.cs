@@ -205,6 +205,42 @@ public class WriteLockTests
         }
     }
 
+    // Held-back edits were listed without a cap: a long unreadable spell under churn kept every changed path, twice. Past the
+    // cap the list goes and a reconcile speaks for it - still disclosed, as held back.
+    [Fact]
+    public void Server_HeldBackEdits_PastTheCap_AreDroppedForAReconcile_AndStillDisclosed()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class AlphaLocal { } }");
+        var oldAuto = Environment.GetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE");
+        int oldCap = ServerContext.MaxPendingPathsForTest;
+        ServerContext.Init(repo.Root);
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", "false");
+            CodeCompassTools.Reindex();
+            repo.Write("b.cs", "namespace N { class BravoExternal { } }");
+            OtherWriter(repo.Root);
+            ServerContext.MaxPendingPathsForTest = 3;
+
+            var symbolsManifest = Path.Combine(IndexStore.CacheDirPath(repo.Root), "symbols.manifest");
+            using (new FileStream(symbolsManifest, FileMode.Open, FileAccess.Read, FileShare.None)) // this session can't reload now
+            {
+                ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("c1.cs"), repo.FullPath("c2.cs") }, FullReconcile: false));
+                Assert.Equal(2, ServerContext.HeldPathCountForTest);
+                ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("c3.cs"), repo.FullPath("c4.cs") }, FullReconcile: false));
+                Assert.Equal(0, ServerContext.HeldPathCountForTest);
+                Assert.Contains("aren't in the index yet", CodeCompassTools.SearchCode("AlphaLocal"));
+            }
+        }
+        finally
+        {
+            ServerContext.MaxPendingPathsForTest = oldCap;
+            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", oldAuto);
+            ServerContext.Init(repo.Root);
+        }
+    }
+
     // A newer CodeCompass rewrote the index mid-session (another install updated first): this session can neither read nor
     // write it. It held edits back forever, kept answering from its old copy as if current, and kept the live-watch role, so
     // the newer session couldn't take over. It must say why, let Grep run, never write over it, and hand the role back.

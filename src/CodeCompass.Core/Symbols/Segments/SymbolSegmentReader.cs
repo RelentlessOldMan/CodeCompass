@@ -76,14 +76,35 @@ public sealed class SymbolSegmentReader : IDisposable
 
     public string GetName(int i)
     {
+        long off = NameSpan(i, out int len);
+        return ReadUtf8(off, len);
+    }
+
+    /// <summary>Does symbol i's name contain <paramref name="value"/> (OrdinalIgnoreCase)? The substring scan asks this
+    /// of every symbol, so it reads the name in place instead of building it.</summary>
+    public bool NameContains(int i, string value)
+    {
+        long off = NameSpan(i, out int len);
+        return MappedUtf8.Contains(_view, off, len, value, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private int CompareName(int i, string name)
+    {
+        long off = NameSpan(i, out int len);
+        return MappedUtf8.CompareOrdinal(_view, off, len, name);
+    }
+
+    // Where name i's UTF-8 bytes are. Guard corrupt offsets: monotonic (0 <= o0 <= o1) and within the name blob, so a bad
+    // entry can't produce a negative length or an out-of-bounds read.
+    private long NameSpan(int i, out int len)
+    {
         if ((uint)i >= (uint)Count) throw new InvalidDataException("symbol segment name index out of range");
         int o0 = _view.ReadInt32(_nameOffsetsOff + (long)i * 4);
         int o1 = _view.ReadInt32(_nameOffsetsOff + (long)(i + 1) * 4);
-        // Guard corrupt offsets: monotonic (0 <= o0 <= o1) and within the name blob, so a bad entry can't
-        // produce a negative length (OverflowException on new byte[len]) or an out-of-bounds read.
         if (o0 < 0 || o1 < o0 || _nameBlobOff + o1 > _pathOffsetsOff)
             throw new InvalidDataException("corrupt CodeCompass symbol segment (name offsets out of range)");
-        return ReadUtf8(_nameBlobOff + o0, o1 - o0);
+        len = o1 - o0;
+        return _nameBlobOff + o0;
     }
 
     public Symbol GetSymbol(int i)
@@ -110,16 +131,16 @@ public sealed class SymbolSegmentReader : IDisposable
         while (lo <= hi)
         {
             int mid = (int)(((uint)lo + (uint)hi) >> 1);
-            int cmp = string.CompareOrdinal(GetName(mid), name);
+            int cmp = CompareName(mid, name);
             if (cmp == 0) { found = mid; break; }
             if (cmp < 0) lo = mid + 1; else hi = mid - 1;
         }
         if (found < 0) yield break;
 
         int start = found;
-        while (start > 0 && string.CompareOrdinal(GetName(start - 1), name) == 0) start--;
+        while (start > 0 && CompareName(start - 1, name) == 0) start--;
         int end = found;
-        while (end < Count - 1 && string.CompareOrdinal(GetName(end + 1), name) == 0) end++;
+        while (end < Count - 1 && CompareName(end + 1, name) == 0) end++;
         for (int i = start; i <= end; i++) yield return i;
     }
 
@@ -129,22 +150,33 @@ public sealed class SymbolSegmentReader : IDisposable
         while (lo <= hi)
         {
             int mid = (int)(((uint)lo + (uint)hi) >> 1);
-            int cmp = string.CompareOrdinal(ReadPath(mid), path);
+            long off = PathSpan(mid, out int len);
+            int cmp = MappedUtf8.CompareOrdinal(_view, off, len, path);
             if (cmp == 0) return true;
             if (cmp < 0) lo = mid + 1; else hi = mid - 1;
         }
         return false;
     }
 
+    /// <summary>Path-table entry <paramref name="pathId"/> (0..PathCount-1): each distinct path with a symbol, once.</summary>
+    public string GetPath(int pathId) => ReadPath(pathId);
+
     private string ReadPath(int pathId)
+    {
+        long off = PathSpan(pathId, out int len);
+        return ReadUtf8(off, len);
+    }
+
+    // Guard corrupt offsets: monotonic and within the path blob (which runs to the end of the view).
+    private long PathSpan(int pathId, out int len)
     {
         if ((uint)pathId >= (uint)PathCount) throw new InvalidDataException("symbol segment path id out of range");
         int o0 = _view.ReadInt32(_pathOffsetsOff + (long)pathId * 4);
         int o1 = _view.ReadInt32(_pathOffsetsOff + (long)(pathId + 1) * 4);
-        // Guard corrupt offsets: monotonic and within the path blob (which runs to the end of the view).
         if (o0 < 0 || o1 < o0 || _pathBlobOff + o1 > _cap)
             throw new InvalidDataException("corrupt CodeCompass symbol segment (path offsets out of range)");
-        return ReadUtf8(_pathBlobOff + o0, o1 - o0);
+        len = o1 - o0;
+        return _pathBlobOff + o0;
     }
 
     private string ReadUtf8(long offset, int len)

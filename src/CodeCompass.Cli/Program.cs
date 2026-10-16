@@ -1261,8 +1261,9 @@ static int CmdRefs(string[] args)
     }
     var csCandidates = new List<string>();
     bool anyCFamily = false;
+    CodeCompass.Core.Indexing.Segments.SegmentedIndex.Collected? collected = null; // reused by the name search below
     if (haveIndex)
-        foreach (var rel in index!.CandidateFiles(name))
+        foreach (var rel in index!.CandidateFiles(name, out collected))
         {
             if (SemanticCoverage.IsCFamily(rel)) anyCFamily = true;
             else if (SemanticCoverage.IsCSharp(rel)) csCandidates.Add(Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar))));
@@ -1296,7 +1297,7 @@ static int CmdRefs(string[] args)
         var accept = ReferenceMerge.ReferenceAccept(root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => rel, csBackfill);
         foreach (var m in index!.Search(name, 1000, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
                                         limits: limits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete, root, csBackfill), accept: accept,
-                                        textSink: ReferenceMerge.ReferenceTextSink(root, spanFilter)))
+                                        textSink: ReferenceMerge.ReferenceTextSink(root, spanFilter), collected: collected))
         {
             // `accept` (shared with the MCP tool) already applied the reference filter during the scan.
             if (!seenKeys.Add($"{m.Path}:{m.Line}:{m.Column}")) continue;              // already listed (semantic hit / definition)

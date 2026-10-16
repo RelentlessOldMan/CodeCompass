@@ -25,15 +25,15 @@ public readonly record struct FileIdentity(long Size, long MTimeTicks, long Chan
         if (!OperatingSystem.IsWindows()) return default;
         try
         {
-            var buf = new byte[AllInfoBytes];
-            int status = NtQueryInformationFile(h, out _, buf, buf.Length, FileAllInformationClass);
+            Span<byte> buf = stackalloc byte[AllInfoBytes]; // twice per file read by a build: not a heap buffer each time
+            int status = NtQueryInformationFile(h, out _, ref MemoryMarshal.GetReference(buf), buf.Length, FileAllInformationClass);
             // STATUS_BUFFER_OVERFLOW: the trailing file name didn't fit, but every fixed field we read was filled.
             if (status != 0 && status != StatusBufferOverflow) return default;
             return new FileIdentity(
-                BitConverter.ToInt64(buf, OffEndOfFile),
-                Ticks(BitConverter.ToInt64(buf, OffLastWrite)),
-                Ticks(BitConverter.ToInt64(buf, OffChange)),
-                BitConverter.ToInt64(buf, OffIndexNumber));
+                BitConverter.ToInt64(buf[OffEndOfFile..]),
+                Ticks(BitConverter.ToInt64(buf[OffLastWrite..])),
+                Ticks(BitConverter.ToInt64(buf[OffChange..])),
+                BitConverter.ToInt64(buf[OffIndexNumber..]));
         }
         catch { return default; }
     }
@@ -116,7 +116,7 @@ public readonly record struct FileIdentity(long Size, long MTimeTicks, long Chan
     private struct IoStatusBlock { public IntPtr Status; public IntPtr Information; }
 
     [DllImport("ntdll.dll")]
-    private static extern int NtQueryInformationFile(SafeFileHandle h, out IoStatusBlock io, byte[] info, int length, int infoClass);
+    private static extern int NtQueryInformationFile(SafeFileHandle h, out IoStatusBlock io, ref byte info, int length, int infoClass);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int infoClass, out FileBasicInfo info, uint size);

@@ -38,6 +38,10 @@ public sealed class IgnoreRules
 
     private readonly HashSet<string> _ignoredDirs;
     private readonly HashSet<string> _ignoredExtensions;
+    // The same two sets, looked up by span: IsIgnoredPath runs per candidate file and per symbol at query time, and a
+    // Split there made a string[] plus a string per path segment each time.
+    private readonly SpanNameSet _ignoredDirSpans;
+    private static readonly SpanNameSet IgnoredExtensionSpans = new(DefaultIgnoredExtensions);
 
     public long MaxFileSizeBytes { get; }
 
@@ -63,6 +67,7 @@ public sealed class IgnoreRules
         // keepDirs wins: a monorepo with real sources under packages/ (or a repo with build/ scripts) opts back in.
         foreach (var d in CodeCompassConfig.KeptDirs(cfg)) _ignoredDirs.Remove(d);
         _ignoredExtensions = DefaultIgnoredExtensions;
+        _ignoredDirSpans = new SpanNameSet(_ignoredDirs);
         MaxFileSizeBytes = maxFileSizeBytes ?? CodeCompassConfig.MaxFileBytes(cfg);
     }
 
@@ -106,11 +111,29 @@ public sealed class IgnoreRules
     public bool IsIgnoredPath(string relativePath)
     {
         if (string.IsNullOrEmpty(relativePath)) return false;
-        var parts = relativePath.Split('/', '\\');
-        for (int i = 0; i < parts.Length - 1; i++)          // directory segments only (the last part is the filename)
-            if (parts[i].Length > 0 && _ignoredDirs.Contains(parts[i])) return true;
-        var ext = Path.GetExtension(parts[^1]);
-        return !string.IsNullOrEmpty(ext) && _ignoredExtensions.Contains(ext);
+        var rest = relativePath.AsSpan();
+        for (int sep; (sep = rest.IndexOfAny('/', '\\')) >= 0; rest = rest[(sep + 1)..]) // directory segments only
+            if (sep > 0 && _ignoredDirSpans.Contains(rest[..sep])) return true;
+        var ext = Path.GetExtension(rest);                  // `rest` is now the filename
+        return !ext.IsEmpty && IgnoredExtensionSpans.Contains(ext);
+    }
+
+    // An OrdinalIgnoreCase name set that answers for a span (net8.0 has no span lookup on HashSet<string>). Grouped by
+    // length: OrdinalIgnoreCase folds char by char, so equal names are equal lengths, and each group is a few names.
+    private sealed class SpanNameSet
+    {
+        private readonly Dictionary<int, string[]> _byLength;
+
+        public SpanNameSet(IEnumerable<string> names) =>
+            _byLength = names.GroupBy(n => n.Length).ToDictionary(g => g.Key, g => g.ToArray());
+
+        public bool Contains(ReadOnlySpan<char> name)
+        {
+            if (!_byLength.TryGetValue(name.Length, out var group)) return false;
+            foreach (var n in group)
+                if (name.Equals(n, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
     }
 
     public bool IsIgnoredFile(string fileName, long size)

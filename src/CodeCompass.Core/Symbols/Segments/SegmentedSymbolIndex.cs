@@ -113,7 +113,8 @@ public sealed class SegmentedSymbolIndex : IDisposable
     }
 
     /// <summary>Every live symbol-bearing path in the index (deduped, tombstoned paths excluded). Used by the
-    /// stale-index ignore prune to find paths the CURRENT rules now exclude. O(symbols); no source reads.</summary>
+    /// stale-index ignore prune to find paths the CURRENT rules now exclude. O(paths): each segment's path table holds
+    /// every path with a symbol once, so a path isn't decoded once per symbol in it. No source reads.</summary>
     public IReadOnlyCollection<string> AllPaths()
     {
         if (_pending is { Count: > 0 }) FlushPending();
@@ -122,9 +123,9 @@ public sealed class SegmentedSymbolIndex : IDisposable
         {
             var seg = _segments[segId];
             _tombstones.TryGetValue(segId, out var tomb);
-            for (int i = 0; i < seg.Count; i++)
+            for (int pid = 0; pid < seg.PathCount; pid++)
             {
-                var p = seg.GetSymbolPath(i);
+                var p = seg.GetPath(pid);
                 if (tomb is not null && tomb.Contains(p)) continue;
                 paths.Add(p);
             }
@@ -142,9 +143,10 @@ public sealed class SegmentedSymbolIndex : IDisposable
             _tombstones.TryGetValue(segId, out var tomb);
             foreach (var i in seg.FindByName(name))
             {
-                if (tomb is not null && tomb.Contains(seg.GetSymbolPath(i))) continue;
+                var path = seg.GetSymbolPath(i);
+                if (tomb is not null && tomb.Contains(path)) continue;
                 // Query-time ignore consistency: drop symbols a stale index still holds for now-ignored paths.
-                if (QueryIgnore.IsIgnoredPath(seg.GetSymbolPath(i))) continue;
+                if (QueryIgnore.IsIgnoredPath(path)) continue;
                 result.Add(seg.GetSymbol(i));
             }
         }
@@ -164,7 +166,7 @@ public sealed class SegmentedSymbolIndex : IDisposable
             _tombstones.TryGetValue(segId, out var tomb);
             for (int i = 0; i < seg.Count; i++)
             {
-                if (!seg.GetName(i).Contains(queryText, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!seg.NameContains(i, queryText)) continue; // read in place: a miss scans every symbol
                 var path = seg.GetSymbolPath(i);
                 if (tomb is not null && tomb.Contains(path)) continue;
                 if (QueryIgnore.IsIgnoredPath(path)) continue;

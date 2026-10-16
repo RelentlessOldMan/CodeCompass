@@ -38,6 +38,7 @@ public sealed class SegmentedIndex : IDisposable
     private int _nextSegmentNumber;
     private bool _pathMapBuilt;
     private long _pathMapUsedMs; // last write that needed the map (see ReleasePathMapIfIdle)
+    private int _version; // bumped by every change to what a candidate collection reads (see Collected)
 
     public string Root => _root;
     public string Directory => _dir;
@@ -138,6 +139,7 @@ public sealed class SegmentedIndex : IDisposable
 
     public void AddDocument(string relPath, long[] distinctTrigrams)
     {
+        _version++;
         EnsurePathMap();
         _pending ??= new SegmentBuilder();
         int local = _pending.DocCount;
@@ -148,6 +150,7 @@ public sealed class SegmentedIndex : IDisposable
 
     public void RemovePath(string relPath)
     {
+        _version++;
         EnsurePathMap();
         if (!_pathToDoc.TryGetValue(relPath, out var loc)) return;
         if (loc.Seg == _segments.Count && _pending is not null) FlushPending(); // materialize so we can tombstone
@@ -206,7 +209,8 @@ public sealed class SegmentedIndex : IDisposable
                                              List<CandidateTrace>? trace = null, int maxPerFile = 0,
                                              bool orderByPath = false, SearchLimits? limits = null,
                                              Func<string, bool>? pathFilter = null, Func<SearchMatch, bool>? accept = null,
-                                             System.Threading.CancellationToken ct = default, Action<string, string?>? textSink = null)
+                                             System.Threading.CancellationToken ct = default, Action<string, string?>? textSink = null,
+                                             Collected? collected = null)
     {
         // Whitespace-only queries have no meaningful trigrams: under 3 chars they produce no trigram groups,
         // so every file becomes a candidate and the verify step matches almost every line that contains a
@@ -225,7 +229,12 @@ public sealed class SegmentedIndex : IDisposable
         // trigram index only says a file MIGHT contain the query; the verify step below reads each and
         // confirms. Ordering here (segment order, then in-segment doc order) fixes the result order for
         // both the serial and parallel verify paths, so output is identical regardless of how we read.
-        var candidates = CollectCandidates(groups);
+        // A reference search already collected this query's candidates for its semantic pass (CandidateFiles): reuse them
+        // when nothing has changed since, rather than intersect every segment's postings again.
+        var candidates = collected is not null && collected.Owner == this && collected.Version == _version &&
+                         collected.Query == query && caseSensitive
+            ? collected.Paths // read only: the filter and the path order below each build a new list
+            : CollectCandidates(groups);
         // Callers that only want some files (a reference search wants code, not build logs) drop the rest BEFORE the
         // verify reads, so excluded files neither cost a read nor use up the result budget.
         if (pathFilter is not null) candidates = candidates.Where(pathFilter).ToList();
@@ -261,8 +270,13 @@ public sealed class SegmentedIndex : IDisposable
     /// symbol, instead of parsing the whole tree. A query under 3 chars has no trigrams, so every file is a
     /// candidate (correct, if broad). Over-inclusion is harmless: the semantic layer confirms real matches.
     /// </summary>
-    public IReadOnlyList<string> CandidateFiles(string query)
+    public IReadOnlyList<string> CandidateFiles(string query) => CandidateFiles(query, out _);
+
+    /// <summary><see cref="CandidateFiles(string)"/>, also handing back the collection itself for a case-sensitive
+    /// <see cref="Search"/> of the same query to reuse (null for a rejected query).</summary>
+    public IReadOnlyList<string> CandidateFiles(string query, out Collected? collected)
     {
+        collected = null;
         // Same backstop as Search: a whitespace-only "symbol" would expand to the whole corpus and make the
         // semantic layer parse every file. Reject it (IsNullOrWhiteSpace, not IsNullOrEmpty).
         if (string.IsNullOrWhiteSpace(query)) return Array.Empty<string>();
@@ -270,12 +284,25 @@ public sealed class SegmentedIndex : IDisposable
 
         var groups = query.Length >= 3 ? TrigramIndex.QueryTrigramGroups(query, caseSensitive: true) : null;
         var cands = CollectCandidates(groups);
+        collected = new Collected(this, _version, query, cands);
         if (cands.Count <= 1) return cands;
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var outp = new List<string>(cands.Count);
         foreach (var c in cands) if (seen.Add(c)) outp.Add(c);
         return outp;
+    }
+
+    /// <summary>One query's case-sensitive candidate collection, in collection order: valid for a <see cref="Search"/> on
+    /// the index that made it while that index is unchanged (its version), and ignored otherwise.</summary>
+    public sealed class Collected
+    {
+        internal Collected(SegmentedIndex owner, int version, string query, List<string> paths)
+        { Owner = owner; Version = version; Query = query; Paths = paths; }
+        internal SegmentedIndex Owner { get; }
+        internal int Version { get; }
+        internal string Query { get; }
+        internal List<string> Paths { get; }
     }
 
     // Ordered list of candidate repo-relative paths across all segments (rarest-first trigram
@@ -653,6 +680,7 @@ public sealed class SegmentedIndex : IDisposable
         FlushMerged();
 
         foreach (var s in old) s.Dispose();
+        _version++;
         _segments.Clear();
         _segments.AddRange(merged);
         _tombstones.Clear();
@@ -670,6 +698,7 @@ public sealed class SegmentedIndex : IDisposable
         _nextSegmentNumber++;
         _pending.WriteTo(file);
         _pending = null;
+        _version++;
         _segments.Add(new SegmentReader(file));
     }
 

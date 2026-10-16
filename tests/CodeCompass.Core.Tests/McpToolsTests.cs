@@ -338,6 +338,35 @@ public class McpToolsTests
         finally { ServerContext.Init(repo.Root); }
     }
 
+    // Each session holds its own model for the whole idle window (10 min), GBs each on a Roslyn-size repo, however short the
+    // machine is. Under memory pressure the window shrinks; with memory to spare it doesn't.
+    [Fact]
+    public void IdleRelease_UnderMemoryPressure_HandsBackTheModelSooner()
+    {
+        using var repo = NewIndexedRepo();
+        var oldIdle = ServerContext.PressureIdle;
+        try
+        {
+            var first = CodeCompassTools.FindReferences("Run");
+            ServerContext.PressureIdle = TimeSpan.Zero;
+
+            ServerContext.PressureProbeForTest = () => false;
+            Assert.False(ServerContext.RunIdleReleaseNow(TimeSpan.FromHours(1)), "memory to spare: the window stands");
+            Assert.True(ServerContext.HasResidentSemanticAnalyzers());
+
+            ServerContext.PressureProbeForTest = () => true;
+            Assert.True(ServerContext.RunIdleReleaseNow(TimeSpan.FromHours(1)));
+            Assert.False(ServerContext.HasResidentSemanticAnalyzers());
+            Assert.Equal(first, CodeCompassTools.FindReferences("Run"));
+        }
+        finally
+        {
+            ServerContext.PressureProbeForTest = null;
+            ServerContext.PressureIdle = oldIdle;
+            ServerContext.Init(repo.Root);
+        }
+    }
+
     [Fact]
     public void SearchCode_SignalsTruncationVsExactCount()
     {
