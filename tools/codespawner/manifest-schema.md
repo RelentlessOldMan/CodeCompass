@@ -290,7 +290,9 @@ staticInitRoots: name
 digest := sha256(s1 GS s2 GS s3 GS s4 GS s5)               // lowercase hex; all-empty = sha256(GS x4)
 ```
 
-`pure`, `simpleName`, `def`, `refs` and `edges` are not in it. Golden vector (`digest-selftest`):
+`pure`, `simpleName`, `def`, `refs` and `edges` are not in it. It guards a manifest against an accidental
+or unsigned edit, not a deliberate one: anyone can recompute it, and `verify` does (it cannot tell a re-signed
+wrong `rta` from a right one). Golden vector (`digest-selftest`):
 `28b4e1de981d282a6918de91846e990955f5b8220c88efc993d2a984c0bfed08`, for this fixture (every symbol not
 listed has a `kind` and none of the edge kinds):
 

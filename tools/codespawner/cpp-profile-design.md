@@ -115,7 +115,7 @@ quadrant at least once.
 
 `verify` checks every new field: `cha` is exactly the override set of a receiver at or below `static`'s class;
 `rta ⊆ cha`; each `instance` has an existing `instanceOf`; every def/ref line really contains the name;
-`cppTruthSha` recomputes. (As built, below, lists every check.)
+`cppTruthSha` recomputes. (As built, below, lists every check, and what verify does not prove.)
 
 ### D10. Member-function pointers
 
@@ -160,13 +160,17 @@ pointers that are null, and method↔free-function cycles exist. All truth is st
   from the instantiated classes, or from all concrete classes when none is (so `--cpp-instantiated-frac 0`
   still constructs the static objects' classes). One more construction is reachable only through dispatch:
   an instantiated class's own virtual implementation, called through that class from live code, constructs a
-  class nothing else reachable constructs, so the RTA solve below takes more than one round. (Skipped when the
-  program has no such class, or fewer than two never-constructed concrete classes.)
+  class nothing else reachable constructs, so the RTA solve below needs a second pass that adds a class (at
+  least three passes, counting the last, which adds nothing). (Skipped when the program has no such class, when
+  every instantiated class has a static object, or a static object's member, at or below it — rare at the
+  default knobs, the rule at `--cpp-static-init 20` — or when fewer than two concrete classes are never
+  constructed in reachable code.)
 - Members: 30% of classes hold one member object of an instantiated class (not an ancestor). One more member
   makes a class live only through a base subobject: an abstract class with a constructed subclass holds a
-  member of a never-constructed concrete class unrelated to it, which is then live only because the subclass's
-  complete objects contain it. (Skipped when no such pair exists, or when it would leave fewer than two
-  never-constructed concrete classes for the dispatch-only construction; 1.2.2.)
+  member of a concrete class unrelated to it and never constructed in reachable code (dead code may construct
+  it), which is then live only because the subclass's complete objects contain it. (Skipped when no such pair
+  exists — in practice at `--cpp-depth 0`, and at `--cpp-depth 16` with the default 12 classes — or when it would leave
+  fewer than two such classes for the dispatch-only construction; 1.2.2.)
 - Templates alternate: a function template `tf_t` (symbol `ns::tf_t`, instance `ns::tf_t<int>`) and a class
   template `Tmpl_t` with one method (symbol `ns::Tmpl_t::m_0`, instance `ns::Tmpl_t<int>::m_0`). An instance's
   `def` is its template's body line. With two or more templates, the last is never used. Template 0 gets
@@ -228,11 +232,23 @@ recorded none, so a whole-word search found lines no symbol owned).
 complete object; the member objects of a live class, including those its base classes declare, are live too.
 A base subobject does not make its own class live. `rta` = the `cha` targets that some live class in the
 receiver's subtree dispatches to. Reachability over `rta` can construct more classes, so the generator iterates
-to a fixpoint, and the dispatch-only construction above makes it take more than one round.
+to a fixpoint, and the dispatch-only construction above makes a second pass add a class.
 
-**Verify (v2):** accepts versions 1 and 2; any other version exits 2. A v2 manifest of the wrong shape (a
-field of the wrong JSON type, a duplicate symbol or class key, a v1-only field such as `bytes`, a virtual or
-member-pointer record missing a field) exits 2 before any check runs. Then it checks:
+**Verify (v2):** accepts versions 1 and 2; any other version exits 2. A manifest with a duplicate key anywhere
+exits 2, as does a `_meta` that is not an object, a `seed` that is not a 32-bit integer, or a `generatorVersion`
+/ `corpusRoot` that is not a string. A v2 manifest of the wrong shape (a field of the wrong JSON type, a
+symbol with no string `def`, a v1-only field such as `bytes`, a root `dupGroups` or `_meta.indirectTruthSha`,
+a virtual or member-pointer record missing a field) exits 2 before any check runs.
+
+What verify proves, and what it does not: it proves the manifest is **internally consistent** (kinds, keys,
+hierarchy, record shapes, `cha` against the hierarchy) and that its **sites are real** (each def is a
+definition line in the right file, each ref a line naming the symbol that is neither a declaration nor
+another definition, and every definition line in the program belongs to some symbol). It does **not** re-read
+calls from the program: `edges`, `rta`, `implicitEdges`, `staticInitRoots` and memberPtr `dispatched` are
+checked only for the right kinds of target, so a wrong-but-well-formed one passes. `cppTruthSha` covers those
+fields, but verify recomputes it from the manifest itself, so it catches an edit that was not re-signed, not a
+re-signed one. The truth of those fields is carried by the generator's unit tests (an independent recompute of
+liveness and `rta` from the emitted program) and by clang compiling the program. Then it checks:
 - `_meta.lang` is `cpp`; `_meta.classes` is acyclic, names only classes as bases, and holds exactly the
   `kind: class` symbols; each class's bases are the ones its `class` line names, in order;
 - each symbol has a known `kind` that fits its key (a `<` makes an instance; a key under a class is a ctor,
@@ -240,6 +256,15 @@ member-pointer record missing a field) exits 2 before any check runs. Then it ch
 - def/ref lines contain the simpleName as a whole word (a ctor's not right after a `~`); sites are canonical
   `dir/file:line`; defs are unique (an instance shares its template's); no symbol lists its def or a site
   twice in `refs`;
+- where sites sit (class symbols, whose names are type uses on any line, excepted): a def is a definition line
+  (a body opening `{`, or a pure `= 0;`); a member's def is in its class's `.hpp` / `.cpp`, a function's in no
+  class or template file; no site is a declaration (the `cpp/rt/*.hpp` prototypes, an in-class `void m_1();`,
+  `Cls_3();` or `~Cls_3();`); no ref is a definition line (an override's `void m_1() override {` names the
+  method it overrides but does not call it; `Cls_3::~Cls_3() {` names the class but calls no ctor);
+- completeness: every definition line under `cpp/` (a function, method, ctor or dtor body, a pure `= 0;`, a
+  `class` line) is some symbol's def, so a symbol deleted from the manifest fails (`int main()` is not a
+  symbol);
+- `edges` never target a `class` or a `template` (a call reaches a function, member or instance);
 - a `class` symbol has no edges; `instanceOf` is a `template`, only an instance has one, and an instance's def
   is its template's;
 - `pure` is set exactly on the methods whose def line ends in `= 0;`;
@@ -247,8 +272,8 @@ member-pointer record missing a field) exits 2 before any check runs. Then it ch
   `table` or `arg`;
 - per virtual record: `static` is a method; `cha` holds no pure method and no duplicate, and is exactly the
   override set of some receiver at or below `static`'s class that resolves the call to `static`; `rta ⊆ cha`;
-- `cppTruthSha` is present and recomputes. (Exact `rta` needs the program's constructions, so the digest and
-  the unit tests' independent recompute carry it.)
+- `cppTruthSha` is present and recomputes (an unsigned edit, not a re-signed one; exact `rta` needs the
+  program's constructions, which verify does not read).
 
 `mutate` refuses a v2 manifest (it edits C corpora only) with exit 2, before touching anything.
 
