@@ -162,6 +162,11 @@ pointers that are null, and method↔free-function cycles exist. All truth is st
   an instantiated class's own virtual implementation, called through that class from live code, constructs a
   class nothing else reachable constructs, so the RTA solve below takes more than one round. (Skipped when the
   program has no such class, or fewer than two never-constructed concrete classes.)
+- Members: 30% of classes hold one member object of an instantiated class (not an ancestor). One more member
+  makes a class live only through a base subobject: an abstract class with a constructed subclass holds a
+  member of a never-constructed concrete class unrelated to it, which is then live only because the subclass's
+  complete objects contain it. (Skipped when no such pair exists, or when it would leave fewer than two
+  never-constructed concrete classes for the dispatch-only construction; 1.2.2.)
 - Templates alternate: a function template `tf_t` (symbol `ns::tf_t`, instance `ns::tf_t<int>`) and a class
   template `Tmpl_t` with one method (symbol `ns::Tmpl_t::m_0`, instance `ns::Tmpl_t<int>::m_0`). An instance's
   `def` is its template's body line. With two or more templates, the last is never used. Template 0 gets

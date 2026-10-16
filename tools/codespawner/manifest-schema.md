@@ -307,7 +307,7 @@ listed has a `kind` and none of the edge kinds):
 
 with `staticInitRoots = [ns::A::A, ns::A::~A]` (the same set as `CppDigestTests.GoldenSyms`). A generated
 program's digest is pinned too: `gen --lang cpp` at the default seed 1337 gives
-`d3a38e31f260177f36337a7b475eba0fb266008cf56e22e620ced14a36f40ad5` (unit test + bench), and a release that moves
+`2cf4070df906e79da20248902e948ebb3b76fe289f1baee186fc5f0d9f2c4e99` (unit test + bench), and a release that moves
 it says so in the CHANGELOG.
 
 ## Stable invariants consumers may rely on
