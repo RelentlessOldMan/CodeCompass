@@ -624,8 +624,11 @@ public static class RepositoryIndexer
         {
             var dir = IndexStore.GetCacheDir(root);
             var walker = new FileWalker(new IgnoreRules());
-            var newSnapshot = new Dictionary<string, FileState>(StringComparer.Ordinal);
-            var seen = new HashSet<string>(StringComparer.Ordinal);
+            // Edited in place: rebuilding the whole ledger as a dictionary (and every walked path in a set) cost ~300 B a
+            // file at peak, and rewrote the whole base even when nothing changed. Now a bit per base row marks what the walk
+            // saw, a set only paths outside the base, and only the changes are written (a journal, or a fold past its cap).
+            var seenBase = new System.Collections.BitArray(old.BaseCount);
+            var seenOther = new HashSet<string>(StringComparer.Ordinal);
             int added = 0, modified = 0, removed = 0, walked = 0;
             // The sidecar cutoff is a repo property decided at BUILD time (adaptive to shape + network) and
             // recorded in meta. An incremental update MUST reuse the same value and re-persist it - otherwise
@@ -639,10 +642,9 @@ public static class RepositoryIndexer
 
             using (var extractor = new TreeSitterSymbolExtractor())
             {
-                // Update rebuilds the whole snapshot from the walk, so "record new state" is a dictionary
-                // write and "drop" is a no-op (a dropped file is simply absent from the fresh snapshot).
-                Action<string, FileState> upsert = (r, s) => newSnapshot[r] = s;
-                Action<string> drop = _ => { };
+                // `recordedBy` was read above, before the first upsert moves it.
+                Action<string, FileState> upsert = (r, s) => old[r] = s;
+                Action<string> drop = r => old.Remove(r);
 
                 foreach (var file in walker.Walk(root))
                 {
@@ -651,7 +653,8 @@ public static class RepositoryIndexer
                     if (ct.IsCancellationRequested) { text.Dispose(); symbols.Dispose(); ct.ThrowIfCancellationRequested(); }
                     if (onScan is not null && (++walked & 0x1FF) == 0) onScan(walked); // heartbeat every 512 files
                     var rel = file.RelativePath;
-                    seen.Add(rel);
+                    int row = old.BaseIndexOf(rel);
+                    if (row >= 0) seenBase[row] = true; else seenOther.Add(rel);
                     var mtime = file.MTimeTicks; // from the walk enumeration - avoids a per-file stat (a full
                                                  // extra round-trip per file over SMB; this is the no-op-update cost)
                     FileState? oldState = old.TryGetValue(rel, out var os) ? os : (FileState?)null;
@@ -660,10 +663,7 @@ public static class RepositoryIndexer
                     // (negative) or unknown (0) - it could have been racy - never matches, nor does an entry from an older
                     // ledger whose stamp is too close to that ledger's write (LedgerTrust.MatchesListing).
                     if (oldState is { } u && LedgerTrust.MatchesListing(u, file.Size, mtime, recordedBy, rootIsNetwork))
-                    {
-                        newSnapshot[rel] = u;
-                        continue;
-                    }
+                        continue; // already in the ledger as it is
 
                     OnUpdateFileForTests?.Invoke(rel);
                     switch (ApplyExistingFile(text, symbols, dir, sidecarThreshold, rel, file.FullPath, file.Size, mtime, oldState, recordedBy,
@@ -683,11 +683,12 @@ public static class RepositoryIndexer
             // path). When the walk is incomplete we keep those paths (index + snapshot) untouched; a later
             // COMPLETE update reconciles any genuine deletions. Build already records DroppedDirs; Update must
             // honor it before pruning.
+            var unseen = old.UnseenKeys(seenBase, seenOther);
             if (walker.DroppedDirs == 0)
             {
-                foreach (var rel in old.Keys)
+                foreach (var rel in unseen)
                 {
-                    if (seen.Contains(rel)) continue;
+                    old.Remove(rel);
                     text.RemovePath(rel);
                     symbols.RemovePath(rel);
                     PositionalSidecar.Delete(dir, rel); // idempotent (no-op if none) - covers any cutoff, no orphans
@@ -696,19 +697,16 @@ public static class RepositoryIndexer
             }
             else
             {
-                // Carry the un-seen (possibly just dropped) paths forward so the snapshot doesn't lose them
-                // either - otherwise the next update's `old` wouldn't know to reconcile them once the walk heals.
-                int retained = 0;
-                foreach (var rel in old.Keys)
-                    if (!seen.Contains(rel) && !newSnapshot.ContainsKey(rel) && old.TryGetValue(rel, out var st))
-                    { newSnapshot[rel] = st; retained++; }
+                // The un-seen (possibly just dropped) paths stay in the ledger untouched - otherwise the next update
+                // wouldn't know to reconcile them once the walk heals.
+                int retained = unseen.Count;
                 Log.Global.Warn($"index update: walk dropped {walker.DroppedDirs} dir(s); SUPPRESSED deletion of {retained} absent path(s) to avoid pruning a subtree on a transient failure (a later complete update reconciles)");
             }
 
             if (added + modified + removed > RebuildThreshold)
                 return FullRebuild(root, text, symbols, sw, ct);
 
-            SaveAll(root, text, symbols, newSnapshot);
+            SaveAll(root, text, symbols, old); // a journal even when empty: its write time bounds the ledger, as the rewrite did
             sw.Stop();
             // Refresh coverage/meta. OverCapSkipped is exact from this walk (a size decision, free per file);
             // the symbol-skipped count needs file CONTENT to classify, which an incremental walk only has for

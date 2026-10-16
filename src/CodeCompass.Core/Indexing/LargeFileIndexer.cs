@@ -192,11 +192,8 @@ public static class LargeFileIndexer
             else cut = force ? len : -1;
             if (cut <= 0) return; // nothing to close yet
 
-            var chars = DecodeBlock(data, skip, cut - skip);
-            whole?.Add(chars);
-
             var bloom = BloomFilter.Create(BloomBytes, BloomK);
-            AddTrigramsToBloom(chars, bloom);
+            AddTrigrams(data, skip, cut - skip, bloom, whole);
 
             // This block continues a line the previous (forced) cut split: a token straddling that cut has trigrams on
             // BOTH sides, so neither block's own Bloom would admit it. Add the trigrams of the seam window (previous
@@ -208,7 +205,7 @@ public static class LargeFileIndexer
                 var seam = new byte[seamTail.Length + head];
                 seamTail.CopyTo(seam, 0);
                 Array.Copy(data, skip, seam, seamTail.Length, head);
-                AddTrigramsToBloom(DecodeBlock(seam, 0, seam.Length), bloom);
+                AddTrigrams(seam, 0, seam.Length, bloom, whole: null);
                 seamTail = null;
             }
 
@@ -223,11 +220,11 @@ public static class LargeFileIndexer
             blockStartByte += cut;
             blockStartLine += newlines;
 
-            // Keep the remainder for the next block.
+            // Keep the remainder for the next block: moved to the front in place (it was copied out and written back).
             int rem = len - cut;
-            var tmp = rem > 0 ? data.AsSpan(cut, rem).ToArray() : Array.Empty<byte>();
-            blockBuf.SetLength(0);
-            if (rem > 0) blockBuf.Write(tmp, 0, rem);
+            if (rem > 0) Array.Copy(data, cut, data, 0, rem);
+            blockBuf.SetLength(rem);
+            blockBuf.Position = rem;
             if (!force && rem < BlockTargetBytes) return;
             if (rem == 0) return;
         }
@@ -248,17 +245,23 @@ public static class LargeFileIndexer
         return (lead >= 0x80 && p + seqLen > len) ? p : len;
     }
 
-    private static char[] DecodeBlock(byte[] bytes, int index, int count)
+    // Decode into a pooled buffer - a fresh ~2 MB char[] per 1 MB block was a large-object allocation each time, GBs of
+    // them for a big streamed file - and feed its trigrams to the block's Bloom and the whole-file set. UTF-8 never
+    // decodes to more chars than it has bytes.
+    private static void AddTrigrams(byte[] bytes, int index, int count, BloomFilter bloom, TrigramAccumulator? whole)
     {
-        if (count <= 0) return Array.Empty<char>();
-        var dec = Encoding.UTF8.GetDecoder();
-        int need = dec.GetCharCount(bytes, index, count, flush: true);
-        var chars = new char[need];
-        dec.GetChars(bytes, index, count, chars, 0, flush: true);
-        return chars;
+        if (count <= 0) return;
+        var chars = ArrayPool<char>.Shared.Rent(count);
+        try
+        {
+            var span = chars.AsSpan(0, Encoding.UTF8.GetChars(bytes, index, count, chars, 0));
+            whole?.Add(span);
+            AddTrigramsToBloom(span, bloom);
+        }
+        finally { ArrayPool<char>.Shared.Return(chars); }
     }
 
-    private static void AddTrigramsToBloom(char[] chars, BloomFilter bloom)
+    private static void AddTrigramsToBloom(ReadOnlySpan<char> chars, BloomFilter bloom)
     {
         for (int i = 0; i + 3 <= chars.Length; i++)
             bloom.Add(TrigramIndex.TriKey(chars[i], chars[i + 1], chars[i + 2]));

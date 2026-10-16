@@ -79,4 +79,21 @@ public class PerformanceRegressionTests
         }
         finally { File.Delete(path); }
     }
+
+    // A worker's scratch set kept the capacity of the largest file it ever saw (Clear() doesn't shrink): one outlier left
+    // it at hundreds of MB for the rest of the build. Past the cap it is trimmed; under it, reuse is untouched.
+    [Fact]
+    public void TrigramScratch_IsTrimmedAfterAnOutlier_ButKeptForOrdinaryFiles()
+    {
+        var scratch = new HashSet<long>();
+        _ = TrigramIndex.ComputeTrigrams("class Foo { int bar; }", scratch);
+        Assert.NotEmpty(scratch); // ordinary: kept for reuse
+
+        var rnd = new Random(20261016); // random CJK: nearly every trigram distinct
+        var big = string.Create(3_000_000, rnd, (span, r) => { for (int i = 0; i < span.Length; i++) span[i] = (char)(0x4E00 + r.Next(20_000)); });
+        var tg = TrigramIndex.ComputeTrigrams(big, scratch);
+        Assert.True(tg.Length > TrigramIndex.ScratchTrimAbove, $"outlier has only {tg.Length} trigrams");
+        Assert.Equal(tg.Length, tg.Distinct().Count());
+        Assert.True(scratch.EnsureCapacity(0) < 1024, $"scratch kept capacity {scratch.EnsureCapacity(0):N0}");
+    }
 }

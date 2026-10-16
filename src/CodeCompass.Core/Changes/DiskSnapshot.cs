@@ -81,6 +81,28 @@ public sealed class DiskSnapshot : IDisposable
 
     public bool ContainsKey(string relPath) => TryGetValue(relPath, out _);
 
+    /// <summary>The base row of <paramref name="relPath"/>, or -1 (not in the base). Rows are fixed until the next
+    /// <see cref="Compact"/>, so a caller can mark the ones it saw in a bit per row (see <see cref="UnseenKeys"/>).</summary>
+    public int BaseIndexOf(string relPath) => _base?.IndexOf(relPath) ?? -1;
+
+    public int BaseCount => _base?.Count ?? 0;
+
+    /// <summary>The live paths a walk didn't see: base rows whose bit in <paramref name="seenBase"/> is clear, and overlay
+    /// paths outside the base missing from <paramref name="seenOther"/>. A list, so the caller may remove them.</summary>
+    public List<string> UnseenKeys(System.Collections.BitArray seenBase, HashSet<string> seenOther)
+    {
+        var unseen = new List<string>();
+        for (int i = 0; i < BaseCount; i++)
+        {
+            if (seenBase[i]) continue;
+            var p = _base!.GetPath(i);
+            if (!_removed.Contains(p)) unseen.Add(p); // live in the base, or upserted over it
+        }
+        foreach (var k in _overlay.Keys)
+            if (!seenOther.Contains(k) && (_base is null || !_base.Contains(k))) unseen.Add(k);
+        return unseen;
+    }
+
     public FileState this[string relPath]
     {
         set { _overlay[relPath] = value; _removed.Remove(relPath); _lastSetTicks = DateTime.UtcNow.Ticks; }

@@ -253,6 +253,50 @@ public class StreamingIndexTests
         Assert.Single(scan);
         Assert.True(bytesRead < fileLen / 4, $"mid-size positional scan read {bytesRead:N0} of {fileLen:N0} B - not block-selective");
     }
+
+    // The block scan decodes into pooled buffers now, reused block to block (and a seam block decodes its tail and body
+    // back to back into one): every hit in every block - BOM, multi-byte text, a forced cut through a long line - must
+    // still be exactly the whole-file scan's, and no hit may carry another block's text.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BlockScan_WithPooledBuffers_MatchesAWholeFileScan(bool caseSensitive)
+    {
+        using var repo = new TempRepo();
+        var path = repo.FullPath("mid.h");
+        const char NL = (char)10;
+        int longLine = 0;
+        using (var w = new System.IO.StreamWriter(path, append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true)))
+        {
+            long written = 0;
+            while (written < 10L * 1024 * 1024)
+            {
+                longLine++;
+                string t = longLine % 997 == 0 ? $"HitMarker café_{longLine} 日本 HitMarker" : $"REG_{longLine} = 0x{longLine:X} // naïve ünïcode";
+                w.Write(t); w.Write(NL); written += Encoding.UTF8.GetByteCount(t) + 1;
+            }
+            longLine++;
+            w.Write(new string('x', 17 << 20) + "HitMarker_after_a_forced_cut"); // past the 16 MB hard cap: a forced cut
+            w.Write(NL);
+        }
+
+        var (text, symbols, _) = RepositoryIndexer.Build(repo.Root);
+        using (text) using (symbols) { }
+        var dir = IndexStore.GetCacheDir(repo.Root);
+        Assert.True(PositionalSidecar.HasSidecar(dir, "mid.h"));
+
+        string query = caseSensitive ? "HitMarker" : "hitmarker";
+        var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        var scan = new List<SearchMatch>();
+        Assert.True(PositionalSidecar.TryScan(dir, repo.Root, "mid.h", query, scan, 100_000, caseSensitive, out _));
+        var whole = new List<SearchMatch>();
+        FileScanner.ScanText("mid.h", TextDecoder.FromBytes(System.IO.File.ReadAllBytes(path)), query, whole, 100_000, 0, comparison);
+
+        Assert.True(scan.Count > 100, $"only {scan.Count} hits");
+        Assert.Equal(whole.Where(m => m.Line != longLine).Select(m => (m.Line, m.Column, m.LineText)),
+                     scan.Where(m => m.Line != longLine).Select(m => (m.Line, m.Column, m.LineText)));
+        Assert.Contains(scan, m => m.Line == longLine); // the hit past the forced cut is found (its column is block-relative)
+    }
 }
 
 public class BloomFilterTests

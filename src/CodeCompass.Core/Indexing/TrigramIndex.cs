@@ -78,8 +78,12 @@ public sealed class TrigramIndex
 
         var result = new long[scratch.Count];
         scratch.CopyTo(result);
+        // Clear() keeps capacity: one huge file left its worker's set at hundreds of MB for the rest of the build.
+        if (scratch.Count > ScratchTrimAbove) { scratch.Clear(); scratch.TrimExcess(); }
         return result;
     }
+
+    internal const int ScratchTrimAbove = 1 << 20; // distinct trigrams; a large source file has well under 100k
 
     /// <summary>
     /// Merge a document's precomputed trigrams into the index. NOT thread-safe: callers

@@ -23,9 +23,9 @@ public static class LineSnippet
     /// <paramref name="line"/>, length <paramref name="matchLength"/>), plus <c>offset</c>: the column of the
     /// returned text's first char relative to the line start (0 when the whole line fits). A consumer mapping a
     /// 1-based line column into the returned text uses <c>column - 1 - offset</c>.</summary>
-    public static (string Text, int Offset) Make(string line, int start, int length, int matchIndex, int matchLength)
+    public static (string Text, int Offset) Make(ReadOnlySpan<char> line, int start, int length, int matchIndex, int matchLength)
     {
-        if (length <= MaxChars) return (Scrub(line.AsSpan(start, length)), 0);
+        if (length <= MaxChars) return (Scrub(line.Slice(start, length)), 0);
 
         int rel = matchIndex - start;
         // Keep at least one real character on each side of the match so a whole-word check never mistakes the
@@ -33,12 +33,12 @@ public static class LineSnippet
         int winStart = Math.Max(0, rel - Lead);
         int winEnd = Math.Min(length, Math.Max(winStart + MaxChars, rel + matchLength + 1));
         bool cutLeft = winStart > 0, cutRight = winEnd < length;
-        var body = Scrub(line.AsSpan(start + winStart, winEnd - winStart));
+        var body = Scrub(line.Slice(start + winStart, winEnd - winStart));
         var text = (cutLeft ? Ellipsis.ToString() : "") + body + (cutRight ? Ellipsis.ToString() : "");
         return (text, winStart - (cutLeft ? 1 : 0));
     }
 
-    /// <summary>Whole-line convenience: <see cref="Make(string,int,int,int,int)"/> over all of <paramref name="line"/>.</summary>
+    /// <summary>Whole-line convenience: <see cref="Make(ReadOnlySpan{char},int,int,int,int)"/> over all of <paramref name="line"/>.</summary>
     public static (string Text, int Offset) Make(string line, int matchIndex, int matchLength) =>
         Make(line, 0, line.Length, matchIndex, matchLength);
 

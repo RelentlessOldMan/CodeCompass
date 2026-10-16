@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO.Hashing;
 using System.Text;
 using CodeCompass.Core.Storage;
@@ -102,6 +103,10 @@ public static class PositionalSidecar
 
         var full = Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar));
         FileStream? src = null;
+        // One pooled pair per call, grown as needed: a fresh ~1 MB byte[] and ~2 MB string per admitted block were
+        // large-object allocations, GBs of them on a broad search. No match keeps a reference (each line is copied).
+        byte[]? bytes = null;
+        char[]? chars = null;
         int startCount = results.Count;
         try
         {
@@ -123,23 +128,37 @@ public static class PositionalSidecar
                 // before it), a match straddling that cut is scanned here - its trigrams are in this block's Bloom.
                 int tail = (int)Math.Min(LargeFileIndexer.SeamBytes, sc.StartByte[i]);
                 src ??= new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read);
-                var bytes = new byte[(int)blockLen + tail];
+                int len = (int)blockLen + tail;
+                bytes = Pooled(bytes, len);
+                chars = Pooled(chars, len); // UTF-8 never decodes to more chars than it has bytes
                 src.Seek(sc.StartByte[i] - tail, SeekOrigin.Begin);
                 // A short read means the file changed since it was indexed: not "handled" - the caller whole-file scans.
-                if (!ReadFull(src, bytes)) return Abandon(results, startCount, rel, "file is shorter than when indexed");
+                if (!ReadFull(src, bytes, len)) return Abandon(results, startCount, rel, "file is shorter than when indexed");
                 bytesRead += blockLen + tail; // bytes pulled from the (possibly networked) source
                 if (tail == 0 || bytes[tail - 1] == (byte)'\n')
                 {
                     int skip = sc.StartByte[i] == 0 ? sc.BomLen : 0;
-                    var text = Encoding.UTF8.GetString(bytes, tail + skip, bytes.Length - tail - skip);
-                    FileScanner.ScanText(rel, text, query, results, maxResults, lineOffset: sc.StartLine[i] - 1, comparison);
+                    int n = Encoding.UTF8.GetChars(bytes, tail + skip, len - tail - skip, chars, 0);
+                    FileScanner.ScanText(rel, chars.AsSpan(0, n), query, results, maxResults, lineOffset: sc.StartLine[i] - 1, comparison);
                 }
-                else ScanSeamBlock(rel, bytes, tail, query, results, maxResults, sc.StartLine[i], comparison);
+                else ScanSeamBlock(rel, bytes, len, tail, chars, query, results, maxResults, sc.StartLine[i], comparison);
             }
         }
         catch (Exception ex) { return Abandon(results, startCount, rel, ex.Message); }
-        finally { src?.Dispose(); }
+        finally
+        {
+            src?.Dispose();
+            if (bytes is not null) ArrayPool<byte>.Shared.Return(bytes);
+            if (chars is not null) ArrayPool<char>.Shared.Return(chars);
+        }
         return true;
+    }
+
+    private static T[] Pooled<T>(T[]? buf, int len)
+    {
+        if (buf is not null && buf.Length >= len) return buf;
+        if (buf is not null) ArrayPool<T>.Shared.Return(buf);
+        return ArrayPool<T>.Shared.Rent(len);
     }
 
     // A read failed partway (a share hiccup, the file changed under us): discard this file's partial hits and report it
@@ -156,14 +175,14 @@ public static class PositionalSidecar
     // in the tail belong to the previous block (skipped); a match crossing into this block is the one only this scan can
     // find. Columns in a >16 MB line are reported relative to this block's start, as for any continuation block; a
     // straddling match reports column 1 (its LineTextOffset is shifted to match, so whole-word checks stay exact).
-    private static void ScanSeamBlock(string rel, byte[] bytes, int tail, string query, List<SearchMatch> results,
+    private static void ScanSeamBlock(string rel, byte[] bytes, int len, int tail, char[] chars, string query, List<SearchMatch> results,
                                       int maxResults, int startLine, StringComparison comparison)
     {
-        var tailText = Encoding.UTF8.GetString(bytes, 0, tail);
-        var combined = tailText + Encoding.UTF8.GetString(bytes, tail, bytes.Length - tail);
-        int tailChars = tailText.Length;
+        // The tail and the block decoded apart (a cut may split a character), back to back.
+        int tailChars = Encoding.UTF8.GetChars(bytes, 0, tail, chars, 0);
+        int n = tailChars + Encoding.UTF8.GetChars(bytes, tail, len - tail, chars, tailChars);
         var found = new List<SearchMatch>();
-        FileScanner.ScanText(rel, combined, query, found, int.MaxValue, lineOffset: startLine - 1, comparison);
+        FileScanner.ScanText(rel, chars.AsSpan(0, n), query, found, int.MaxValue, lineOffset: startLine - 1, comparison);
         foreach (var m in found)
         {
             if (results.Count >= maxResults) return;
@@ -175,10 +194,10 @@ public static class PositionalSidecar
         }
     }
 
-    private static bool ReadFull(FileStream fs, byte[] buf)
+    private static bool ReadFull(FileStream fs, byte[] buf, int len)
     {
         int total = 0, r;
-        while (total < buf.Length && (r = fs.Read(buf, total, buf.Length - total)) > 0) total += r;
-        return total == buf.Length;
+        while (total < len && (r = fs.Read(buf, total, len - total)) > 0) total += r;
+        return total == len;
     }
 }

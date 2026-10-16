@@ -222,7 +222,7 @@ public sealed class SnapshotBaseReader : IDisposable
 
     public bool Contains(string path) => IndexOf(path) >= 0;
 
-    private int IndexOf(string path)
+    public int IndexOf(string path)
     {
         int lo = 0, hi = Count - 1;
         while (lo <= hi)
