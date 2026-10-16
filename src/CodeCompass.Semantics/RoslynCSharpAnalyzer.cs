@@ -59,6 +59,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _projectId = null;
             _clashByFile.Clear();       // per-file answers belong to this model; a rebuild recomputes them
             _conditionalByFile.Clear();
+            _clashFilter = null;
         }
     }
 
@@ -103,6 +104,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     // injected. See UsingsClash.
     private readonly HashSet<string> _outsideImplicitUsings = new(StringComparer.Ordinal); // exact: case twins are different files
     private IReadOnlyList<string>? _declarationClash;
+    // Which files could have a CS0104 at all (built on first use; see ClashFilter).
+    private ClashFilter? _clashFilter;
 
     /// <summary>Where the injected global usings made a name ambiguous (CS0104) in a file whose own project never had them -
     /// e.g. a legacy project's own <c>Task</c> class next to SDK projects' <c>System.Threading.Tasks</c>. A use bound to
@@ -113,15 +116,23 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     public (IReadOnlyList<string> Declarations, IReadOnlyList<string> Files) UsingsClash(IEnumerable<string> candidateFullPaths,
         System.Threading.CancellationToken ct = default)
     {
-        var (solution, _) = EnsureBuilt(ct);
+        var (solution, project) = EnsureBuilt(ct);
         List<string> outside;
         lock (_gate) outside = _outsideImplicitUsings.ToList();
         if (outside.Count == 0) return (Array.Empty<string>(), Array.Empty<string>());
 
+        // Binding a file is the expensive part (a Roslyn-size repo has ~13.5k files outside the usings), and CS0104 is reported
+        // at a simple name two of the file's imports both declare - so a file that names none can't have one, and isn't
+        // bound to find that out.
+        var filter = ClashFilterFor(solution, project, ct);
         bool Clashes(string path, bool declarationsOnly)
         {
             var id = DocumentIdFor(solution, path);
-            var model = id is null ? null : solution.GetDocument(id)?.GetSemanticModelAsync(ct).GetAwaiter().GetResult();
+            var doc = id is null ? null : solution.GetDocument(id);
+            if (doc is null) return false;
+            if (!filter.MayClash(doc, ct)) return false;
+            Interlocked.Increment(ref _clashBinds);
+            var model = doc.GetSemanticModelAsync(ct).GetAwaiter().GetResult();
             if (model is null) return false;
             var diags = declarationsOnly ? model.GetDeclarationDiagnostics(cancellationToken: ct) : model.GetDiagnostics(cancellationToken: ct);
             return diags.Any(d => d.Id == "CS0104");
@@ -151,6 +162,194 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     /// <summary>Per-file clash checks (a bind + GetDiagnostics each) run so far (test hook).</summary>
     internal int ClashFileChecks => Volatile.Read(ref _clashFileChecks);
     private int _clashFileChecks;
+
+    /// <summary>Files actually bound by the clash check, for declarations or in full (test hook).</summary>
+    internal int ClashBinds => Volatile.Read(ref _clashBinds);
+    private int _clashBinds;
+
+    // Built from the project this query holds, and kept only while that's still the model: a rebuild in between (new global
+    // usings) must not inherit a filter built from the old one.
+    private ClashFilter ClashFilterFor(Solution solution, Project project, System.Threading.CancellationToken ct)
+    {
+        lock (_gate) if (_clashFilter is not null && ReferenceEquals(_solution, solution)) return _clashFilter;
+        var filter = new ClashFilter(project.GetCompilationAsync(ct).GetAwaiter().GetResult()!, ct);
+        lock (_gate) return ReferenceEquals(_solution, solution) ? _clashFilter ??= filter : filter;
+    }
+
+    // Which files could hold a CS0104 (an ambiguous simple name), decided without binding the file. The compiler reports one
+    // where a simple name, looked up through a using level's imports, finds types of that name and arity in two of them - two
+    // imported namespaces, or one and a `using static` type (whose nested types it imports). So a file can only have one at
+    // a name that two of its imports declare: its own usings at every level (all together - more than any one level sees,
+    // so too many names, never too few) plus the global usings of every file in the compilation (which include the
+    // injected ones). Each using's target is resolved as the compiler resolves it - a using inside a namespace body is
+    // relative to that namespace and sees outer aliases - which costs a lookup per using, not a bind of the file. A target
+    // that's ambiguous makes the file a maybe; one that doesn't resolve imports nothing.
+    internal sealed class ClashFilter
+    {
+        private readonly Compilation _compilation;
+        private readonly Dictionary<string, INamespaceOrTypeSymbol> _globalImports = new(StringComparer.Ordinal);
+        private readonly bool _globalUnresolvable;
+        private readonly Dictionary<string, HashSet<string>> _namesBySet = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, (string Name, int Arity)[]> _importTypes = new(StringComparer.Ordinal);
+        private readonly object _lock = new();
+
+        public ClashFilter(Compilation compilation, System.Threading.CancellationToken ct)
+        {
+            _compilation = compilation;
+            foreach (var tree in compilation.SyntaxTrees)
+            {
+                ct.ThrowIfCancellationRequested();
+                var usings = tree.GetCompilationUnitRoot(ct).Usings.Where(u => u.GlobalKeyword != default && u.Alias is null).ToList();
+                if (usings.Count == 0) continue;
+                var model = compilation.GetSemanticModel(tree);
+                foreach (var u in usings)
+                    if (!Add(model, u, _globalImports, ct)) _globalUnresolvable = true;
+            }
+        }
+
+        /// <summary>Distinct import sets seen so far (diagnostics).</summary>
+        public int Sets { get { lock (_lock) return _namesBySet.Count; } }
+
+        public bool MayClash(Document doc, System.Threading.CancellationToken ct)
+        {
+            if (_globalUnresolvable) return true;
+            var tree = doc.GetSyntaxTreeAsync(ct).GetAwaiter().GetResult();
+            if (tree is null || !_compilation.ContainsSyntaxTree(tree)) return true;
+            var imports = new Dictionary<string, INamespaceOrTypeSymbol>(_globalImports, StringComparer.Ordinal);
+            var usings = tree.GetRoot(ct).DescendantNodes(n => n is CompilationUnitSyntax or BaseNamespaceDeclarationSyntax)
+                             .OfType<UsingDirectiveSyntax>().Where(u => u.GlobalKeyword == default && u.Alias is null).ToList();
+            if (usings.Count > 0)
+            {
+                var model = _compilation.GetSemanticModel(tree);
+                foreach (var u in usings)
+                    if (!Add(model, u, imports, ct)) return true;
+            }
+            var names = NamesFor(imports, ct);
+            return MayNameAny(doc.GetTextAsync(ct).GetAwaiter().GetResult(), names);
+        }
+
+        // A using's target, keyed by what it is (a namespace, or a `using static` type). An alias (using X = ...) is looked up
+        // before imports and can't be ambiguous, so it's never passed here. False when the target is ambiguous.
+        private static bool Add(SemanticModel model, UsingDirectiveSyntax u, Dictionary<string, INamespaceOrTypeSymbol> imports,
+            System.Threading.CancellationToken ct)
+        {
+            var info = model.GetSymbolInfo(u.NamespaceOrType, ct);
+            switch (info.Symbol)
+            {
+                case INamespaceSymbol ns:
+                    imports["N:" + ns.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)] = ns;
+                    return true;
+                case INamedTypeSymbol type when u.StaticKeyword != default:
+                    // The constructed type: Gen<int>.Item and Gen<string>.Item are two types, so two imports.
+                    imports["T:" + type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)] = type;
+                    return true;
+                case null:
+                    return info.CandidateSymbols.IsEmpty;
+                default:
+                    return true; // a type without `static`, or an error type: nothing imported
+            }
+        }
+
+        // The names (and their attribute short forms) that two of these imports declare with the same arity.
+        private HashSet<string> NamesFor(Dictionary<string, INamespaceOrTypeSymbol> imports, System.Threading.CancellationToken ct)
+        {
+            var keys = imports.Keys.OrderBy(k => k, StringComparer.Ordinal).ToList();
+            var key = string.Join(";", keys);
+            lock (_lock)
+            {
+                if (_namesBySet.TryGetValue(key, out var known)) return known;
+                // Each container's types, by (name, arity): a second container declaring one makes the name ambiguous.
+                var firstContainer = new Dictionary<(string, int), string>();
+                var names = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var container in keys)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    foreach (var k in ImportTypes(container, imports[container]))
+                        if (!firstContainer.TryGetValue(k, out var first)) firstContainer[k] = container;
+                        else if (first != container) Ambiguous(k.Name, names);
+                }
+                _namesBySet[key] = names;
+                return names;
+            }
+        }
+
+        // The types an import brings in, by (name, arity): a namespace's types, or a static type's nested ones. A referenced
+        // assembly's type this one can't see (the framework's internal ThrowHelper) never makes a name ambiguous: lookup
+        // takes the accessible candidate over it.
+        private (string Name, int Arity)[] ImportTypes(string key, INamespaceOrTypeSymbol import)
+        {
+            if (_importTypes.TryGetValue(key, out var known)) return known;
+            var types = import.GetTypeMembers()
+                .Where(t => SymbolEqualityComparer.Default.Equals(t.ContainingAssembly, _compilation.Assembly)
+                            || _compilation.IsSymbolAccessibleWithin(t, _compilation.Assembly))
+                .Select(t => (t.Name, t.Arity)).ToArray();
+            return _importTypes[key] = types;
+        }
+
+        private static void Ambiguous(string name, HashSet<string> names)
+        {
+            names.Add(name);
+            if (name.Length > "Attribute".Length && name.EndsWith("Attribute", StringComparison.Ordinal)) names.Add(name[..^"Attribute".Length]);
+        }
+    }
+
+    // Does this C# text hold any of the names as a whole identifier? Exact for what the compiler reads as one: a verbatim
+    // @Name is Name, and formatting characters inside an identifier are dropped as the compiler drops them. A Unicode escape
+    // (\u0054ask) could spell any name, so a text with one is always a maybe.
+    internal static bool MayNameAny(SourceText text, HashSet<string> names)
+    {
+        if (names.Count == 0) return false;
+        // A word becomes a string only when its length and end characters match some name's - most words never do.
+        var shapes = new HashSet<int>();
+        foreach (var n in names) shapes.Add(Shape(n.Length, n[0], n[^1]));
+        var s = text.ToString();
+        if (HasUnicodeEscape(s)) return true;
+        int i = 0;
+        while (i < s.Length)
+        {
+            if (!IsIdentifierPart(s[i])) { i++; continue; }
+            int start = i;
+            bool format = false;
+            for (; i < s.Length && IsIdentifierPart(s[i]); i++)
+                format |= char.GetUnicodeCategory(s[i]) == System.Globalization.UnicodeCategory.Format;
+            if (format)
+            {
+                var sb = new System.Text.StringBuilder(i - start);
+                for (int k = start; k < i; k++)
+                    if (char.GetUnicodeCategory(s[k]) != System.Globalization.UnicodeCategory.Format) sb.Append(s[k]);
+                if (sb.Length > 0 && names.Contains(sb.ToString())) return true;
+            }
+            else if (shapes.Contains(Shape(i - start, s[start], s[i - 1])) && names.Contains(s.Substring(start, i - start)))
+                return true;
+        }
+        return false;
+    }
+
+    private static int Shape(int length, char first, char last) => HashCode.Combine(length, first, last);
+
+    // \u and four hex digits, or \U and eight: what can spell an identifier character. A path's \Users is neither.
+    private static bool HasUnicodeEscape(string s)
+    {
+        for (int i = s.IndexOf('\\'); i >= 0 && i < s.Length - 1; i = s.IndexOf('\\', i + 1))
+        {
+            int digits = s[i + 1] == 'u' ? 4 : s[i + 1] == 'U' ? 8 : 0;
+            if (digits == 0 || i + 2 + digits > s.Length) continue;
+            int j = 0;
+            while (j < digits && char.IsAsciiHexDigit(s[i + 2 + j])) j++;
+            if (j == digits) return true;
+        }
+        return false;
+    }
+
+    private static bool IsIdentifierPart(char c)
+    {
+        if (c < 128) return char.IsAsciiLetterOrDigit(c) || c == '_';
+        if (char.IsLetterOrDigit(c) || char.IsSurrogate(c)) return true;
+        return char.GetUnicodeCategory(c) is System.Globalization.UnicodeCategory.NonSpacingMark
+            or System.Globalization.UnicodeCategory.SpacingCombiningMark or System.Globalization.UnicodeCategory.ConnectorPunctuation
+            or System.Globalization.UnicodeCategory.Format or System.Globalization.UnicodeCategory.LetterNumber;
+    }
+
     // Per-file answers for this analyzer's lifetime (it's dropped when its sources change): the clash check binds the file,
     // and the #if check scans its text, so neither is repeated on every query. Keyed exactly: on a case-sensitive tree
     // Reg.cs and reg.cs are different files.
@@ -571,6 +770,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _builtAtMs = Environment.TickCount64;
             _outsideImplicitUsings.Clear();
             _declarationClash = null;
+            _clashFilter = null;
             _clashByFile.Clear();
             _conditionalByFile.Clear();
             if (globalUsings.Count > 0)
