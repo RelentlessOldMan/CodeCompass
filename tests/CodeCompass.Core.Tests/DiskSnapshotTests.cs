@@ -125,6 +125,41 @@ public class DiskSnapshotTests
         finally { Directory.Delete(dir, true); }
     }
 
+    // CD-3: the overlay is resident for a session's life (one copy per session on the repo), and it waited for a flat
+    // 50,000 entries (~15 MB) before folding into the base. It now folds at a share of the base: 1/32 of it, 1,024 at
+    // least, 50,000 at most.
+    [Theory]
+    [InlineData(10_000, 1_024)]  // small repo: the floor
+    [InlineData(64_000, 2_000)]  // base / 32
+    public void AutoCompaction_ByDefault_FoldsAtAShareOfTheBase(int baseCount, int threshold)
+    {
+        var dir = NewTempDir();
+        var old = Environment.GetEnvironmentVariable("CODECOMPASS_SNAPSHOT_COMPACT");
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_SNAPSHOT_COMPACT", null);
+            using (var seed = DiskSnapshot.Open(dir))
+            {
+                for (int i = 0; i < baseCount; i++) seed[$"b/{i}.cs"] = St(i);
+                seed.Compact();
+            }
+            using var snap = DiskSnapshot.Open(dir);
+            for (int i = 0; i < threshold - 1; i++) snap[$"b/{i}.cs"] = St(i + 1);
+            snap.Save();
+            Assert.Equal(threshold - 1, snap.PendingCount); // just under: a journal
+
+            snap[$"b/{threshold}.cs"] = St(0);
+            snap.Save();
+            Assert.Equal(0, snap.PendingCount);              // at it: folded
+            Assert.Equal(baseCount, snap.Count);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_SNAPSHOT_COMPACT", old);
+            Directory.Delete(dir, true);
+        }
+    }
+
     [Fact]
     public void AutoCompaction_TriggersAtThresholdAndBoundsOverlay()
     {

@@ -29,10 +29,15 @@ public sealed class DiskSnapshot : IDisposable
     private const string BasePattern = "snapshot-*.base";
     private const uint JournalMagicV1 = 0x4A4E5343; // "CSNJ": path, size, mtime, hash (read only - older versions)
     private const uint JournalMagic = 0x324E5343;   // "CSN2": v1's fields + change time, file id, hashed-at, SHA-256 hex ("")
-    private const int DefaultCompactThreshold = 50_000;
+    // The overlay folds into the base at 1/32 of the base's size, within these bounds. It is resident for a session's
+    // life (one copy per session on the repo) and its journal is rewritten on every save, so a flat 50,000 let it reach
+    // ~15 MB a session; a share of the base keeps it ~1.5 MB on a 150k-file repo, for a base rewrite every few thousand
+    // edited files (I/O, not RAM).
+    private const int MinCompactThreshold = 1_024;
+    private const int MaxCompactThreshold = 50_000;
 
     private readonly string _dir;
-    private readonly int _compactThreshold;
+    private readonly int? _compactThreshold; // CODECOMPASS_SNAPSHOT_COMPACT, absolute
     private SnapshotBaseReader? _base;
     private readonly Dictionary<string, FileState> _overlay = new(StringComparer.Ordinal);
     private readonly HashSet<string> _removed = new(StringComparer.Ordinal);
@@ -196,9 +201,12 @@ public sealed class DiskSnapshot : IDisposable
     /// once the overlay grows past the threshold.</summary>
     public void Save()
     {
-        if (_base is null || PendingCount >= _compactThreshold) Compact();
+        if (_base is null || PendingCount >= CompactThreshold) Compact();
         else WriteJournal();
     }
+
+    private int CompactThreshold =>
+        _compactThreshold ?? Math.Clamp(_base!.Count / 32, MinCompactThreshold, MaxCompactThreshold);
 
     /// <summary>Force a fold of the overlay into a new base file (used by tests and Save()).</summary>
     public void Compact()
@@ -420,10 +428,10 @@ public sealed class DiskSnapshot : IDisposable
         NumberedFiles.CleanupOrphans(dir, BasePattern,
             new HashSet<string>(new[] { keepName }, StringComparer.OrdinalIgnoreCase));
 
-    private static int ThresholdFromEnv()
+    private static int? ThresholdFromEnv()
     {
         var env = Environment.GetEnvironmentVariable("CODECOMPASS_SNAPSHOT_COMPACT");
-        return int.TryParse(env, out var v) && v >= 1 ? v : DefaultCompactThreshold;
+        return int.TryParse(env, out var v) && v >= 1 ? v : null;
     }
 
     public void Dispose() => _base?.Dispose();
