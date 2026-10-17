@@ -345,7 +345,7 @@ public static class ServerContext
         }
         Log.For(Root).Info("took over live indexing for this repo (the session that held it ended)");
         if (_liveRequested) StartWatcher();
-        if (_state == IndexState.Ready) Task.Run(MaybeReconcile);
+        if (_state == IndexState.Ready) StartReconcileTask();
     }
 
     // Another process committed a write to the primary cache (its generation token moved): reload so this session
@@ -1601,7 +1601,7 @@ public static class ServerContext
                 PublishStatus(); // Ready
                 // Catch changes made while we weren't watching (a source-control sync, branch switch)
                 // by reconciling in the background - the gate/decision runs off-lock in MaybeReconcile.
-                Task.Run(MaybeReconcile);
+                StartReconcileTask();
                 Task.Run(MaybeReconcileLinks); // warm the federated set off-lock (own watchers/reconcile)
                 return;
             }
@@ -1705,24 +1705,40 @@ public static class ServerContext
         if (ok) DrainPending();
     }
 
+    // The epoch and teardown token are taken NOW, not when the task runs: a task the thread pool starts late - after a
+    // re-point - read the new root and epoch and reconciled a workspace it was never scheduled for, racing that
+    // session's own writes. (Linked roots capture theirs the same way; see ReconcileLinkedOnLoad.)
+    private static void StartReconcileTask()
+    {
+        int epoch = Volatile.Read(ref _epoch);
+        var ct = ShutdownToken;
+        Task.Run(() => MaybeReconcile(epoch, ct));
+    }
+
     // Runs on a background thread after an existing index loads. Decides (off-lock, so the size-check
     // walk doesn't block queries) whether to reconcile external changes, then does it.
-    private static void MaybeReconcile()
+    private static void MaybeReconcile(int epoch, CancellationToken ct)
     {
+        StartupReconcileHookForTest?.Invoke(true);
         try
         {
+            if (ct.IsCancellationRequested || Volatile.Read(ref _epoch) != epoch) return; // re-pointed since: not ours
             if (_own is null) return; // the live-watch role holder reconciles; a read-only session reloads its result
-            if (ShouldAutoReconcile(Root)) { BackgroundReconcile(); return; }
+            if (ShouldAutoReconcile(Root)) { BackgroundReconcile(epoch, ct); return; }
             // The full stat-walk reconcile is gated off (network share or huge repo). Unless the user
             // explicitly disabled auto-reconcile, still run the CHEAP ignore-only prune: a stale index (built
             // by an older/looser version) can hold now-ignored pollution (a rival tool's .claude cache dump, a
             // dir since added to CODECOMPASS_IGNORE), and the query-time filter only HIDES it - this physically
             // drops it, with no re-walk, so even network/huge repos self-heal on startup.
-            if (CodeCompassConfig.AutoReconcile(RootConfig()) != false) BackgroundPruneIgnored(); // drains captured edits after
+            if (CodeCompassConfig.AutoReconcile(RootConfig()) != false) BackgroundPruneIgnored(epoch, ct); // drains captured edits after
             else DrainPending(); // edits the watcher captured before the index loaded (see CaptureIfBusy)
         }
         catch (Exception ex) { Log.For(Root).Warn($"startup reconcile skipped: {ex.Message}"); }
+        finally { StartupReconcileHookForTest?.Invoke(false); }
     }
+
+    // Called as a startup reconcile task starts (true) and ends (false).
+    internal static Action<bool>? StartupReconcileHookForTest;
 
     // Auto-reconcile (on startup, or after the watcher lost events)? Tri-state config wins; default is "local and within the
     // auto limit" (network shares and huge repos are left to a manual reindex - a full-tree stat-walk is slow over SMB, and
@@ -1741,10 +1757,10 @@ public static class ServerContext
     // Reconcile the loaded index against the current tree (picks up out-of-session changes), in the
     // background, while the loaded index keeps serving reads. Mirrors BackgroundBuild's guard usage:
     // _rebuilding makes the watcher capture (not apply) changes so it doesn't race the on-disk write.
-    private static void BackgroundReconcile()
+    private static void BackgroundReconcile() => BackgroundReconcile(Volatile.Read(ref _epoch), ShutdownToken);
+
+    private static void BackgroundReconcile(int epoch, CancellationToken ct)
     {
-        var ct = ShutdownToken;
-        int epoch = Volatile.Read(ref _epoch);
         Rw.EnterWriteLock();
         try { _rebuilding++; _reconciling = true; }
         finally { Rw.ExitWriteLock(); }
@@ -1755,6 +1771,7 @@ public static class ServerContext
         {
             BuildGate.Wait(ct); // serialize against a manual reindex / watcher rebuild
             gated = true;
+            ct.ThrowIfCancellationRequested(); // re-pointed while it waited: Root is another workspace now
             using var wl = IndexWriteLock.Acquire(CacheDir, ct);
             var u = RepositoryIndexer.Update(Root, ct: ct);
             bool changed = u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild;
@@ -1784,11 +1801,12 @@ public static class ServerContext
     // physically drop stale now-ignored paths from the on-disk index (no re-walk, no source reads). Same guard
     // pattern (BuildGate + _rebuilding) and Swap as the full reconcile, so it can't race a manual reindex or a
     // live-watch write. No-op (and no swap) when the index is already clean.
-    private static void BackgroundPruneIgnored()
+    private static void BackgroundPruneIgnored() => BackgroundPruneIgnored(Volatile.Read(ref _epoch), ShutdownToken);
+
+    private static void BackgroundPruneIgnored(int epoch, CancellationToken ct)
     {
-        var ct = ShutdownToken;
-        int epoch = Volatile.Read(ref _epoch);
         try { BuildGate.Wait(ct); } catch (OperationCanceledException) { return; }
+        if (ct.IsCancellationRequested) { BuildGate.Release(); return; } // re-pointed while it waited
         Rw.EnterWriteLock();
         try { _rebuilding++; }
         finally { Rw.ExitWriteLock(); }
