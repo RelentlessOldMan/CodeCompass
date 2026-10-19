@@ -378,6 +378,35 @@ public class RoslynSemanticTests
         Assert.Equal(0, analyzer.LastPinnedModels);
     }
 
+    // A source static class does NOT hide its metadata twin's extension methods: C# gathers extensions from every class of
+    // that name in the namespace. The common polyfill (a source System.Collections.Generic.CollectionExtensions) leaves
+    // every `dict.TryAdd(k, v)` on an IDictionary bound to the framework's TryAdd - which must still be searched.
+    [Fact]
+    public void AMetadataExtensionMethod_OnAShadowedStaticClass_IsStillSearched()
+    {
+        using var repo = new TempRepo();
+        repo.Write("Polyfill.cs", """
+        namespace System.Collections.Generic;
+        internal static class CollectionExtensions
+        {
+            public static TValue? GetValueOrDefault<TKey, TValue>(this IReadOnlyDictionary<TKey, TValue> d, TKey key) => default;
+        }
+        """);
+        repo.Write("Use.cs", """
+        using System.Collections.Generic;
+        namespace App;
+        public class Cache
+        {
+            public bool TryAdd(int key) => false;
+            public static void Run(IDictionary<int, int> d) => d.TryAdd(1, 2); // USE
+        }
+        """);
+
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var refs = analyzer.FindReferences("TryAdd", max: 1000);
+        Assert.Single(refs, r => r.LineText.Contains("// USE"));
+    }
+
     // The twin check is by full metadata name: a same-named type in another namespace is a different type, still searched.
     [Fact]
     public void ASameNamedMetadataTypeInAnotherNamespace_IsStillSearched()

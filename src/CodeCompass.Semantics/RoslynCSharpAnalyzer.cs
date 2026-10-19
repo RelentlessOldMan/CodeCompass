@@ -500,6 +500,9 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
 
     private static bool ShadowedBySource(ISymbol metadata, Compilation compilation)
     {
+        // Extension lookup gathers from EVERY same-named static class in the namespace, source and metadata alike, so a
+        // source polyfill (System.Collections.Generic.CollectionExtensions) leaves the framework's TryAdd bindable.
+        if (metadata is IMethodSymbol { IsExtensionMethod: true }) return false;
         var type = metadata as INamedTypeSymbol ?? metadata.ContainingType;
         if (type is null) return false;
         while (type.ContainingType is not null) type = type.ContainingType;
