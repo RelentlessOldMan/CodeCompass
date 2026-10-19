@@ -73,10 +73,19 @@ public sealed class TrigramIndex
     public static long[] ComputeTrigrams(string text, TrigramSet scratch)
     {
         if (text.Length < 3) return Array.Empty<long>();
-        for (int i = 0; i + 3 <= text.Length; i++)
-            scratch.Add(text[i], text[i + 1], text[i + 2]);
-        // Trim past the cap: one huge file left its worker's set at hundreds of MB for the rest of the build.
-        return scratch.Drain(ScratchTrimAbove);
+        try
+        {
+            for (int i = 0; i + 3 <= text.Length; i++)
+                scratch.Add(text[i], text[i + 1], text[i + 2]);
+            // Trim past the cap: one huge file left its worker's set at hundreds of MB for the rest of the build.
+            return scratch.Drain(ScratchTrimAbove);
+        }
+        catch
+        {
+            // An allocation failed mid-file (the build skips that file and reuses this set): leave nothing behind.
+            scratch.Reset();
+            throw;
+        }
     }
 
     internal const int ScratchTrimAbove = 1 << 20; // distinct trigrams; a large source file has well under 100k

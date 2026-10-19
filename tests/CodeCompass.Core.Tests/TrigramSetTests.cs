@@ -66,6 +66,25 @@ public class TrigramSetTests
         }
     }
 
+    // A build worker that hits OutOfMemoryException skips the file and is reused (RepositoryIndexer's memory backstop),
+    // so a set that failed mid-file must come back clean: no trigram of the failed file left over, and no bit left set
+    // without its list entry - that trigram would read as a repeat, and every later file on the worker would lose it.
+    [Fact]
+    public void ASetThatFailedMidFile_IndexesTheNextFilesExactly()
+    {
+        var rnd = new Random(11);
+        var big = Random(rnd, 20_000, r => (char)r.Next(32, 127)); // well past the first-seen list's initial size
+        var small = "class Foo { int bar; } // é";
+        var scratch = new TrigramSet();
+
+        scratch.BeforeGrowForTest = () => throw new OutOfMemoryException();
+        Assert.Throws<OutOfMemoryException>(() => TrigramIndex.ComputeTrigrams(big, scratch));
+        scratch.BeforeGrowForTest = null;
+
+        Assert.Equal(Reference(small), TrigramIndex.ComputeTrigrams(small, scratch).OrderBy(x => x).ToArray());
+        Assert.Equal(Reference(big), TrigramIndex.ComputeTrigrams(big, scratch).OrderBy(x => x).ToArray());
+    }
+
     [Fact]
     public void EveryAsciiTrigramIsDistinguished()
     {

@@ -22,6 +22,9 @@ public sealed class TrigramSet
 
     public int Count => _asciiCount + _other.Count;
 
+    /// <summary>Runs before the first-seen list grows (tests inject an allocation failure there).</summary>
+    internal Action? BeforeGrowForTest;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Add(char a, char b, char c)
     {
@@ -31,8 +34,10 @@ public sealed class TrigramSet
             ref ulong word = ref _seen[idx >> 6];
             ulong bit = 1UL << idx;
             if ((word & bit) != 0) return;
+            // Grow BEFORE setting the bit: a failed grow must not leave a bit set with no list entry, which Drain would
+            // never clear (the trigram would read as a repeat in every later file on this set).
+            if (_asciiCount == _ascii.Length) { BeforeGrowForTest?.Invoke(); Array.Resize(ref _ascii, _ascii.Length * 2); }
             word |= bit;
-            if (_asciiCount == _ascii.Length) Array.Resize(ref _ascii, _ascii.Length * 2);
             _ascii[_asciiCount++] = idx;
         }
         else _other.Add(TrigramIndex.TriKey(a, b, c));
@@ -59,6 +64,15 @@ public sealed class TrigramSet
             _other.TrimExcess();
         }
         return result;
+    }
+
+    /// <summary>Empties the set without building a result - after a file failed mid-way (the build skips a file that ran
+    /// out of memory and reuses its worker), so none of that file's trigrams carry into the next.</summary>
+    public void Reset()
+    {
+        for (int i = 0; i < _asciiCount; i++) _seen[_ascii[i] >> 6] &= ~(1UL << _ascii[i]);
+        _asciiCount = 0;
+        _other.Clear();
     }
 
     /// <summary>Capacity the scratch buffers hold between files (for the trim regression test).</summary>
