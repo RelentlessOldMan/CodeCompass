@@ -352,6 +352,57 @@ public class RoslynSemanticTests
         Assert.Equal(0, analyzer.LastPinnedModels);
     }
 
+    // SEM-C3: the model references every assembly on the TPA list (here the test host's, Roslyn included), so a repo that
+    // declares one of those types in source - Roslyn's own repo declares SyntaxNode - has a metadata twin of it. Source
+    // wins binding, so searching the twin found nothing yet cost a whole-solution search and pinned every model.
+    [Fact]
+    public void AMetadataTwinOfASourceType_IsNotSearched()
+    {
+        using var repo = new TempRepo();
+        repo.Write("SyntaxNode.cs", """
+        namespace Microsoft.CodeAnalysis;
+        public abstract class SyntaxNode { }
+        """);
+        repo.Write("Use.cs", """
+        namespace App;
+        public static class Use
+        {
+            public static object? Run(Microsoft.CodeAnalysis.SyntaxNode? node) => node; // USE
+        }
+        """);
+
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var refs = analyzer.FindReferences("SyntaxNode", max: 1000);
+        Assert.Single(refs, r => r.LineText.Contains("// USE"));
+        Assert.Equal(1, analyzer.ReferenceSearches);
+        Assert.Equal(0, analyzer.LastPinnedModels);
+    }
+
+    // The twin check is by full metadata name: a same-named type in another namespace is a different type, still searched.
+    [Fact]
+    public void ASameNamedMetadataTypeInAnotherNamespace_IsStillSearched()
+    {
+        using var repo = new TempRepo();
+        repo.Write("SyntaxNode.cs", """
+        namespace App.Trees;
+        public abstract class SyntaxNode { }
+        """);
+        repo.Write("Use.cs", """
+        namespace App;
+        public static class Use
+        {
+            public static object? Mine(App.Trees.SyntaxNode? node) => node; // MINE
+            public static object? Theirs(Microsoft.CodeAnalysis.SyntaxNode? node) => node; // THEIRS
+        }
+        """);
+
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var refs = analyzer.FindReferences("SyntaxNode", max: 1000);
+        Assert.Single(refs, r => r.LineText.Contains("// MINE"));
+        Assert.Single(refs, r => r.LineText.Contains("// THEIRS"));
+        Assert.Equal(2, analyzer.ReferenceSearches);
+    }
+
     private static (int CallSites, int Searches) EqualsRefs(int classes)
     {
         using var repo = new TempRepo();

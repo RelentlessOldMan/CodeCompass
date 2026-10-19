@@ -447,7 +447,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         // references collected, so searching it again only repeats the work: with every `override Equals` linked through
         // object.Equals, one search per declaration was quadratic (EF Core's 547 Equals ran 20+ minutes).
         var covered = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
-        var declarations = FindDeclarations(project, name, ct).Concat(PositionalRecordProperties(project, name, ct)).ToList();
+        var declarations = WithoutShadowedMetadata(project,
+            FindDeclarations(project, name, ct).Concat(PositionalRecordProperties(project, name, ct)).ToList(), ct);
 
         // Roslyn keeps a document's SemanticModel - and the binding done through it - only weakly, so between two searches
         // the GC takes it and the next search re-binds every candidate document from scratch. With several searches (Roslyn's
@@ -481,6 +482,30 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         }
         GC.KeepAlive(pinned);
         return Canonical(all, max, include);
+    }
+
+    // The model references every assembly the server runs on, so a repo that is itself one of them (Roslyn, the MCP SDK)
+    // declares each such type twice: in source and in metadata. Source wins binding over a same-named referenced type, so
+    // the metadata twin's whole-solution search finds next to nothing, yet it paid a full search and pinned every model.
+    // Dropped only on an exact top-level-type full-name match; an expression typed by ANOTHER referenced assembly could
+    // still reach the metadata member, which is rare and accepted (CPU review SEM-C3).
+    private static List<ISymbol> WithoutShadowedMetadata(Project project, List<ISymbol> declarations, System.Threading.CancellationToken ct)
+    {
+        static bool InSource(ISymbol s) => s.Locations.Any(l => l.IsInSource);
+        if (declarations.Count < 2 || declarations.All(InSource) || !declarations.Any(InSource)) return declarations;
+        var compilation = project.GetCompilationAsync(ct).GetAwaiter().GetResult();
+        if (compilation is null) return declarations;
+        return declarations.Where(d => InSource(d) || !ShadowedBySource(d, compilation)).ToList();
+    }
+
+    private static bool ShadowedBySource(ISymbol metadata, Compilation compilation)
+    {
+        var type = metadata as INamedTypeSymbol ?? metadata.ContainingType;
+        if (type is null) return false;
+        while (type.ContainingType is not null) type = type.ContainingType;
+        var ns = type.ContainingNamespace;
+        var fullName = ns is null || ns.IsGlobalNamespace ? type.MetadataName : ns.ToDisplayString() + "." + type.MetadataName;
+        return compilation.Assembly.GetTypeByMetadataName(fullName) is not null;
     }
 
     // DETERMINISTIC result: SymbolFinder's enumeration order is not contractual (it works on documents in parallel),
