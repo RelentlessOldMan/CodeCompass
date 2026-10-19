@@ -28,21 +28,21 @@ public class PerformanceRegressionTests
         for (int i = 0; i < 4000; i++) sb.Append((char)('a' + rnd.Next(26)));
         var text = sb.ToString();
 
-        var scratch = new HashSet<long>();
+        var scratch = new TrigramSet();
         // Warm up both paths so steady-state allocation is measured, not first-call JIT.
-        _ = TrigramIndex.ComputeTrigrams(text, scratch);
+        int distinct = TrigramIndex.ComputeTrigrams(text, scratch).Length;
         _ = TrigramIndex.ComputeTrigrams(text);
 
         const int iters = 500;
         long reused = Alloc(() => { for (int i = 0; i < iters; i++) _ = TrigramIndex.ComputeTrigrams(text, scratch); });
-        long fresh = Alloc(() => { for (int i = 0; i < iters; i++) _ = TrigramIndex.ComputeTrigrams(text); });
+        long noScratch = Alloc(() => { for (int i = 0; i < iters; i++) _ = TrigramIndex.ComputeTrigrams(text); });
 
-        // The scratch overload reuses one HashSet instead of allocating a fresh set (+ its bucket/entry
-        // arrays) per call, so it must allocate materially less than the allocate-per-call path. Generous
-        // margin (< 70%) keeps it non-flaky while still failing if the reuse is reverted (paths ~equal).
-        Assert.True(reused < fresh * 0.7,
-            $"scratch overload should allocate much less than the fresh-set path; " +
-            $"reused={reused:N0} fresh={fresh:N0} bytes over {iters} calls");
+        // Both paths reuse a set (the no-scratch one a per-thread set: a TrigramSet holds a 256 KB table), so each call
+        // allocates only its result array. A set (or its 256 KB table) built per call would blow the ceiling.
+        long ceiling = iters * (distinct * 8L + 256);
+        Assert.True(reused <= ceiling && noScratch <= ceiling,
+            $"trigram extraction should allocate only its result; reused={reused:N0} noScratch={noScratch:N0} " +
+            $"ceiling={ceiling:N0} bytes over {iters} calls");
     }
 
     [Fact]
@@ -85,15 +85,23 @@ public class PerformanceRegressionTests
     [Fact]
     public void TrigramScratch_IsTrimmedAfterAnOutlier_ButKeptForOrdinaryFiles()
     {
-        var scratch = new HashSet<long>();
+        var scratch = new TrigramSet();
         _ = TrigramIndex.ComputeTrigrams("class Foo { int bar; }", scratch);
-        Assert.NotEmpty(scratch); // ordinary: kept for reuse
+        _ = TrigramIndex.ComputeTrigrams(new string('一', 1) + "丁丂七 x", scratch); // the non-ASCII side too
+        int ordinary = scratch.RetainedCapacity;
+        Assert.True(ordinary > 0); // ordinary: kept for reuse
 
         var rnd = new Random(20261016); // random CJK: nearly every trigram distinct
         var big = string.Create(3_000_000, rnd, (span, r) => { for (int i = 0; i < span.Length; i++) span[i] = (char)(0x4E00 + r.Next(20_000)); });
         var tg = TrigramIndex.ComputeTrigrams(big, scratch);
         Assert.True(tg.Length > TrigramIndex.ScratchTrimAbove, $"outlier has only {tg.Length} trigrams");
         Assert.Equal(tg.Length, tg.Distinct().Count());
-        Assert.True(scratch.EnsureCapacity(0) < 1024, $"scratch kept capacity {scratch.EnsureCapacity(0):N0}");
+        Assert.True(scratch.RetainedCapacity < 8192, $"scratch kept capacity {scratch.RetainedCapacity:N0}");
+
+        // An all-ASCII outlier grows the other buffer (the first-seen list); it is trimmed the same way.
+        var ascii = string.Create(4_000_000, rnd, (span, r) => { for (int i = 0; i < span.Length; i++) span[i] = (char)r.Next(128); });
+        var at = TrigramIndex.ComputeTrigrams(ascii, scratch);
+        Assert.True(at.Length > TrigramIndex.ScratchTrimAbove, $"ASCII outlier has only {at.Length} trigrams");
+        Assert.True(scratch.RetainedCapacity < 8192, $"scratch kept capacity {scratch.RetainedCapacity:N0} after the ASCII outlier");
     }
 }

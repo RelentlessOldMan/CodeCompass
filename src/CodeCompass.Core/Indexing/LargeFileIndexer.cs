@@ -320,7 +320,7 @@ public static class LargeFileIndexer
     /// <see cref="TrigramIndex.ComputeTrigrams"/> over the concatenated text.</summary>
     private sealed class TrigramAccumulator
     {
-        private readonly HashSet<long> _set = new();
+        private readonly TrigramSet _set = new();
         private char _a, _b;
         private int _seen;
 
@@ -331,18 +331,13 @@ public static class LargeFileIndexer
             var set = _set;
             foreach (char c in chars)
             {
-                if (seen >= 2) set.Add(TrigramIndex.TriKey(a, b, c));
+                if (seen >= 2) set.Add(a, b, c);
                 a = b; b = c;
                 if (seen < 2) seen++;
             }
             _a = a; _b = b; _seen = seen;
         }
 
-        public long[] ToArray()
-        {
-            var r = new long[_set.Count];
-            _set.CopyTo(r);
-            return r;
-        }
+        public long[] ToArray() => _set.Drain(int.MaxValue); // one accumulator per file: never reused, so never trimmed
     }
 }

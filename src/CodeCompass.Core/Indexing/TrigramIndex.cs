@@ -61,26 +61,22 @@ public sealed class TrigramIndex
     /// (<see cref="AddDocument(string, long[])"/>) is then serialized by the caller.
     /// </summary>
     public static long[] ComputeTrigrams(string text)
-        => text.Length < 3 ? Array.Empty<long>() : ComputeTrigrams(text, new HashSet<long>());
+        => text.Length < 3 ? Array.Empty<long>() : ComputeTrigrams(text, t_scratch ??= new TrigramSet());
+
+    [ThreadStatic] private static TrigramSet? t_scratch; // a TrigramSet holds a 256 KB table: never one per call
 
     /// <summary>
-    /// As <see cref="ComputeTrigrams(string)"/>, but reuses a caller-owned <paramref name="scratch"/> set
-    /// (cleared on entry) to avoid allocating a fresh <see cref="HashSet{T}"/> per file - the single most
-    /// executed allocation on the parallel build hot path. Each worker thread MUST pass its own set (the
-    /// set is not thread-safe); a fresh compact array is still returned for storage.
+    /// As <see cref="ComputeTrigrams(string)"/>, but with a caller-owned <paramref name="scratch"/> set (left empty on
+    /// return), so a build worker reuses one set across its files. Each worker thread MUST pass its own set (the set is
+    /// not thread-safe); a fresh compact array is still returned for storage.
     /// </summary>
-    public static long[] ComputeTrigrams(string text, HashSet<long> scratch)
+    public static long[] ComputeTrigrams(string text, TrigramSet scratch)
     {
         if (text.Length < 3) return Array.Empty<long>();
-        scratch.Clear();
         for (int i = 0; i + 3 <= text.Length; i++)
-            scratch.Add(TriKey(text[i], text[i + 1], text[i + 2]));
-
-        var result = new long[scratch.Count];
-        scratch.CopyTo(result);
-        // Clear() keeps capacity: one huge file left its worker's set at hundreds of MB for the rest of the build.
-        if (scratch.Count > ScratchTrimAbove) { scratch.Clear(); scratch.TrimExcess(); }
-        return result;
+            scratch.Add(text[i], text[i + 1], text[i + 2]);
+        // Trim past the cap: one huge file left its worker's set at hundreds of MB for the rest of the build.
+        return scratch.Drain(ScratchTrimAbove);
     }
 
     internal const int ScratchTrimAbove = 1 << 20; // distinct trigrams; a large source file has well under 100k
