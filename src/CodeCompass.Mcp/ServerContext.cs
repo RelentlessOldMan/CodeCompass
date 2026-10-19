@@ -1008,6 +1008,15 @@ public static class ServerContext
         catch (Exception ex) { Log.For(linkedRoot).Warn($"linked root reconcile skipped: {ex.Message}"); }
     }
 
+    // The generation a reconcile's result is installed under. One that wrote nothing keeps the token on disk (which may be
+    // another writer's newer one: Swap still checks its sources token), so other sessions don't reload; otherwise commit.
+    private static string ReconcileGeneration(IndexWriteLock wl, UpdateStats stats, bool changed, string cacheDir)
+    {
+        if (stats.Untouched && IndexGeneration.Read(cacheDir) is { } current) return current;
+        if (!changed) wl.SourcesUnchanged();
+        return wl.Commit(); // also when the token couldn't be read: a spurious reload is safe, a missed one isn't
+    }
+
     private static void ReconcileLinked(string linkedRoot, CancellationToken ct)
     {
         BuildGate.Wait(ct);
@@ -1017,8 +1026,8 @@ public static class ServerContext
             LinkedReconcileHoldForTest?.Invoke(linkedRoot, ct);
             var u = RepositoryIndexer.Update(linkedRoot, ct: ct);
             bool changed = u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild;
-            if (!changed) wl.SourcesUnchanged();
-            SwapLinked(linkedRoot, u.Text, u.Symbols, wl.Commit(), sourcesChanged: changed);
+            SwapLinked(linkedRoot, u.Text, u.Symbols, ReconcileGeneration(wl, u.Stats, changed, IndexStore.CacheDirPath(linkedRoot)),
+                       sourcesChanged: changed);
         }
         finally { BuildGate.Release(); }
     }
@@ -1775,8 +1784,7 @@ public static class ServerContext
             using var wl = IndexWriteLock.Acquire(CacheDir, ct);
             var u = RepositoryIndexer.Update(Root, ct: ct);
             bool changed = u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0 || u.Stats.FullRebuild;
-            if (!changed) wl.SourcesUnchanged();
-            if (Swap(u.Text, u.Symbols, epoch, wl.Commit(), sourcesChanged: changed))
+            if (Swap(u.Text, u.Symbols, epoch, ReconcileGeneration(wl, u.Stats, changed, CacheDir), sourcesChanged: changed))
             {
                 _eventsLost = false; // a full walk caught whatever the watcher missed
                 if (changed)

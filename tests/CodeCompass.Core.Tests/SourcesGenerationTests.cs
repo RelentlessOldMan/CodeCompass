@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Linq;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Storage;
 using CodeCompass.Mcp;
@@ -99,6 +101,78 @@ public class SourcesGenerationTests
         }
         finally { ServerContext.Init(repo.Root); }
     }
+
+    // CHG-C3: a full update (a startup reconcile, a CLI `update`) that found nothing still saved the ledger and committed a
+    // new generation, so every other session serving the root reloaded an unchanged index. Now it writes no ledger and
+    // keeps the generation; a change still does both.
+    [Fact]
+    public void AnUpdateThatFindsNothing_WritesNoLedger_AndKeepsTheGeneration()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { }\n");
+        repo.Write("b.txt", "hello\n");
+        Settle(); // older than the trust margin when the build reads them, so it records them trusted, not pending
+        var (t, s, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(repo.Root);
+        t.Dispose(); s.Dispose();
+        var dir = IndexStore.GetCacheDir(repo.Root);
+        var gen = IndexGeneration.Read(dir);
+        var stamps = CacheStamps(dir);
+
+        var u = CodeCompass.Core.Indexing.RepositoryIndexer.Update(repo.Root);
+        u.Text.Dispose(); u.Symbols.Dispose();
+        Assert.True(u.Stats.Untouched);
+        Assert.Equal(gen, IndexGeneration.Read(dir));
+        Assert.Equal(stamps, CacheStamps(dir));
+
+        repo.Write("b.txt", "changed\n");
+        var v = CodeCompass.Core.Indexing.RepositoryIndexer.Update(repo.Root);
+        v.Text.Dispose(); v.Symbols.Dispose();
+        Assert.False(v.Stats.Untouched);
+        Assert.NotEqual(gen, IndexGeneration.Read(dir));
+    }
+
+    // The server's startup reconcile: nothing found, so the generation other sessions compare against stays put.
+    [Fact]
+    public void AStartupReconcileThatFindsNothing_KeepsTheGeneration()
+    {
+        var old = Environment.GetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE");
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { }\n");
+        Settle();
+        ServerContext.Init(repo.Root);
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", "false");
+            CodeCompassTools.Reindex();
+            var dir = IndexStore.CacheDirPath(repo.Root);
+            var gen = IndexGeneration.Read(dir);
+
+            ServerContext.RunStartupReconcileNow();
+            Assert.Equal(gen, IndexGeneration.Read(dir));
+            Assert.Contains("a.cs", CodeCompassTools.SearchCode("class A")); // still serving
+
+            repo.Write("late.cs", "class Late { }\n");
+            ServerContext.RunStartupReconcileNow();
+            Assert.NotEqual(gen, IndexGeneration.Read(dir));
+            Assert.Contains("late.cs", CodeCompassTools.SearchCode("class Late"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", old);
+            ServerContext.Init(repo.Root);
+        }
+    }
+
+    // Files written just now are recorded pending (re-read next time) until they are older than the trust margin; setting
+    // their modified time back doesn't help, since that moves the change time. Wait it out, as LedgerTrustTests does.
+    private static void Settle() => System.Threading.Thread.Sleep(3500);
+
+    // Every cache file's name, size and write time, but meta.json (rewritten on purpose: its BuiltUtc says a full walk
+    // confirmed the index) and the lock file.
+    private static string CacheStamps(string dir) => string.Join("\n", Directory.GetFiles(dir)
+        .Where(f => Path.GetFileName(f) is not ("meta.json" or ".write.lock") && !f.EndsWith(".log", StringComparison.OrdinalIgnoreCase))
+        .OrderBy(f => f, StringComparer.Ordinal)
+        .Select(f => $"{Path.GetFileName(f)} {new FileInfo(f).Length} {File.GetLastWriteTimeUtc(f).Ticks}"));
 
     // The watcher's own writes: a README edit tells other sessions no source changed; a .cs edit tells them one did.
     [Fact]

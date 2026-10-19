@@ -819,8 +819,12 @@ static int CmdUpdate(string[] args)
         var (idx, sym, st) = RepositoryIndexer.Update(root, OnScan);
         idx.Dispose(); sym.Dispose();
         s = st;
-        if (st.Added == 0 && st.Modified == 0 && st.Removed == 0 && !st.FullRebuild) wl.SourcesUnchanged();
-        wl.Commit();
+        if (st.Untouched) wl.SkipBump(); // wrote nothing: no session needs to reload
+        else
+        {
+            if (st.Added == 0 && st.Modified == 0 && st.Removed == 0 && !st.FullRebuild) wl.SourcesUnchanged();
+            wl.Commit();
+        }
     }
     catch (Exception ex)
     {
@@ -1272,7 +1276,10 @@ static int CmdRefs(string[] args)
     // The C# semantic pass (Roslyn, empty preprocessor set) can't see code in inactive #if/#elif branches, so it
     // SILENTLY misses references guarded by conditional compilation. When any candidate .cs uses it, treat the C#
     // pass as incomplete: let .cs name matches backfill it (deduped) and disclose.
-    var csConditional = SemanticCoverage.CSharpConditionalFiles(csCandidates);
+    // Judged on the text the semantic pass already parsed (the MCP tool does the same); only without it from disk.
+    var csConditional = csAnalyzer is not null && csCandidates.Count > 0
+        ? csAnalyzer.ConditionalFiles(csCandidates)
+        : SemanticCoverage.CSharpConditionalFiles(csCandidates);
     IReadOnlyList<string> csUnreadable = csAnalyzer?.UnreadableFiles ?? []; // absent from the semantic model -> incomplete, backfill + name them
     int csDroppedDirs = csAnalyzer?.DroppedDirs ?? 0;     // folders the model's walk couldn't list: which files are missing is unknown
     // Global usings injected for SDK projects can make a name ambiguous in a legacy project's file (same rule as MCP).
@@ -1343,6 +1350,13 @@ static int CmdRefs(string[] args)
     return 0;
 }
 
+// The callee candidates using #if, judged on the text FindCallees parsed, not re-read from disk. A name Roslyn can't
+// resolve never built the model, so those stay on the disk path rather than build it here.
+static IReadOnlyList<string> CalleeConditionalFiles(RoslynCSharpAnalyzer analyzer, string name, List<string> candidates) =>
+    candidates.Count > 0 && RoslynCSharpAnalyzer.CanResolve(name)
+        ? analyzer.ConditionalFiles(candidates)
+        : SemanticCoverage.CSharpConditionalFiles(candidates);
+
 static int CmdCallees(string[] args)
 {
     if (args.Length < 3) return Usage();
@@ -1370,10 +1384,11 @@ static int CmdCallees(string[] args)
     if (!indexable)
         Console.Out.WriteLine($"-- \"{name}\" is too short for the text index, so calls inside #if/#elif-guarded branches were not checked.");
     var calleeCond = indexable && RepositoryIndexer.TryLoad(root, out var cidx, out _)
-        ? SemanticCoverage.CSharpConditionalFiles(
+        ? CalleeConditionalFiles(analyzer, name,
             cidx!.CandidateFiles(name)
                 .Where(rel => rel.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
-                .Select(rel => Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar)))))
+                .Select(rel => Path.GetFullPath(Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar))))
+                .ToList())
         : (IReadOnlyList<string>)Array.Empty<string>();
     var recovered = calleeCond.Count > 0 ? analyzer.FindCalleesInInactiveBranches(name) : (IReadOnlyList<SemanticLocation>)Array.Empty<SemanticLocation>();
     analyzer.Dispose(); // the semantic part is done: the rest only prints

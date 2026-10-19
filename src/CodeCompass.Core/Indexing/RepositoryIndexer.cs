@@ -25,7 +25,7 @@ public sealed record UpdateStats(int Added, int Modified, int Removed, double Se
     /// <summary>A targeted update's paths the share didn't answer for (see <see cref="ChangeCounts.Unsure"/>).</summary>
     public IReadOnlyList<string> Unsure { get; init; } = Array.Empty<string>();
 
-    /// <summary>A targeted update that wrote nothing (see <see cref="ChangeCounts.Untouched"/>): the caller can skip its commit.</summary>
+    /// <summary>An update that wrote nothing (see <see cref="ChangeCounts.Untouched"/>): the caller can skip its commit.</summary>
     public bool Untouched { get; init; }
 }
 
@@ -630,6 +630,7 @@ public static class RepositoryIndexer
             var seenBase = new System.Collections.BitArray(old.BaseCount);
             var seenOther = new HashSet<string>(StringComparer.Ordinal);
             int added = 0, modified = 0, removed = 0, walked = 0;
+            bool ledgerChanged = false;
             // The sidecar cutoff is a repo property decided at BUILD time (adaptive to shape + network) and
             // recorded in meta. An incremental update MUST reuse the same value and re-persist it - otherwise
             // an edited mid-size file gets written/deleted under a different cutoff, leaving a stale or
@@ -642,9 +643,10 @@ public static class RepositoryIndexer
 
             using (var extractor = new TreeSitterSymbolExtractor())
             {
-                // `recordedBy` was read above, before the first upsert moves it.
-                Action<string, FileState> upsert = (r, s) => old[r] = s;
-                Action<string> drop = r => old.Remove(r);
+                // `recordedBy` was read above, before the first upsert moves it. Only a file the listing didn't match gets
+                // here, so any upsert or drop is a ledger change (even a touched-but-identical file: it is trusted now).
+                Action<string, FileState> upsert = (r, s) => { old[r] = s; ledgerChanged = true; };
+                Action<string> drop = r => { old.Remove(r); ledgerChanged = true; };
 
                 foreach (var file in walker.Walk(root))
                 {
@@ -706,7 +708,11 @@ public static class RepositoryIndexer
             if (added + modified + removed > RebuildThreshold)
                 return FullRebuild(root, text, symbols, sw, ct);
 
-            SaveAll(root, text, symbols, old); // a journal even when empty: its write time bounds the ledger, as the rewrite did
+            // Nothing reached the index or the ledger: save nothing and skip the bump, or every session serving this root
+            // reloads an unchanged index. The ledger keeps its earlier write time, which still bounds every entry in it.
+            bool untouched = !ledgerChanged && removed == 0;
+            if (untouched) writeLock.SkipBump();
+            else SaveAll(root, text, symbols, old); // a journal even when empty of rows: its write time bounds the ledger
             sw.Stop();
             // Refresh coverage/meta. OverCapSkipped is exact from this walk (a size decision, free per file);
             // the symbol-skipped count needs file CONTENT to classify, which an incremental walk only has for
@@ -714,11 +720,12 @@ public static class RepositoryIndexer
             int carriedSymbolSkipped = priorMeta?.FilesSymbolSkipped ?? 0;
             // DroppedDirs is exact from THIS walk: if the update re-walked those dirs successfully it clears
             // the flag (the gap is closed); if they dropped again it stays flagged. Carry the build's adaptive
-            // sidecar threshold + landscape forward unchanged (a full reindex is what re-measures the shape).
+            // sidecar threshold + landscape forward unchanged (a full reindex is what re-measures the shape). Written even
+            // when untouched: its BuiltUtc says a full walk confirmed the index, and readers read it from disk, not a reload.
             IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, carriedSymbolSkipped, walker.DroppedDirs,
                                 sidecarThreshold, priorMeta?.Landscape, walker.AmbiguousDirsSkipped,
                                 contentVersion: IndexMetaFile.CarriedContentVersion(priorMeta)); // unchanged files weren't re-extracted
-            return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false));
+            return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false) { Untouched = untouched });
         }
     }
 

@@ -319,6 +319,56 @@ public class BloomFilterTests
         Assert.True(reopened.MayContain(12345));
         Assert.True(reopened.MayContain(67890));
     }
+
+    // Sidecars on disk hold these bits, so the filter must set exactly the bits it always has: the old formula, verbatim,
+    // at the 16 KB size every sidecar uses (a power of two) and at one that isn't.
+    [Theory]
+    [InlineData(16384, 4)]
+    [InlineData(1000, 3)]
+    public void SetsTheSameBits_AsTheSidecarFormat(int bytes, int k)
+    {
+        var rng = new Random(17);
+        var b = BloomFilter.Create(bytes, k);
+        var expected = new byte[bytes];
+        long bitCount = bytes * 8L;
+        for (int n = 0; n < 5000; n++)
+        {
+            long key = rng.NextInt64(long.MinValue, long.MaxValue);
+            b.Add(key);
+            var (h1, h2) = ReferenceHashes(key);
+            for (int i = 0; i < k; i++)
+            {
+                int bit = (int)(((h1 + (long)i * h2) & long.MaxValue) % bitCount);
+                expected[bit >> 3] |= (byte)(1 << (bit & 7));
+            }
+        }
+        Assert.Equal(expected, b.Bits);
+        var stored = new BloomFilter(expected, k);
+        for (int n = 0; n < 5000; n++)
+        {
+            long key = rng.NextInt64(long.MinValue, long.MaxValue);
+            var (h1, h2) = ReferenceHashes(key);
+            bool all = true;
+            for (int i = 0; i < k; i++)
+            {
+                int bit = (int)(((h1 + (long)i * h2) & long.MaxValue) % bitCount);
+                all &= (expected[bit >> 3] & (1 << (bit & 7))) != 0;
+            }
+            Assert.Equal(all, stored.MayContain(key));
+        }
+    }
+
+    private static (long, long) ReferenceHashes(long key)
+    {
+        ulong x = (ulong)key;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9UL;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBUL;
+        x ^= x >> 31;
+        ulong y = (ulong)key + 0x9E3779B97F4A7C15UL;
+        y = (y ^ (y >> 29)) * 0xBF58476D1CE4E5B9UL;
+        y ^= y >> 32;
+        return ((long)(x & long.MaxValue), (long)((y | 1) & long.MaxValue));
+    }
 }
 
 public class FileScannerTests
