@@ -61,6 +61,7 @@ The generator writes the manifest as a sibling of the corpus directory: for `--o
 | `gen` | *(optional)* The effective generation knobs — a `{ "<knob>": <value> }` block recording the full recipe (scale, seed, all count/size knobs, and every oracle knob) needed to regenerate this corpus byte-identically. Emitted on every plain `gen` manifest; **absent for `--from-profile`** (the profile itself is the recipe) and on manifests from before 1.1.1. Additive. |
 | `roots` | *(optional, oracle-v1)* Array of **symbol-name strings** — the declared call-graph entry points. The reachable set is `BFS(roots)` over `edges`. Present when the oracle overlay runs (`--with-oracle`), and always in a v2 manifest (where reachability adds the v2 edge kinds; see Manifest v2). See [`_meta.roots` + reachability](#_metaroots--reachability-oracle-v1). |
 | `indirectTruthSha` | *(optional, oracle-v1)* Lowercase-hex SHA-256 **component digest** of the indirect-edge ground truth + `roots`, over a LOCKED canonical byte-form. Deliberately separate from the frozen primary `prevTruthSha`; a rewired indirect edge or moved root trips this. Present iff any symbol has `indirectEdges`. See [`indirectTruthSha`](#indirecttruthsha--the-canonical-component-digest-oracle-v1). |
+| `includeDirs` | *(optional, include web)* The `-I` search order, relative to the corpus root (`["inc", "inc_vnd"]`), under which every `closures` unit was preprocessed. Present iff `closures` is. See [`closures`](#closures--include-closures-include-web-optional). |
 | `totalOracleBytes` | *(optional, oracle-v1)* Sum of every symbol's `bytes` — the exact denominator for a byte-based reduction ratio. Present with `--oracle-bytes`. |
 
 ### Notable symbols
@@ -82,6 +83,7 @@ A map keyed by **symbol name**. The symbol name — not the path — is the **se
 | `bytes` | *(optional, oracle-v1)* Byte mass of this symbol's definition span — the per-symbol weight for a byte-based reduction ratio. Present with `--oracle-bytes`; sums to `_meta.totalOracleBytes`. |
 | `indirectEdges` | *(optional, oracle-v1)* Address-taken / indirect-call ground truth, one record per edge. See [`indirectEdges`](#indirectedges--indirect-call-ground-truth-oracle-v1). |
 | `unreachableRefs` | *(optional)* Reference sites that are resolvable **only if a missing macro is known** — see below. |
+| `templateHead` / `includedVia` | *(optional, include web)* On a template instance only, always together: the instance's primary head (`"inc/tmpl_T.h:<line>"`) and the template header it is in. Its `def` is the unit's `#include` line that led there; its name is token-pasted and never appears at the def. See [`closures`](#closures--include-closures-include-web-optional). |
 | `expectedMiss` | *(optional, bool)* `true` = a lexical / preprocessor-blind indexer is EXPECTED not to resolve this symbol. The name is macro-synthesized (token-paste `##`) and never appears literally in the source; `def` points at the generator-macro invocation site. Not finding it is **correct**, not a recall failure — the honest-miss dual of `unreachableRefs`. See below. |
 
 ### Paths
@@ -151,6 +153,30 @@ near-identical controls:
 - **`nearVariants`** differ by ≥1 byte (different hash) — they must NOT collapse with the group.
 
 Additive → absent on older manifests; consumers that don't dedup can ignore it.
+
+### `closures` — include closures (include web, optional)
+
+Top-level `closures` (sibling of `symbols`), present with `gen --web-units N`, maps each web unit to its include
+closure under `_meta.includeDirs` ([docs/include-web-design.md](include-web-design.md)):
+
+```json
+"closures": {
+  "web/u_0.c": { "files": 286, "bytes": 7997179, "reads": 302, "readBytes": 8008819,
+                 "depth": 25, "defines": 221720, "templateInstances": 9 }
+}
+```
+
+- **`files` / `bytes`** — distinct files entered, the unit included.
+- **`reads` / `readBytes`** — every counted entry, the unit included: an unguarded template counts each time it is
+  entered. A guard-skipped re-include (a cycle back into an open header included) is not counted, and neither is an
+  include in an inactive `#if` branch or a comment.
+- **`depth`** — the deepest counted entry (the unit is 0, a direct include 1).
+- **`defines`** — `#define` directives executed in active code, the unit's own included, once per counted entry.
+- **`templateInstances`** — template entries made while `TNAME` is defined. Each is a symbol carrying
+  `templateHead` / `includedVia`.
+
+`verify` recomputes every closure from the text with its own preprocessor, and requires each instance it finds to be
+declared exactly once, with the same `def`, `templateHead` and `includedVia`. Additive → absent without the web.
 
 ## Oracle-v1 fields (non-linear DAG + indirect edges + byte mass)
 

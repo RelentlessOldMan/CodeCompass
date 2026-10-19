@@ -1,9 +1,9 @@
 ﻿CodeSpawner generator vendored into this repo.
 
-generatorVersion : 1.2.3
+generatorVersion : 1.3.1
 manifestVersion  : 1
-vendoredFrom     : CodeSpawner GitHub release v1.2.3 (1efedb2)
-note             : Vendored, not a submodule. To bump: copy the release exe and the five contract docs (manifest-schema, mutate-design,
-                   diff-delta-design, oracle-v1-design, cpp-profile-design) from docs\ at the release tag here, then update this file.
+vendoredFrom     : CodeSpawner GitHub release v1.3.1 (c931d99)
+note             : Vendored, not a submodule. To bump: copy the release exe and the six contract docs (manifest-schema, mutate-design,
+                   diff-delta-design, oracle-v1-design, cpp-profile-design, include-web-design) from docs\ at the release tag here, then update this file.
                    Consumers MUST assert _meta.manifestVersion == 1 before trusting a manifest.
                    C corpora are v1. `gen --lang cpp` writes v2 (manifest-schema.md), read only by verify-cpp-codecompass.ps1.
