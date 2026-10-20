@@ -97,6 +97,13 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     /// last until the next edit or reindex.</summary>
     public bool IsIncomplete { get { lock (_gate) return _solution is not null && (_unreadable.Count > 0 || _droppedDirs > 0); } }
 
+    /// <summary>Built over a tree with no C# at all, and complete: it holds next to nothing, so it isn't worth handing back
+    /// (a rebuild walks the whole tree again to find none). A .cs added later reaches it via <see cref="TryApplyChanges"/>.</summary>
+    public bool IsBuiltEmpty
+    {
+        get { lock (_gate) return _solution is not null && _docByPath.Count == 0 && _unreadable.Count == 0 && _droppedDirs == 0; }
+    }
+
     /// <summary>When the model was last built (<see cref="Environment.TickCount64"/>); 0 before that.</summary>
     public long BuiltAtMs { get { lock (_gate) return _builtAtMs; } }
     private long _builtAtMs;

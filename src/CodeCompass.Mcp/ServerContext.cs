@@ -1365,7 +1365,7 @@ public static class ServerContext
         {
             if (Environment.TickCount64 - Volatile.Read(ref _lastSemanticUseMs) < idleMs) return false; // used just now
             cs = _csharp;
-            if (cs is null) return false;
+            if (cs is null || cs.IsBuiltEmpty) return false; // no C# in the tree: nothing to free, and a rebuild re-walks it
             _csharp = null;
         }
         finally { Rw.ExitWriteLock(); }

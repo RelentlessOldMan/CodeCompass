@@ -367,6 +367,33 @@ public class McpToolsTests
         }
     }
 
+    // A tree with no C# builds an empty model: nothing to hand back, but dropping it made the next C/C++ refs call walk the
+    // whole tree again to find no C# (MCP-C6; 9.6 s on a share). It stays - and a .cs added later still reaches it.
+    [Fact]
+    public void IdleRelease_KeepsAnEmptyModel_AndAnAddedCsFileStillReachesIt()
+    {
+        using var repo = new TempRepo();
+        repo.Write("main.c", "int helper(void){return 1;}\nint main(void){return helper();}");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.Contains("main.c:2:", CodeCompassTools.FindReferences("helper"));
+            var model = ServerContext.ResidentCSharpForTest;
+            Assert.NotNull(model);
+
+            ServerContext.RunIdleReleaseNow(TimeSpan.Zero);
+            Assert.Same(model, ServerContext.ResidentCSharpForTest); // an empty model holds nothing worth handing back
+
+            repo.Write("src/Late.cs", "class Late { void helper() { } void Go() { helper(); } }");
+            ServerContext.OnChangesForTest(new CodeCompass.Core.Changes.ChangeBatch(new[] { repo.FullPath("src/Late.cs") }, FullReconcile: false));
+            var result = CodeCompassTools.FindReferences("helper");
+            Assert.Contains("src/Late.cs:1:", result);
+            Assert.Contains("main.c:2:", result);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
     [Fact]
     public void SearchCode_SignalsTruncationVsExactCount()
     {
