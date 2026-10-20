@@ -234,6 +234,19 @@ since "decoded text identical" must hold; under rename it becomes a pure rename;
 edits it. `binary` and `metadata` apply to any file. The generator's root `compile_commands.json` (absolute
 paths) and stray `*.mut.tmp` files are never selected as targets.
 
+**Bookkeeping (since 1.3.2).** A `--three-way` copy rewrites each variant's `compile_commands.json` to name the
+variant's own tree (1.3.1 left it naming B, so a variant compiled B's files). That file then differs from B without
+being an edit, so it is not in the delta's files or hunks, and the v1, v2 and conflict manifests list it instead:
+
+```json
+"_meta": { "manifestVersion": 2, "bookkeeping": ["compile_commands.json"], … }
+```
+
+`manifestVersion` is 2 exactly when `bookkeeping` is present, which is when the corpus has a compile db (any
+`--compile-db partial|full` corpus, and every corpus with an include web). Otherwise it stays 1 and the manifest is
+byte-identical to 1.3.1's. A reader comparing a variant to B should skip the listed paths. No digest changes:
+`diffTruthSha` and `conflictTruthSha` never covered the db. The corpus manifest's own `manifestVersion` stays 1.
+
 **Step 3 status:** IMPLEMENTED. `--edit-kind rename` renames chosen files with GRADED `similarityMilli` (a
 rotating band {1000,900,600,300}; the emitted value is the REALIZED overlap `round((L-changed)/L*1000)`, not
 the target, so tiny files honestly report low similarity). Pure renames (1000) are identical bytes with no
