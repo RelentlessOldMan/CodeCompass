@@ -641,6 +641,80 @@ public class McpToolsTests
         finally { ServerContext.Init(project.Root); }
     }
 
+    // CPU review MCP-C4: a later root is asked only for the rows still needed, not the whole limit again, so it doesn't
+    // read files whose hits would be thrown away. The shown rows are the same either way.
+    [Fact]
+    public void Federation_SearchCode_AsksALaterRootOnlyForTheRemainder()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        for (int i = 0; i < 3; i++) project.Write($"src/p{i}.txt", "ZqxRemainderToken\n");
+        for (int i = 0; i < 10; i++) external.Write($"lib/e{i}.txt", "ZqxRemainderToken\n");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            CodeCompassTools.SearchCode("ZqxRemainderToken", maxResults: 5); // loads the linked root
+
+            CodeCompass.Core.Indexing.Segments.SegmentedIndex.FilesScannedForTest = 0;
+            var result = CodeCompassTools.SearchCode("ZqxRemainderToken", maxResults: 5);
+            int scanned = CodeCompass.Core.Indexing.Segments.SegmentedIndex.FilesScannedForTest;
+
+            var rows = result.Split('\n').Where(l => l.Contains("ZqxRemainderToken")).ToList();
+            Assert.Equal(5, rows.Count);
+            Assert.Equal(3, rows.Count(r => r.StartsWith("src/p")));      // the primary's three come first
+            Assert.Contains("MORE EXIST", result, StringComparison.OrdinalIgnoreCase);
+            // The primary's 3 files, then 3 more (2 to fill the 5 shown + 1 to detect truncation), not 6.
+            Assert.Equal(6, scanned);
+        }
+        finally
+        {
+            CodeCompass.Core.Storage.LinkStore.Remove(project.Root, external.Root);
+            ServerContext.Init(project.Root);
+        }
+    }
+
+    // MCP-C4 for find_references: semantic C# hits already fill part of the cap, so the name search is asked only for
+    // the rest. Here 3 semantic hits + a cap of 4 leave 2 name rows to find (1 shown + 1 to detect truncation).
+    [Fact]
+    public void FindReferences_NameSearch_AsksOnlyForTheRowsSemanticHitsLeft()
+    {
+        using var repo = new TempRepo();
+        repo.Write("src/Spinner.cs", """
+        namespace App
+        {
+            public class Spinner
+            {
+                public void ZqxSpin() { }
+                public void A() { ZqxSpin(); ZqxSpin(); ZqxSpin(); }
+            }
+        }
+        """);
+        for (int i = 0; i < 8; i++) repo.Write($"native/n{i}.cpp", "void g() { ZqxSpin(); }\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            CodeCompassTools.FindReferences("ZqxSpin", maxResults: 4); // builds the C# model
+
+            CodeCompass.Core.Indexing.Segments.SegmentedIndex.FilesScannedForTest = 0;
+            var result = CodeCompassTools.FindReferences("ZqxSpin", maxResults: 4);
+            int scanned = CodeCompass.Core.Indexing.Segments.SegmentedIndex.FilesScannedForTest;
+
+            var rows = result.Split('\n').Where(l => l.Contains("ZqxSpin();")).ToList();
+            Assert.Equal(4, rows.Count);
+            Assert.Equal(3, rows.Count(r => r.StartsWith("src/Spinner.cs")));
+            Assert.StartsWith("native/n0.cpp:1:", rows[3]);
+            Assert.Contains("MORE EXIST", result, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(2, scanned);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
     [Fact]
     public void Federation_OwnedLinkedRoot_PicksUpLiveEdits()
     {

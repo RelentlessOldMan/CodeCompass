@@ -36,12 +36,13 @@ public static class CodeCompassTools
         if (string.IsNullOrWhiteSpace(query)) return "Provide a non-empty search string.";
         if (query.Length < MinIndexedQuery) return ShortQueryMessage(query);
         maxResults = Math.Clamp(maxResults, 1, MaxResultsCeiling); // agent-supplied; guard against 0/negative/absurd
-        // Federate across the primary index + every linked root. Fetch one extra per index to detect
-        // truncation across the union; primary hits stay repo-relative, linked hits show absolute paths.
+        // Federate across the primary index + every linked root. Fetch one past the cap across the union to detect
+        // truncation, each root asked only for what the earlier ones left (a capped search returns a prefix of the full
+        // one, so the rows are the same); primary hits stay repo-relative, linked hits show absolute paths.
         var hits = new List<(ServerContext.IndexHandle H, SearchMatch M)>();
         foreach (var h in handles)
         {
-            foreach (var m in h.Text.Search(query, maxResults + 1, caseSensitive)) hits.Add((h, m));
+            foreach (var m in h.Text.Search(query, maxResults + 1 - hits.Count, caseSensitive)) hits.Add((h, m));
             if (hits.Count > maxResults) break; // enough to know the union is truncated
         }
         if (hits.Count == 0)
@@ -305,9 +306,11 @@ public static class CodeCompassTools
                 // can't fill the whole answer.
                 // Filters run DURING the scan (only real references count toward the budget), so noisy files - longer
                 // identifiers containing the name, comments, .cs files Roslyn already answered - can't crowd out a real use.
+                // Asked only for the rows still needed: `accept` drops anything already listed, so every row it returns is
+                // new, and a capped search returns a prefix of the full one.
                 var accept = ReferenceMerge.ReferenceAccept(h.Root, name.Length, csharpIncomplete, spanFilter, seenKeys, rel => DisplayPath(h, rel),
                                                             csBackfill);
-                foreach (var m in h.Text.Search(name, probe, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
+                foreach (var m in h.Text.Search(name, probe - hits.Count, maxPerFile: ReferenceMerge.MaxLexicalHitsPerFile, orderByPath: true,
                                                 limits: lexLimits, pathFilter: ReferenceMerge.ReferencePathFilter(csharpIncomplete, h.Root, csBackfill), accept: accept, ct: ct,
                                                 textSink: ReferenceMerge.ReferenceTextSink(h.Root, spanFilter), collected: collected.GetValueOrDefault(h)))
                 {
@@ -472,7 +475,7 @@ public static class CodeCompassTools
         var matches = new List<(ServerContext.IndexHandle H, Symbol S)>();
         foreach (var h in handles)
         {
-            foreach (var s in h.Symbols.Find(query, maxResults + 1)) matches.Add((h, s));
+            foreach (var s in h.Symbols.Find(query, maxResults + 1 - matches.Count)) matches.Add((h, s)); // only what's left
             if (matches.Count > maxResults) break;
         }
         if (matches.Count == 0)

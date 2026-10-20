@@ -514,9 +514,13 @@ public sealed class SegmentedIndex : IDisposable
         text = null;
     }
 
+    /// <summary>Candidate files this thread has verified (a test observation; the serial verify runs on the caller's thread).</summary>
+    [ThreadStatic] internal static int FilesScannedForTest;
+
     // keepTextChars: return the file's text (when it was read whole and is at most this long) for the caller's textSink.
     private (List<SearchMatch> Hits, bool Unreadable, string? Text) ScanCandidate(string rel, string query, StringComparison comparison, bool caseSensitive, int maxResults, bool network, List<CandidateTrace>? trace = null, int keepTextChars = 0)
     {
+        FilesScannedForTest++;
         var results = new List<SearchMatch>();
         var full = Path.Combine(_root, rel.Replace('/', Path.DirectorySeparatorChar));
 
