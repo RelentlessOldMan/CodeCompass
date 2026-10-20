@@ -33,7 +33,7 @@ ServerContext.EnableLiveIndex(); // keep the index fresh as files change
 
 try
 {
-    var builder = Host.CreateApplicationBuilder(args);
+    var builder = McpHost.CreateBuilder(args); // no config-reload watcher over the repo (see McpHost)
 
     // stdout is the MCP (JSON-RPC) transport, so all logging must go to stderr.
     builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = Microsoft.Extensions.Logging.LogLevel.Trace);

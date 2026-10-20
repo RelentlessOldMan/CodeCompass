@@ -367,6 +367,21 @@ public class McpToolsTests
         }
     }
 
+    // The host's defaults root it at the cwd (the repo) and load appsettings*.json from there with reload-on-change: a
+    // recursive watcher over the whole tree in every session, for config the server doesn't have (MCP-C2). Rooted at the
+    // install dir, with nothing reloading.
+    [Fact]
+    public void McpHost_WatchesNoConfigFile_AndIsRootedAtTheInstallDir()
+    {
+        var builder = McpHost.CreateBuilder([]);
+        Assert.Equal(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
+                     Path.TrimEndingDirectorySeparator(builder.Environment.ContentRootPath));
+        var files = ((Microsoft.Extensions.Configuration.IConfigurationBuilder)builder.Configuration).Sources
+            .OfType<Microsoft.Extensions.Configuration.FileConfigurationSource>().ToList();
+        Assert.NotEmpty(files); // the defaults still add appsettings*.json (optional; absent from the install dir)
+        Assert.All(files, f => Assert.False(f.ReloadOnChange, $"{f.Path} reloads on change"));
+    }
+
     // A tree with no C# builds an empty model: nothing to hand back, but dropping it made the next C/C++ refs call walk the
     // whole tree again to find no C# (MCP-C6; 9.6 s on a share). It stays - and a .cs added later still reaches it.
     [Fact]
