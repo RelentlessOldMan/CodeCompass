@@ -34,6 +34,13 @@ public sealed record ChangeCounts(int Added, int Modified, int Removed, bool CSh
     /// <summary>Paths on a network root the share didn't answer for: left as indexed, for the caller to retry.</summary>
     public IReadOnlyList<string> Unsure { get; init; } = Array.Empty<string>();
 
+    /// <summary>The C# inputs (see <see cref="SemanticInputs"/>) the index added, changed or removed, repo-relative.</summary>
+    public IReadOnlyList<string> CSharpPaths { get; init; } = Array.Empty<string>();
+
+    /// <summary>The C# inputs the batch reached whose text the index couldn't take (a read or stat that failed, a file that
+    /// looks binary), repo-relative: the index and a C# model that reads the file itself can see them differently.</summary>
+    public IReadOnlyList<string> CSharpUnread { get; init; } = Array.Empty<string>();
+
     /// <summary>No path reached the index or its snapshot (each was skipped, or the share didn't answer for it): there is
     /// nothing to save, and a commit would only make every session reload an unchanged index. Counts of zero aren't enough:
     /// a touched-but-identical file still records a new ledger entry.</summary>
@@ -669,7 +676,7 @@ public static class RepositoryIndexer
 
                     OnUpdateFileForTests?.Invoke(rel);
                     switch (ApplyExistingFile(text, symbols, dir, sidecarThreshold, rel, file.FullPath, file.Size, mtime, oldState, recordedBy,
-                                              rootIsNetwork, cacheDirIsNetwork, extractor, upsert, drop))
+                                              rootIsNetwork, cacheDirIsNetwork, extractor, upsert, drop, out _))
                     {
                         case ChangeKind.Added: added++; break;
                         case ChangeKind.Modified: modified++; break;
@@ -849,7 +856,8 @@ public static class RepositoryIndexer
         int added = 0, modified = 0, removed = 0;
         // Did a file a C# semantic model reads change? Judged on what the index actually added, changed or removed - not
         // on the batch's paths, which also hold editors' vanished temp files and folders whose timestamp moved.
-        bool csharp = false;
+        var csharp = new List<string>();
+        var csharpUnread = new List<string>();
         // Once per batch, not per changed file: the root's and cache dir's network-ness (each a handle open), the sidecar
         // cutoff the build recorded, and the ledger files' write-time bound (a stat per ledger file). The bound stays an
         // upper bound for every entry as the batch upserts: the snapshot's own last-upsert time is folded in per file.
@@ -895,9 +903,10 @@ public static class RepositoryIndexer
                     var childRel = Path.GetRelativePath(root, f.FullPath).Replace('\\', '/');
                     seen.Add(childRel);
                     int before = added + modified + removed;
-                    ApplyFile(text, symbols, snapshot, dir, childRel, f.FullPath, ignore, extractor, batch,
-                              ref added, ref modified, ref removed);
-                    if (added + modified + removed != before && SemanticInputs.IsCSharpInput(childRel)) csharp = true;
+                    bool unread = ApplyFile(text, symbols, snapshot, dir, childRel, f.FullPath, ignore, extractor, batch,
+                                            ref added, ref modified, ref removed);
+                    if (added + modified + removed != before && SemanticInputs.IsCSharpInput(childRel)) csharp.Add(childRel);
+                    if (unread && SemanticInputs.IsCSharpInput(childRel)) csharpUnread.Add(childRel);
                 }
                 if (walker.DroppedDirs == 0)
                     foreach (var stale in snapshot.KeysWithPrefix(rel + "/").Where(k => !seen.Contains(k)).ToList())
@@ -905,9 +914,9 @@ public static class RepositoryIndexer
                         var staleFull = Path.Combine(root, stale.Replace('/', Path.DirectorySeparatorChar));
                         switch (Probe(staleFull, batch.RootIsNetwork, RootAnswers))
                         {
-                            case PathKind.Gone: RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, ref csharp); break;
+                            case PathKind.Gone: RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, csharp); break;
                             // A file replaced by a same-named folder: the walk just indexed what's in it, so drop the file alone.
-                            case PathKind.Folder: RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, ref csharp, withChildren: false); break;
+                            case PathKind.Folder: RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, csharp, withChildren: false); break;
                             case PathKind.Unknown: unsure.Add(staleFull); break;
                         }
                     }
@@ -915,18 +924,22 @@ public static class RepositoryIndexer
             else if (kind == PathKind.File)
             {
                 int before = added + modified + removed;
-                ApplyFile(text, symbols, snapshot, dir, rel, full, ignore, extractor, batch,
-                          ref added, ref modified, ref removed);
-                if (added + modified + removed != before && SemanticInputs.IsCSharpInput(rel)) csharp = true;
+                bool unread = ApplyFile(text, symbols, snapshot, dir, rel, full, ignore, extractor, batch,
+                                        ref added, ref modified, ref removed);
+                if (added + modified + removed != before && SemanticInputs.IsCSharpInput(rel)) csharp.Add(rel);
+                if (unread && SemanticInputs.IsCSharpInput(rel)) csharpUnread.Add(rel);
             }
             else if (kind == PathKind.Gone)
             {
-                RemovePathAndChildren(text, symbols, snapshot, dir, rel, ref removed, ref csharp);
+                RemovePathAndChildren(text, symbols, snapshot, dir, rel, ref removed, csharp);
             }
             else unsure.Add(full);
         }
 
-        return new ChangeCounts(added, modified, removed, csharp) { Unsure = unsure, Untouched = !touched };
+        // A C# file whose text the index couldn't take may have changed too: what a model reads of it is unknown.
+        return new ChangeCounts(added, modified, removed, csharp.Count > 0 || csharpUnread.Count > 0) {
+            Unsure = unsure, Untouched = !touched, CSharpPaths = csharp, CSharpUnread = csharpUnread,
+        };
     }
 
     private enum PathKind { Folder, File, Gone, Unknown }
@@ -980,7 +993,8 @@ public static class RepositoryIndexer
 
     private readonly record struct ApplyBatch(long SidecarThreshold, bool RootIsNetwork, bool CacheDirIsNetwork, long LedgerFilesRecordedBy);
 
-    private static void ApplyFile(
+    // True when the file's text couldn't be taken (see ChangeCounts.CSharpUnread).
+    private static bool ApplyFile(
         SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string dir,
         string rel, string full, IgnoreRules ignore, TreeSitterSymbolExtractor extractor, ApplyBatch batch,
         ref int added, ref int modified, ref int removed)
@@ -993,7 +1007,7 @@ public static class RepositoryIndexer
         if (IsIgnoredRelPath(rel, ignore))
         {
             if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel); snapshot.Remove(rel); removed++; }
-            return;
+            return false;
         }
 
         long size;
@@ -1004,27 +1018,28 @@ public static class RepositoryIndexer
             if (FileWalker.IsLink(fi))
             {
                 if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel); snapshot.Remove(rel); removed++; }
-                return;
+                return false;
             }
             size = fi.Length;
         }
-        catch { return; }
+        catch { return true; }
         if (size > ignore.MaxFileSizeBytes) // over the file cap -> not indexed (drop if we had it)
         {
             if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel); snapshot.Remove(rel); removed++; }
-            return;
+            return false;
         }
 
         var mtime = File.GetLastWriteTimeUtc(full).Ticks; // targeted path has no walk record -> stat once
         long recordedBy = Math.Max(batch.LedgerFilesRecordedBy, snapshot.LastUpsertUtcTicks);
         switch (ApplyExistingFile(text, symbols, dir, batch.SidecarThreshold, rel, full, size, mtime, oldState, recordedBy,
                                   batch.RootIsNetwork, batch.CacheDirIsNetwork, extractor,
-                                  (r, s) => snapshot[r] = s, r => snapshot.Remove(r)))
+                                  (r, s) => snapshot[r] = s, r => snapshot.Remove(r), out bool unread))
         {
             case ChangeKind.Added: added++; break;
             case ChangeKind.Modified: modified++; break;
             case ChangeKind.Removed: removed++; break;
         }
+        return unread;
     }
 
     private enum ChangeKind { None, Added, Modified, Removed }
@@ -1038,7 +1053,8 @@ public static class RepositoryIndexer
     /// (removing any prior doc + sidecar first). The caller supplies <paramref name="upsert"/> (record the
     /// new snapshot state) and <paramref name="drop"/> (forget it), because the two callers use different
     /// snapshot models: Update rebuilds a fresh dictionary, ApplyFile mutates a <see cref="DiskSnapshot"/>
-    /// in place. Returns what changed so the caller can count it.
+    /// in place. Returns what changed so the caller can count it; <paramref name="unread"/>: the file's text couldn't be
+    /// taken (unreadable, or binary-looking).
     ///
     /// Build deliberately does NOT use this: it fills per-worker segment buffers in parallel with no
     /// diffing and its own RAM budget/watchdog, so folding it in would compromise the hot path.
@@ -1047,8 +1063,9 @@ public static class RepositoryIndexer
         SegmentedIndex text, SegmentedSymbolIndex symbols, string dir, long sidecarThreshold,
         string rel, string full, long size, long mtime, FileState? oldState, long priorRecordedBy,
         bool network, bool cacheDirIsNetwork, TreeSitterSymbolExtractor extractor,
-        Action<string, FileState> upsert, Action<string> drop)
+        Action<string, FileState> upsert, Action<string> drop, out bool unread)
     {
+        unread = false;
         // A binary-sentinel entry is in the ledger but was never a document.
         bool wasPresent = oldState is { IsBinary: false };
         long readStart = DateTime.UtcNow.Ticks;                        // before the bytes are read (LedgerTrust)
@@ -1068,6 +1085,7 @@ public static class RepositoryIndexer
             after = Storage.FileIdentity.OfPath(full);
             if (!streamed)
             {
+                unread = true;
                 // Binary/unreadable: drop it if it was indexed, so we never leave stale content behind. A binary file is
                 // recorded as such so later updates skip it while it's unchanged.
                 if (wasPresent) RemoveFromIndex(text, symbols, dir, rel);
@@ -1085,9 +1103,10 @@ public static class RepositoryIndexer
 
         byte[] bytes;
         try { bytes = Storage.FileIdentity.ReadAllBytes(full, out before, out after); }
-        catch { if (oldState is { } keep) upsert(rel, keep); return ChangeKind.None; } // transient read error: keep as-was
+        catch { unread = true; if (oldState is { } keep) upsert(rel, keep); return ChangeKind.None; } // transient read error: keep as-was
         if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
         {
+            unread = true;
             if (wasPresent) RemoveFromIndex(text, symbols, dir, rel);
             upsert(rel, Rec(bytes.Length, FileState.BinaryHash));
             return wasPresent ? ChangeKind.Removed : ChangeKind.None;
@@ -1126,7 +1145,7 @@ public static class RepositoryIndexer
 
     private static void RemovePathAndChildren(
         SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string dir,
-        string rel, ref int removed, ref bool csharp, bool withChildren = true)
+        string rel, ref int removed, List<string> csharp, bool withChildren = true)
     {
         if (snapshot.TryGetValue(rel, out _) && snapshot.Remove(rel))
         {
@@ -1134,7 +1153,7 @@ public static class RepositoryIndexer
             symbols.RemovePath(rel);
             PositionalSidecar.Delete(dir, rel); // idempotent (no-op if none) - cutoff-independent, no orphans
             removed++;
-            if (SemanticInputs.IsCSharpInput(rel)) csharp = true;
+            if (SemanticInputs.IsCSharpInput(rel)) csharp.Add(rel);
         }
         if (!withChildren) return;
 
@@ -1147,7 +1166,7 @@ public static class RepositoryIndexer
             symbols.RemovePath(k);
             PositionalSidecar.Delete(dir, k); // idempotent - covers any adaptive cutoff without orphaning
             removed++;
-            if (SemanticInputs.IsCSharpInput(k)) csharp = true;
+            if (SemanticInputs.IsCSharpInput(k)) csharp.Add(k);
         }
     }
 

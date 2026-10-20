@@ -60,6 +60,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _clashByFile.Clear();       // per-file answers belong to this model; a rebuild recomputes them
             _conditionalByFile.Clear();
             _clashFilter = null;
+            _docByPath.Clear();
         }
     }
 
@@ -724,6 +725,94 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         finally { System.Buffers.ArrayPool<char>.Shared.Return(buf); }
     }
 
+    /// <summary>Most files one in-place update takes (see <see cref="TryApplyChanges"/>); past it, a rebuild.</summary>
+    public const int MaxInPlaceChanges = 200;
+
+    /// <summary>Models built from scratch, and updated in place (test hooks).</summary>
+    internal int Builds { get; private set; }
+    internal int InPlaceUpdates { get; private set; }
+
+    // What an in-place update needs from the build: each held .cs by path (exact, case-blind lookup - see TryApplyChanges),
+    // whether two held paths differed only in case (then no in-place update), and what OwnProjectLacksUsings reads.
+    private readonly Dictionary<string, DocumentId> _docByPath = new(StringComparer.OrdinalIgnoreCase);
+    private bool _caseTwins;
+    private bool _hasGlobalUsings;
+    private Dictionary<string, bool> _projectDirHasUsings = new(StringComparer.OrdinalIgnoreCase);
+    private List<string> _propsDirsWithUsings = new();
+
+    /// <summary>Bring a built model up to date with edits to these .cs files in place (MCP-C1): the rest of the solution keeps
+    /// its parsed trees, where a rebuild re-reads and re-parses every file (Roslyn: ~20k). <c>Present</c>: the file is one the
+    /// walk reads (the index holds it) - added or re-read; false: it's gone, or no longer read (ignored, over the cap) -
+    /// dropped. False when it can't be done here and the caller must drop the model: a project or props file or the config
+    /// (global usings, which folders are walked), more than <see cref="MaxInPlaceChanges"/> files, an incomplete model, a
+    /// file it can't read, a path that differs only in case from one held (a case-only rename). Nothing changes then. A gone
+    /// path the model never held changes nothing, and doesn't count toward the cap (a build's churn under an ignored obj/).
+    /// Caller holds the server's write lock: no query is inside the analyzer.</summary>
+    public bool TryApplyChanges(IReadOnlyCollection<(string FullPath, bool Present)> changes)
+    {
+        lock (_gate)
+        {
+            if (_solution is null || _projectId is null) return true; // nothing built: the next build reads the sources
+            if (changes.FirstOrDefault(c => !c.FullPath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) is { FullPath: { } other })
+                return Refuse($"{Path.GetFileName(other)} changed");
+            changes = changes.Where(c => c.Present || _docByPath.ContainsKey(c.FullPath)).ToList();
+            if (changes.Count > MaxInPlaceChanges) return Refuse($"{changes.Count} files changed");
+            if (_unreadable.Count > 0 || _droppedDirs > 0) return Refuse("the model is incomplete");
+            if (_caseTwins) return Refuse("it holds files whose paths differ only in case");
+            var solution = _solution;
+            var docs = new Dictionary<string, DocumentId?>(StringComparer.OrdinalIgnoreCase); // this batch's changes to _docByPath
+            foreach (var (path, present) in changes)
+            {
+                if (!docs.TryGetValue(path, out var id)) id = _docByPath.TryGetValue(path, out var held) ? held : null;
+                if (id is not null && !string.Equals(solution.GetDocument(id)?.FilePath, path, StringComparison.Ordinal))
+                    return Refuse($"{path} differs only in case from a file it holds");
+                if (!present)
+                {
+                    if (id is not null) solution = solution.RemoveDocument(id);
+                    docs[path] = null;
+                    continue;
+                }
+                SourceText text;
+                try { text = SourceText.From(File.ReadAllText(path)); }
+                catch (Exception ex) { return Refuse($"{path} couldn't be read ({ex.GetType().Name})"); } // a rebuild discloses it
+                if (id is null)
+                {
+                    id = DocumentId.CreateNewId(_projectId);
+                    solution = solution.AddDocument(DocumentInfo.Create(id, name: path, filePath: path,
+                        loader: TextLoader.From(TextAndVersion.Create(text, VersionStamp.Create(), path))));
+                }
+                else if (!solution.GetDocument(id)!.GetTextAsync().GetAwaiter().GetResult().ContentEquals(text))
+                    solution = solution.WithDocumentText(id, text);
+                docs[path] = id;
+            }
+            // The first .cs in a tree that had none: the build attaches the framework only when its walk finds C#.
+            if (docs.Values.Any(d => d is not null) && !solution.GetProject(_projectId)!.MetadataReferences.Any())
+                solution = solution.WithProjectMetadataReferences(_projectId, FrameworkReferences());
+
+            _solution = solution;
+            foreach (var (path, id) in docs)
+            {
+                _outsideImplicitUsings.Remove(path);
+                if (id is null) { _docByPath.Remove(path); continue; }
+                _docByPath[path] = id;
+                if (_hasGlobalUsings && OwnProjectLacksUsings(path, _projectDirHasUsings, _propsDirsWithUsings)) _outsideImplicitUsings.Add(path);
+            }
+            // A clash or an #if is judged per file, but a clash depends on what every other file declares.
+            _declarationClash = null;
+            _clashFilter = null;
+            _clashByFile.Clear();
+            foreach (var path in docs.Keys) _conditionalByFile.Remove(path);
+            InPlaceUpdates++;
+            RefusedBecause = null;
+            return true;
+        }
+    }
+
+    /// <summary>Why the last <see cref="TryApplyChanges"/> couldn't update the model in place (for the log), or null.</summary>
+    public string? RefusedBecause { get; private set; }
+
+    private bool Refuse(string why) { RefusedBecause = why; return false; }
+
     // Cancellable: the build walks and reads every .cs under every root (minutes over a share) while the caller holds
     // the server's read lock - a re-point must be able to stop it. A cancelled build installs nothing (the solution is
     // only assigned at the end), so the next call starts over cleanly.
@@ -753,6 +842,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             var projectDirHasUsings = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
             var propsDirsWithUsings = new List<string>();
             var csFiles = new List<string>();
+            var docByPath = new Dictionary<string, DocumentId>(StringComparer.OrdinalIgnoreCase);
+            bool caseTwins = false;
             foreach (var root in _roots)
             {
                 // Each root with ITS OWN rules - the ones its index was built with - not the process's ambient config, which
@@ -782,6 +873,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                     // src/App.cs) don't collide; ToLocation maps the path back to its owning root for display.
                     csFiles.Add(file.FullPath);
                     var documentId = DocumentId.CreateNewId(projectId);
+                    caseTwins |= !docByPath.TryAdd(file.FullPath, documentId);
                     solution = solution.AddDocument(DocumentInfo.Create(
                         documentId,
                         name: file.FullPath,
@@ -816,6 +908,13 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _clashFilter = null;
             _clashByFile.Clear();
             _conditionalByFile.Clear();
+            _docByPath.Clear();
+            foreach (var (path, id) in docByPath) _docByPath[path] = id;
+            _caseTwins = caseTwins;
+            _hasGlobalUsings = globalUsings.Count > 0;
+            _projectDirHasUsings = projectDirHasUsings;
+            _propsDirsWithUsings = propsDirsWithUsings;
+            Builds++;
             if (globalUsings.Count > 0)
                 foreach (var cs in csFiles)
                     if (OwnProjectLacksUsings(cs, projectDirHasUsings, propsDirsWithUsings)) _outsideImplicitUsings.Add(cs);

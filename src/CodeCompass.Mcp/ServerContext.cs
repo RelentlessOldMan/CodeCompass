@@ -1424,6 +1424,9 @@ public static class ServerContext
         get { Rw.EnterReadLock(); try { return _text?.PathMapResident ?? false; } finally { Rw.ExitReadLock(); } }
     }
 
+    /// <summary>Test seam: the resident C# model, or null (doesn't build one).</summary>
+    internal static RoslynCSharpAnalyzer? ResidentCSharpForTest { get { lock (AnalyzerGate) return _csharp; } }
+
     /// <summary>Test seam: are the semantic analyzers currently resident?</summary>
     internal static bool HasResidentSemanticAnalyzers()
     {
@@ -1975,6 +1978,7 @@ public static class ServerContext
                 {
                     if (!affects) wl.SourcesUnchanged(); // other sessions reload the index but keep their C# model
                     _loadedGen = wl.Commit();
+                    AdoptSourcesToken(_loadedGen);
                 }
                 if (!compact) return;
                 Log.For(Root).Info("compacting: segment count high after incremental edits; merging segments");
@@ -2068,10 +2072,13 @@ public static class ServerContext
         // retry doesn't: that edit dropped the model when it arrived, and what the index finds now is CSharpInputsChanged.
         bool affects = RoslynCSharpAnalyzer.MayAffect(
             retried is not { Count: > 0 } ? changedFullPaths : changedFullPaths.Where(p => !retried.Contains(p)).ToList());
+        _csharpUpdatedInPlace = null;
+        ChangeCounts? applied = null;
         try
         {
             _snapshot ??= RepositoryIndexer.LoadSnapshot(Root);
             var c = RepositoryIndexer.ApplyChanges(_text!, _symbols!, _snapshot, Root, changedFullPaths);
+            applied = c;
             untouched = c.Untouched;
             if (!untouched) RepositoryIndexer.Persist(Root, _text!, _symbols!, _snapshot);
             // ...and so does a C# file the index found added, changed or removed under a folder or a vanished path (a folder
@@ -2102,11 +2109,64 @@ public static class ServerContext
         {
             if (retried is not null) _unsurePaths.UnionWith(retried); // not looked at: still to retry
             affects = true; // the sources on disk changed whether or not the index caught up
+            applied = null; // ...and what the index holds is unknown: the model rebuilds
             Log.For(Root).Error("incremental reindex failed", ex);
         }
         // An incomplete model (a file it couldn't read, a folder it couldn't list) is retried on a later edit.
-        if (affects || IncompleteModelDueLocked()) { _csharp?.Dispose(); _csharp = null; }
+        if (IncompleteModelDueLocked() || (affects && _csharp is not null && !UpdateCSharpInPlaceLocked(changedFullPaths, applied)))
+        {
+            _csharp?.Dispose(); _csharp = null;
+        }
         return affects;
+    }
+
+    // The model ApplyIncremental updated in place for this batch (see AdoptSourcesToken), or null.
+    private static RoslynCSharpAnalyzer? _csharpUpdatedInPlace;
+
+    // Apply this batch's C# edits to the resident model in place (MCP-C1), rather than dropping it and re-parsing the whole
+    // solution on the next C# query. Only when every C# file the index changed is one the batch names - a folder created,
+    // renamed or deleted can hold files the index and the model see differently, so it rebuilds - and the index applied the
+    // batch cleanly (none of it unanswered, every C# file's text taken). A named file is "present" when the index holds it after the batch: the
+    // targeted update applies the walk's rules (ignored folders, the size cap, links), so the model reads what a rebuild
+    // would. Caller holds the Rw write lock.
+    private static bool UpdateCSharpInPlaceLocked(IReadOnlyCollection<string> changedFullPaths, ChangeCounts? applied)
+    {
+        if (applied is null || applied.Unsure.Count > 0 || _snapshot is null || _csharp is null) return false;
+        var root = Path.GetFullPath(Root);
+        var named = new Dictionary<string, string>(StringComparer.Ordinal); // rel -> full
+        foreach (var p in changedFullPaths)
+        {
+            if (!SemanticInputs.IsCSharpInput(p)) continue;
+            var full = Path.GetFullPath(p);
+            var rel = Path.GetRelativePath(root, full).Replace('\\', '/');
+            if (PathSafety.IsOutsideRepo(rel)) return false;
+            named[rel] = full;
+        }
+        if (applied.CSharpPaths.Any(r => !named.ContainsKey(r))) return false;
+        if (applied.CSharpUnread.Count > 0)
+        {
+            Log.For(Root).Info($"C# model rebuilds on next use: the index couldn't read {applied.CSharpUnread[0]}");
+            return false;
+        }
+        var changes = named.Select(kv => (kv.Value, _snapshot.TryGetValue(kv.Key, out _))).ToList();
+        if (!_csharp.TryApplyChanges(changes))
+        {
+            Log.For(Root).Info($"C# model rebuilds on next use: {_csharp.RefusedBecause}");
+            return false;
+        }
+        _csharpUpdatedInPlace = _csharp;
+        return true;
+    }
+
+    // The commit after an in-place update (see UpdateCSharpInPlaceLocked) published a new sources token - for sources the
+    // model already holds. Take it, or the next reload's SourcesMoved would throw the current model away.
+    private static void AdoptSourcesToken(string? gen)
+    {
+        var cs = Interlocked.Exchange(ref _csharpUpdatedInPlace, null);
+        if (cs is null || IndexGeneration.SourcesOf(gen) is not { } token) return;
+        lock (AnalyzerGate)
+            if (ReferenceEquals(_csharp, cs))
+                _csharpSources = new Dictionary<string, string?>(_csharpSources, StringComparer.OrdinalIgnoreCase) { [Root] = token };
     }
 
     // Edits held back from earlier batches (see HoldBackLocked) ride along with this one. Caller holds the Rw write lock and
@@ -2224,6 +2284,7 @@ public static class ServerContext
                     if (untouched) { wl.SkipBump(); continue; } // nothing written (see OnChanges)
                     if (!affects) wl.SourcesUnchanged();
                     _loadedGen = wl.Commit();
+                    AdoptSourcesToken(_loadedGen);
                     continue;
                 }
 

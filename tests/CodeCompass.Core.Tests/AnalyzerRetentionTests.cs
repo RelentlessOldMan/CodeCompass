@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using CodeCompass.Core.Changes;
 using CodeCompass.Core.Storage;
 using CodeCompass.Mcp;
@@ -218,7 +219,7 @@ public class AnalyzerRetentionTests
     }
 
     [Fact]
-    public void WatcherEdit_ToNonCSharpFile_KeepsAnalyzer_CSharpEdit_DropsIt()
+    public void WatcherEdit_ToNonCSharpFile_KeepsAnalyzer_CSharpEdit_UpdatesItInPlace()
     {
         using var repo = new TempRepo();
         repo.Write("a.cs", "class A { void M() { } void N() { M(); } }\n");
@@ -234,10 +235,126 @@ public class AnalyzerRetentionTests
             ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("README.md") }, FullReconcile: false));
             Assert.True(ServerContext.HasResidentSemanticAnalyzers(), "a README edit must keep the C# analyzer");
 
+            var model = ServerContext.ResidentCSharpForTest;
             repo.Write("a.cs", "class A { void M() { } void N() { M(); M(); } }\n");
             ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("a.cs") }, FullReconcile: false));
-            Assert.False(ServerContext.HasResidentSemanticAnalyzers(), "a .cs edit must drop the stale analyzer");
+            Assert.Same(model, ServerContext.ResidentCSharpForTest); // updated, not thrown away (MCP-C1)
             Assert.Contains("a.cs:1:40", CodeCompassTools.FindReferences("M")); // the new call is found
+            Assert.Equal(1, model!.Builds);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    // A new file in a new folder arrives as the folder and the file: the index's C# changes are all files the batch names,
+    // so the model takes them in place. A deleted file goes the same way.
+    [Fact]
+    public void ACSharpFileAddedInANewFolder_AndOneDeleted_UpdateTheModelInPlace()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "public class A { public void Ping() { } }\n");
+        repo.Write("b.cs", "class B { void N(A a) { a.Ping(); } }\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.Contains("b.cs", CodeCompassTools.FindReferences("Ping"));
+            var model = ServerContext.ResidentCSharpForTest;
+
+            repo.Write("New/c.cs", "class C { void N(A a) { a.Ping(); } }\n");
+            repo.Delete("b.cs");
+            ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("New"), repo.FullPath("New/c.cs"), repo.FullPath("b.cs") }, FullReconcile: false));
+
+            Assert.Same(model, ServerContext.ResidentCSharpForTest);
+            var r = CodeCompassTools.FindReferences("Ping").Replace('\\', '/');
+            Assert.Contains("New/c.cs:1:27", r);
+            Assert.DoesNotContain("b.cs", r);
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    // A new file the index couldn't read (still held open by its writer) isn't in the index, but a cold build lists it as
+    // unreadable - and discloses it. Taking "not in the index" as "gone" would leave it out silently: that's a rebuild.
+    [Fact]
+    public void ANewCSharpFileTheIndexCantRead_DropsTheAnalyzer()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "public class A { public void Ping() { } void Q() { Ping(); } }\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.Contains("a.cs", CodeCompassTools.FindReferences("Ping"));
+            Assert.NotNull(ServerContext.ResidentCSharpForTest);
+            repo.Write("b.cs", "class B { void N(A a) { a.Ping(); } }\n");
+            using (new FileStream(repo.FullPath("b.cs"), FileMode.Open, FileAccess.Read, FileShare.None))
+                ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("b.cs") }, FullReconcile: false));
+            Assert.False(ServerContext.HasResidentSemanticAnalyzers(), "a C# file the index couldn't read must rebuild the model");
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    // A binary-looking .cs found by walking a new folder: the index keeps only a binary marker, so nothing reports a change,
+    // yet a cold build reads its text. That's a rebuild too.
+    [Fact]
+    public void ABinaryLookingCSharpFileInANewFolder_DropsTheAnalyzer()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "public class A { public void Ping() { } void Q() { Ping(); } }\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.Contains("a.cs", CodeCompassTools.FindReferences("Ping"));
+            Assert.NotNull(ServerContext.ResidentCSharpForTest);
+            repo.Write("New/c.cs", "class C { void N(A a) { a.Ping(); } }\n\0\0\n");
+            ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("New") }, FullReconcile: false));
+            Assert.False(ServerContext.HasResidentSemanticAnalyzers(), "a C# file the index holds no text for must rebuild the model");
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    // A project file decides the global usings every file binds with: that's a rebuild.
+    [Fact]
+    public void AProjectFileEdit_DropsTheAnalyzer()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { void M() { } void N() { M(); } }\n");
+        repo.Write("App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.Contains("a.cs", CodeCompassTools.FindReferences("M"));
+            repo.Write("App.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>\n");
+            repo.Write("a.cs", "class A { void M() { } void N() { M(); M(); } }\n");
+            ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("App.csproj"), repo.FullPath("a.cs") }, FullReconcile: false));
+            Assert.False(ServerContext.HasResidentSemanticAnalyzers(), "a project file edit must rebuild the model");
+        }
+        finally { ServerContext.Init(repo.Root); }
+    }
+
+    // The commit for an in-place update publishes a new sources token. The model already holds those sources, so it takes
+    // the token: a later reload (another process's write that changed no source) must not see "sources moved" and drop it.
+    [Fact]
+    public void AModelUpdatedInPlace_SurvivesAReloadThatChangedNoSource()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { void M() { } void N() { M(); } }\n");
+        repo.Write("README.md", "# readme\n");
+        ServerContext.Init(repo.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.Contains("a.cs", CodeCompassTools.FindReferences("M"));
+            var model = ServerContext.ResidentCSharpForTest;
+            repo.Write("a.cs", "class A { void M() { } void N() { M(); M(); } }\n");
+            ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("a.cs") }, FullReconcile: false));
+            Assert.Same(model, ServerContext.ResidentCSharpForTest);
+
+            IndexGeneration.Bump(IndexStore.CacheDirPath(repo.Root), carrySources: true); // another process: index only
+            repo.Write("README.md", "# readme, edited\n");
+            ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("README.md") }, FullReconcile: false));
+            Assert.Same(model, ServerContext.ResidentCSharpForTest);
         }
         finally { ServerContext.Init(repo.Root); }
     }

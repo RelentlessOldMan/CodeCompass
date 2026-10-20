@@ -82,6 +82,26 @@ public class MixedGlobalUsingsTests
         Assert.Equal(2 * runs, analyzer.ClashFileChecks);
     }
 
+    // A file added to the model in place (see TryApplyChanges) is placed by its own project like one a build reads: in a
+    // legacy project it's checked for a clash, and a declaration clash it brings is found - as a cold build finds it.
+    [Fact]
+    public void AFileAddedInPlace_ToALegacyProject_IsCheckedForAClash()
+    {
+        using var repo = MixedRepo(clash: true);
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        Assert.Empty(analyzer.UsingsClash(new[] { repo.FullPath("Legacy/Use.cs") }).Declarations);
+
+        repo.Write("Legacy/Holder.cs", "using Legacy.Jobs;\nnamespace Legacy\n{\n    public class Holder { public Task Job; }\n}\n");
+        Assert.True(analyzer.TryApplyChanges(new[] { (repo.FullPath("Legacy/Holder.cs"), true) }), analyzer.RefusedBecause);
+
+        using var cold = new RoslynCSharpAnalyzer(repo.Root);
+        var expected = cold.UsingsClash(new[] { repo.FullPath("Legacy/Use.cs") });
+        Assert.Equal(new[] { repo.FullPath("Legacy/Holder.cs") }, expected.Declarations);
+        var actual = analyzer.UsingsClash(new[] { repo.FullPath("Legacy/Use.cs") });
+        Assert.Equal(expected.Declarations, actual.Declarations);
+        Assert.Equal(expected.Files, actual.Files);
+    }
+
     // Binding is what costs (a Roslyn-size repo has ~13.5k files outside the usings): a file that names nothing two of its
     // imports declare can't have a CS0104, so it isn't bound to find that out - on any query, cold or warm.
     [Fact]
