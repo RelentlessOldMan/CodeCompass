@@ -59,6 +59,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _projectId = null;
             _clashByFile.Clear();       // per-file answers belong to this model; a rebuild recomputes them
             _conditionalByFile.Clear();
+            _scopeFactsByFile.Clear();
             _clashFilter = null;
             _docByPath.Clear();
         }
@@ -461,11 +462,13 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             : null;
         LastPinnedModels = pinned?.Count ?? 0;
 
+        var scope = declarations.Count == 0 ? null : SearchScope(project, name, declarations, ct);
+        LastSearchScope = scope?.Count ?? -1;
         foreach (var symbol in declarations)
         {
             if (covered.Contains(symbol)) continue;
             Interlocked.Increment(ref _referenceSearches);
-            var referenced = SymbolFinder.FindReferencesAsync(symbol, solution, ct).GetAwaiter().GetResult();
+            var referenced = SymbolFinder.FindReferencesAsync(symbol, solution, scope, ct).GetAwaiter().GetResult();
             AfterSearch?.Invoke(solution);
             foreach (var r in referenced)
             {
@@ -483,6 +486,160 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         }
         GC.KeepAlive(pinned);
         return Canonical(all, max, include);
+    }
+
+    /// <summary>Documents the last FindReferences searched (test hook; -1 = the whole solution).</summary>
+    internal int LastSearchScope { get; private set; }
+
+    /// <summary>Test hook: false searches the whole solution every time (the scoped search's differential oracle).</summary>
+    internal bool ScopeSearches { get; set; } = true;
+
+    // Names the compiler calls without the text spelling them: foreach, await, deconstruction, collection initializers,
+    // using, fixed, ranges and indices, query expressions, delegate calls, interpolated-string handlers, lock. Roslyn 4.9
+    // reports some of these (foreach, Deconstruct, GetAwaiter, Add); the rest are listed in case a later one does.
+    private static readonly HashSet<string> ImplicitlyCalled = new(StringComparer.Ordinal)
+    {
+        "GetEnumerator", "GetAsyncEnumerator", "Current", "MoveNext", "MoveNextAsync", "Dispose", "DisposeAsync", "Deconstruct",
+        "GetAwaiter", "GetResult", "IsCompleted", "OnCompleted", "UnsafeOnCompleted", "Add", "Length", "Count", "Slice",
+        "Substring", "Item", "GetPinnableReference", "Invoke", "Select", "SelectMany", "Where", "Join", "GroupJoin", "OrderBy",
+        "OrderByDescending", "ThenBy", "ThenByDescending", "GroupBy", "Cast", "AppendLiteral", "AppendFormatted", "EnterScope",
+        "Finalize",
+    };
+
+    // Types a keyword or a syntax form names without their own name: int, string, int?, (a, b), ^1, 1..2.
+    private static readonly HashSet<string> SpelledOtherwise = new(StringComparer.Ordinal)
+    {
+        "Object", "String", "Boolean", "Char", "SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64",
+        "IntPtr", "UIntPtr", "Single", "Double", "Decimal", "Void", "Nullable", "ValueTuple", "Index", "Range",
+    };
+
+    // The documents a reference to `name` can be in (CPU review SEM-C2): left unscoped, every search ran Roslyn's document
+    // selection over the whole solution. A reference spells the name, except where the compiler calls a member by pattern
+    // (those names search everything), a `[Foo]` attribute (searched as Foo), a target-typed `new()` or a `base()` call of a
+    // type, a global alias (any one searches everything) or an identifier spelled with a \u escape or a format character. Judged on the model's text only, so the answer
+    // stays deterministic; null = search the whole solution.
+    private System.Collections.Immutable.IImmutableSet<Document>? SearchScope(Project project, string name, List<ISymbol> declarations,
+        System.Threading.CancellationToken ct)
+    {
+        // Operators, conversions, accessors and special types: Roslyn 4.9 reports no reference to these that skips the
+        // name (or can't look them up by name at all), so no test reaches these guards; they keep a later Roslyn honest.
+        if (!ScopeSearches || ImplicitlyCalled.Contains(name) || name.StartsWith("op_", StringComparison.Ordinal)) return null;
+        if (declarations.Any(d => d is INamedTypeSymbol { SpecialType: not SpecialType.None } || d is IPropertySymbol { IsIndexer: true }
+                || d is IMethodSymbol { MethodKind: not MethodKind.Ordinary and not MethodKind.ReducedExtension })) return null;
+        if (declarations.Any(d => d is INamedTypeSymbol) && SpelledOtherwise.Contains(name)) return null;
+        bool type = declarations.Any(d => d is INamedTypeSymbol);
+        var needle = name.Length > "Attribute".Length && name.EndsWith("Attribute", StringComparison.Ordinal)
+            ? name[..^"Attribute".Length] : name;
+        var scope = System.Collections.Immutable.ImmutableHashSet.CreateBuilder<Document>();
+        foreach (var doc in project.Documents)
+        {
+            ct.ThrowIfCancellationRequested();
+            var text = doc.GetTextAsync(ct).GetAwaiter().GetResult();
+            var facts = ScopeFactsFor(doc, text, ct);
+            if (facts.HasFlag(ScopeFacts.GlobalAlias)) return null;
+            if (facts.HasFlag(ScopeFacts.Escape) || (type && facts.HasFlag(ScopeFacts.TargetTypedNew)) || Contains(text, needle))
+                scope.Add(doc);
+        }
+        return scope.ToImmutable();
+    }
+
+    [Flags]
+    private enum ScopeFacts { None = 0, Escape = 1, TargetTypedNew = 2, GlobalAlias = 4 }
+
+    private readonly Dictionary<string, ScopeFacts> _scopeFactsByFile = new(StringComparer.Ordinal);
+
+    // What a file's text says about where a reference could hide, whatever the name: cached per file like the #if check.
+    private ScopeFacts ScopeFactsFor(Document doc, SourceText text, System.Threading.CancellationToken ct)
+    {
+        var path = doc.FilePath ?? doc.Name;
+        lock (_gate) if (_scopeFactsByFile.TryGetValue(path, out var known)) return known;
+        var facts = ScopeFacts.None;
+        if (HasHiddenSpelling(text)) facts |= ScopeFacts.Escape;
+        if (HasTargetTypedNew(text) || HasKeywordCall(text, "base")) facts |= ScopeFacts.TargetTypedNew;
+        if (ContainsBoth(text, "global", "using")
+            && doc.GetSyntaxRootAsync(ct).GetAwaiter().GetResult() is CompilationUnitSyntax unit
+            && unit.Usings.Any(u => u.GlobalKeyword != default && u.Alias is not null))
+            facts |= ScopeFacts.GlobalAlias;
+        lock (_gate) _scopeFactsByFile[path] = facts;
+        return facts;
+    }
+
+    // `new(` / `new (`: a target-typed creation names its type nowhere.
+    internal static bool HasTargetTypedNew(SourceText text) => HasKeywordCall(text, "new");
+
+    // `keyword(`: `new(` creates a type and `base(` calls a base constructor - from a partial part that may never name the
+    // base type - without spelling the type. Fails open: the keyword followed by a comment or a directive counts too.
+    internal static bool HasKeywordCall(SourceText text, string keyword)
+    {
+        const int Chunk = 64 * 1024;
+        int overlap = keyword.Length - 1;
+        var buf = System.Buffers.ArrayPool<char>.Shared.Rent(Chunk + overlap);
+        try
+        {
+            for (int start = 0; start < text.Length; start += Chunk)
+            {
+                int len = Math.Min(Chunk + overlap, text.Length - start);
+                text.CopyTo(start, buf, 0, len);
+                ReadOnlySpan<char> span = buf.AsSpan(0, len);
+                for (int at = 0; ; )
+                {
+                    int i = span[at..].IndexOf(keyword.AsSpan(), StringComparison.Ordinal);
+                    if (i < 0 || at + i >= Chunk) break; // a match starting in the overlap is the next chunk's
+                    int j = start + at + i + keyword.Length; // whitespace can run past the chunk: read on from the text
+                    while (j < text.Length && char.IsWhiteSpace(text[j])) j++;
+                    if (j < text.Length && text[j] is '(' or '/' or '#') return true;
+                    at += i + 1;
+                }
+            }
+            return false;
+        }
+        finally { System.Buffers.ArrayPool<char>.Shared.Return(buf); }
+    }
+
+    // An identifier can be spelled without its plain name: a \uXXXX (\UXXXXXXXX) escape, or a format character (a soft
+    // hyphen, a zero-width joiner), which the compiler drops from it. Either anywhere in a file puts it in every scope.
+    internal static bool HasHiddenSpelling(SourceText text)
+    {
+        const int Chunk = 64 * 1024;
+        var buf = System.Buffers.ArrayPool<char>.Shared.Rent(Chunk + 1);
+        try
+        {
+            for (int start = 0; start < text.Length; start += Chunk)
+            {
+                int len = Math.Min(Chunk + 1, text.Length - start); // one more, so a surrogate pair at the end decodes
+                text.CopyTo(start, buf, 0, len);
+                ReadOnlySpan<char> span = buf.AsSpan(0, Math.Min(len, Chunk));
+                for (int at = 0; ; )
+                {
+                    int i = span[at..].IndexOf('\\');
+                    if (i < 0) break;
+                    if (IsUnicodeEscapeAt(text, start + at + i)) return true;
+                    at += i + 1;
+                }
+                ReadOnlySpan<char> wide = buf.AsSpan(0, len);
+                for (int at = 0; ; )
+                {
+                    int i = span[at..].IndexOfAnyExceptInRange((char)0, (char)0x7F);
+                    if (i < 0) break;
+                    if (System.Text.Rune.DecodeFromUtf16(wide[(at + i)..], out var rune, out _) == System.Buffers.OperationStatus.Done
+                        && System.Text.Rune.GetUnicodeCategory(rune) == System.Globalization.UnicodeCategory.Format)
+                        return true;
+                    at += i + 1;
+                }
+            }
+            return false;
+        }
+        finally { System.Buffers.ArrayPool<char>.Shared.Return(buf); }
+    }
+
+    private static bool IsUnicodeEscapeAt(SourceText text, int backslash)
+    {
+        if (backslash + 1 >= text.Length) return false;
+        int digits = text[backslash + 1] == 'u' ? 4 : text[backslash + 1] == 'U' ? 8 : 0;
+        if (digits == 0 || backslash + 2 + digits > text.Length) return false;
+        for (int k = 0; k < digits; k++)
+            if (!char.IsAsciiHexDigit(text[backslash + 2 + k])) return false;
+        return true;
     }
 
     // The model references every assembly the server runs on, so a repo that is itself one of them (Roslyn, the MCP SDK)
@@ -704,6 +861,8 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     // Does the document's text contain both strings (ordinal)? Scanned in fixed-size chunks straight from the SourceText -
     // ToString() on every document copied the whole C# corpus into new strings on every find_references. Consecutive
     // chunks overlap by the longer needle's length - 1, so a match across a chunk boundary is still seen.
+    private static bool Contains(SourceText text, string s) => ContainsBoth(text, s, s);
+
     internal static bool ContainsBoth(SourceText text, string a, string b)
     {
         const int Chunk = 64 * 1024;
@@ -801,7 +960,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _declarationClash = null;
             _clashFilter = null;
             _clashByFile.Clear();
-            foreach (var path in docs.Keys) _conditionalByFile.Remove(path);
+            foreach (var path in docs.Keys) { _conditionalByFile.Remove(path); _scopeFactsByFile.Remove(path); }
             InPlaceUpdates++;
             RefusedBecause = null;
             return true;
@@ -908,6 +1067,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _clashFilter = null;
             _clashByFile.Clear();
             _conditionalByFile.Clear();
+            _scopeFactsByFile.Clear();
             _docByPath.Clear();
             foreach (var (path, id) in docByPath) _docByPath[path] = id;
             _caseTwins = caseTwins;
