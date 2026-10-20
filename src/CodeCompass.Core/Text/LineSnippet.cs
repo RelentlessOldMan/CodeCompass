@@ -5,7 +5,8 @@ namespace CodeCompass.Core.Text;
 /// that can forge output. Repo content is untrusted and lands verbatim in an LLM's context, so:
 /// <list type="bullet">
 /// <item>A single-line minified/generated/hostile file can make one "line" hundreds of MB; copying it per hit
-/// could exhaust memory and flood the context. Lines over <see cref="MaxChars"/> are windowed around the match.</item>
+/// could exhaust memory and flood the context. Lines over <see cref="MaxChars"/> are windowed around the match, and
+/// the window ends by saying how long the line really is.</item>
 /// <item>An embedded CR, other C0 controls, a Unicode line/paragraph separator or a bidi override can render as a
 /// forged extra result or note line ("x\rC:\other.cs:1:1: (Note: ...)"). Each is replaced by one visible
 /// placeholder character, so column offsets are unchanged.</item>
@@ -17,6 +18,14 @@ public static class LineSnippet
     private const int Lead = 120; // context kept before the match when windowing
     private const char Ellipsis = '…';
     private const char Placeholder = '·';
+
+    /// <summary>The longest <see cref="Marker"/> can be: a cut line's text is at most MaxChars + 2 ellipses + this.</summary>
+    public static readonly int MaxMarkerChars = Marker(int.MaxValue).Length;
+
+    // Appended to a cut line: a bare "…" can't tell a 400-char line from a 4 MB one, and an agent that wants more
+    // context would Read the line, pulling all of it in. After the window, so whole-word checks never see it.
+    private static string Marker(int lineLength) =>
+        $" [line is {lineLength.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} chars; search nearby text instead of reading it]";
 
     /// <summary>The display text for <paramref name="line"/>[<paramref name="start"/>..<paramref name="start"/>+
     /// <paramref name="length"/>) containing a match at <paramref name="matchIndex"/> (absolute index into
@@ -34,7 +43,7 @@ public static class LineSnippet
         int winEnd = Math.Min(length, Math.Max(winStart + MaxChars, rel + matchLength + 1));
         bool cutLeft = winStart > 0, cutRight = winEnd < length;
         var body = Scrub(line.Slice(start + winStart, winEnd - winStart));
-        var text = (cutLeft ? Ellipsis.ToString() : "") + body + (cutRight ? Ellipsis.ToString() : "");
+        var text = (cutLeft ? Ellipsis.ToString() : "") + body + (cutRight ? Ellipsis.ToString() : "") + Marker(length);
         return (text, winStart - (cutLeft ? 1 : 0));
     }
 
@@ -44,7 +53,7 @@ public static class LineSnippet
 
     /// <summary>Bound and scrub a line shown WITHOUT a known match position (a snippet line): keep its head.</summary>
     public static string Display(string line) =>
-        line.Length <= MaxChars ? Scrub(line.AsSpan()) : Scrub(line.AsSpan(0, MaxChars)) + Ellipsis;
+        line.Length <= MaxChars ? Scrub(line.AsSpan()) : Scrub(line.AsSpan(0, MaxChars)) + Ellipsis + Marker(line.Length);
 
     private static string Scrub(ReadOnlySpan<char> s)
     {

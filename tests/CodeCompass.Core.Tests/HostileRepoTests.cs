@@ -62,9 +62,52 @@ public class HostileRepoTests
         var results = new System.Collections.Generic.List<SearchMatch>();
         FileScanner.ScanText("min.js", line, "NeedleToken", results, 10);
         var m = Assert.Single(results);
-        Assert.True(m.LineText.Length <= CodeCompass.Core.Text.LineSnippet.MaxChars + 2, $"LineText was {m.LineText.Length} chars");
+        Assert.True(m.LineText.Length <= CodeCompass.Core.Text.LineSnippet.MaxChars + 2 + CodeCompass.Core.Text.LineSnippet.MaxMarkerChars,
+                    $"LineText was {m.LineText.Length} chars");
         Assert.Equal(2_000_002, m.Column);                                          // the REAL column is unchanged
         Assert.Equal("NeedleToken", m.LineText.Substring(m.Column - 1 - m.LineTextOffset, "NeedleToken".Length));
+    }
+
+    // A windowed line used to end in a bare "…", so an agent couldn't tell a 400-char line from a 4 MB one and would
+    // Read the line for more context, pulling all of it into its context. The window now says how long the line is.
+    [Fact]
+    public void AWindowedLine_SaysHowLongTheLineIs()
+    {
+        var line = new string('a', 2_000_000) + " NeedleToken " + new string('b', 2_000_000);
+        var results = new System.Collections.Generic.List<SearchMatch>();
+        FileScanner.ScanText("min.js", line, "NeedleToken", results, 10);
+        var m = Assert.Single(results);
+        Assert.EndsWith(" [line is 4,000,013 chars; search nearby text instead of reading it]", m.LineText);
+        Assert.Equal("NeedleToken", m.LineText.Substring(m.Column - 1 - m.LineTextOffset, "NeedleToken".Length));
+    }
+
+    [Fact]
+    public void AStreamedWindowedLine_SaysHowLongTheLineIs()
+    {
+        using var repo = new TempRepo();
+        repo.Write("app.log", "first\n" + new string('x', 30_000) + " asdf " + new string('y', 30_000) + "\nlast\n");
+        var results = new System.Collections.Generic.List<SearchMatch>();
+        Assert.Null(FileScanner.ScanByLine("app.log", repo.FullPath("app.log"), "asdf", results, 10));
+        var m = Assert.Single(results);
+        Assert.Equal(2, m.Line);
+        Assert.EndsWith(" [line is 60,006 chars; search nearby text instead of reading it]", m.LineText);
+    }
+
+    [Fact]
+    public void ALineThatFits_HasNoMarker()
+    {
+        var line = new string('a', CodeCompass.Core.Text.LineSnippet.MaxChars - 6) + "Needle";
+        var results = new System.Collections.Generic.List<SearchMatch>();
+        FileScanner.ScanText("a.js", line, "Needle", results, 10);
+        Assert.Equal(line, Assert.Single(results).LineText);
+    }
+
+    [Fact]
+    public void ADisplayedSnippetLine_SaysHowLongTheLineIs()
+    {
+        var shown = CodeCompass.Core.Text.LineSnippet.Display(new string('z', 12_345));
+        Assert.Equal(new string('z', CodeCompass.Core.Text.LineSnippet.MaxChars) + "… [line is 12,345 chars; search nearby text instead of reading it]", shown);
+        Assert.Equal("short", CodeCompass.Core.Text.LineSnippet.Display("short"));
     }
 
     [Fact]

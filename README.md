@@ -228,7 +228,8 @@ your own choice and are not clamped.
   if that's inside an indexed root.
 - Queries shorter than 3 characters can't use the trigram index: `search_code` refuses them (they would
   read every file), and `find_references` on a 1–2 character name runs only the C# semantic pass and says so.
-- Matched lines longer than 300 characters are shown as a window around the match, and control/bidi
+- Matched lines longer than 300 characters are shown as a window around the match, ending with the line's
+  real length (`[line is 60,006 chars; search nearby text instead of reading it]`), and control/bidi
   characters are replaced with `·` — so a minified or hostile file can't flood the agent's context or
   forge extra result lines.
 
