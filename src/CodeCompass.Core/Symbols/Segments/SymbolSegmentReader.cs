@@ -1,4 +1,5 @@
 using CodeCompass.Core.Storage;
+using System.Buffers;
 using System.IO.MemoryMappedFiles;
 using System.Text;
 
@@ -87,6 +88,93 @@ public sealed class SymbolSegmentReader : IDisposable
         long off = NameSpan(i, out int len);
         return MappedUtf8.Contains(_view, off, len, value, StringComparison.OrdinalIgnoreCase);
     }
+
+    // Names read per scan step: bounded RAM however big the segment (a longer single name gets a bigger buffer).
+    internal const int ScanChunkBytes = 64 * 1024;
+    private const int ScanChunkNames = 4096;
+
+    /// <summary>Local indices, in order, of the symbols whose name contains <paramref name="value"/> (OrdinalIgnoreCase):
+    /// the same answer as <see cref="NameContains"/> on each, but an ASCII query scans the name bytes a chunk at a time
+    /// instead of decoding every name - search_symbols' miss path, which visits every symbol.</summary>
+    public IEnumerable<int> NamesContaining(string value)
+    {
+        if (value.Length == 0 || !Ascii.IsValid(value))
+        {
+            for (int i = 0; i < Count; i++) if (NameContains(i, value)) yield return i;
+            yield break;
+        }
+        var query = Encoding.ASCII.GetBytes(value);
+        var hits = new List<int>();
+        byte[] blob = ArrayPool<byte>.Shared.Rent(ScanChunkBytes);
+        int[] offs = ArrayPool<int>.Shared.Rent(ScanChunkNames + 1);
+        try
+        {
+            for (int first = 0; first < Count;)
+            {
+                hits.Clear();
+                first = ScanChunk(first, query, ref blob, offs, hits);
+                foreach (var i in hits) yield return i;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(blob);
+            ArrayPool<int>.Shared.Return(offs);
+        }
+    }
+
+    // One chunk of names from `first`: appends the matches (in order) to `hits`, returns the next unscanned name.
+    private int ScanChunk(int first, byte[] query, ref byte[] blob, int[] offs, List<int> hits)
+    {
+        int n = Math.Min(ScanChunkNames, Count - first);
+        var o = offs.AsSpan(0, n + 1);
+        ReadMapped(_nameOffsetsOff + (long)first * 4, o);
+        for (int k = 0; k <= n; k++) // the same guard NameSpan applies to each name it reads
+            if (o[k] < 0 || (k > 0 && o[k] < o[k - 1]) || _nameBlobOff + o[k] > _pathOffsetsOff)
+                throw new InvalidDataException("corrupt CodeCompass symbol segment (name offsets out of range)");
+        int count = 1; // always at least one name, however long
+        while (count < n && o[count + 1] - o[0] <= ScanChunkBytes) count++;
+        int total = o[count] - o[0];
+        if (total > blob.Length) { ArrayPool<byte>.Shared.Return(blob); blob = ArrayPool<byte>.Shared.Rent(total); }
+        var bytes = blob.AsSpan(0, total);
+        ReadMapped(_nameBlobOff + o[0], bytes);
+
+        // Exact for an ASCII query: ASCII bytes are the same chars in UTF-8 (decoding never swallows one), and no non-ASCII
+        // char equals an ASCII one under OrdinalIgnoreCase (SymbolNameScanTests pins that), so the decoded name matches
+        // exactly when its bytes do. A match that runs on into the next name is not one.
+        int j = 0;
+        for (int pos = 0; ;)
+        {
+            int p = IndexOfAsciiIgnoreCase(bytes, pos, query);
+            if (p < 0) break;
+            while (o[j + 1] - o[0] <= p) j++;
+            if (p + query.Length <= o[j + 1] - o[0]) { hits.Add(first + j); pos = o[j + 1] - o[0]; j++; if (j == count) break; }
+            else pos = p + 1;
+        }
+        return first + count;
+    }
+
+    // First index at or after `from` where `query` (ASCII) occurs in `bytes`, ignoring ASCII case; -1 if none.
+    private static int IndexOfAsciiIgnoreCase(ReadOnlySpan<byte> bytes, int from, byte[] query)
+    {
+        byte c = query[0];
+        bool letter = (uint)((c | 0x20) - 'a') <= 'z' - 'a';
+        byte lo = (byte)(c | 0x20), up = (byte)(c & ~0x20);
+        while (from <= bytes.Length - query.Length)
+        {
+            var rest = bytes[from..];
+            int k = letter ? rest.IndexOfAny(lo, up) : rest.IndexOf(c);
+            if (k < 0) return -1;
+            int p = from + k;
+            if (p > bytes.Length - query.Length) return -1;
+            if (Ascii.EqualsIgnoreCase(bytes.Slice(p, query.Length), query)) return p;
+            from = p + 1;
+        }
+        return -1;
+    }
+
+    private void ReadMapped<T>(long offset, Span<T> into) where T : struct =>
+        _view.SafeMemoryMappedViewHandle.ReadSpan((ulong)(_view.PointerOffset + offset), into);
 
     private int CompareName(int i, string name)
     {

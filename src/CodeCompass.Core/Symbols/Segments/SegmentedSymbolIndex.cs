@@ -164,9 +164,8 @@ public sealed class SegmentedSymbolIndex : IDisposable
         {
             var seg = _segments[segId];
             _tombstones.TryGetValue(segId, out var tomb);
-            for (int i = 0; i < seg.Count; i++)
+            foreach (var i in seg.NamesContaining(queryText)) // scans the name bytes in place: a miss visits every symbol
             {
-                if (!seg.NameContains(i, queryText)) continue; // read in place: a miss scans every symbol
                 var path = seg.GetSymbolPath(i);
                 if (tomb is not null && tomb.Contains(path)) continue;
                 if (QueryIgnore.IsIgnoredPath(path)) continue;
