@@ -286,7 +286,8 @@ public static class CodeCompassTools
         bool csharpIncomplete = csharp is null || csConditional.Count > 0 || csUnreadable.Count > 0 || csDroppedDirs > 0 || csClash.Declarations.Count > 0;
         // Per-query comment/string classifier for C#/C/C++ name matches; classifies each file once, from the text the name
         // search already read when it read the file whole (ReferenceTextSink), so the file isn't read twice.
-        var spanFilter = new LexicalSpanFilter(name);
+        // A .cs file the semantic pass just parsed is classified on the model's tree, not parsed again (when the texts match).
+        var spanFilter = new LexicalSpanFilter(name) { CSharpTree = csharp is null ? null : csharp.TreeFor };
         var seenKeys = new System.Collections.Generic.HashSet<string>(
             hits.Select(h => { int i = h.Line.IndexOf(": ", System.StringComparison.Ordinal); return i > 0 ? h.Line[..i] : h.Line; }),
             System.StringComparer.Ordinal); // exact: on a case-sensitive tree Reg.h and reg.h are different files

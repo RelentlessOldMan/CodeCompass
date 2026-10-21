@@ -404,6 +404,22 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         return hits;
     }
 
+    /// <summary>The tree this model already parsed for <paramref name="fullPath"/>, for the comment/string classifier
+    /// (LexicalSpanFilter.CSharpTree) - but only when the model holds exactly <paramref name="text"/> (a file edited since
+    /// the build gets null, and is parsed from its new text) and parsed it as the classifier would (default options).
+    /// Never builds the model or parses: a tree not already held gets null, so this adds no work and holds no new tree.</summary>
+    public SyntaxTree? TreeFor(string fullPath, string text)
+    {
+        Solution? solution;
+        lock (_gate) solution = _solution;
+        if (solution is null) return null;
+        var id = DocumentIdFor(solution, fullPath);
+        var doc = id is null ? null : solution.GetDocument(id);
+        if (doc is null || !doc.TryGetSyntaxTree(out var tree) || !tree.Options.Equals(CSharpParseOptions.Default)) return null;
+        if (!doc.TryGetText(out var held) || held.Length != text.Length || !held.ContentEquals(SourceText.From(text))) return null;
+        return tree;
+    }
+
     // SemanticCoverage.HasCSharpConditionalCompilation over the model's text a line at a time: ToString() copied each whole
     // candidate file (on the large object heap past ~42k chars) just to look for #if. A directive is one line.
     private static bool HasConditionalCompilation(SourceText text)

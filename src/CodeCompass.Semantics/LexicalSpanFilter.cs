@@ -47,6 +47,13 @@ public sealed class LexicalSpanFilter
     /// <summary>Files read and classified so far (test hook: each one is a whole-file read plus a lex).</summary>
     internal int FilesClassified { get; private set; }
 
+    /// <summary>C# files this filter parsed itself (test hook): one whose tree came from <see cref="CSharpTree"/> isn't one.</summary>
+    internal int FilesParsed { get; private set; }
+
+    /// <summary>The resident C# model's parsed tree for (full path, text), or null when the model doesn't hold exactly that
+    /// text (see RoslynCSharpAnalyzer.TreeFor). Saves re-parsing a file the semantic pass just parsed; null parses as before.</summary>
+    public System.Func<string, string, SyntaxTree?>? CSharpTree { get; init; }
+
     /// <summary>Files whose spans are held right now (test hook).</summary>
     internal int FilesHeld => _currentPath is null ? 0 : 1;
 
@@ -108,7 +115,11 @@ public sealed class LexicalSpanFilter
             string text;
             if (_offered is { } o && string.Equals(o.Path, path, StringComparison.Ordinal)) text = o.Text;
             else { text = File.ReadAllText(path); FilesReadFromDisk++; System.Threading.Interlocked.Increment(ref s_readFromDisk); }
-            if (SemanticCoverage.IsCSharp(path)) cs = CSharpSyntaxTree.ParseText(text);
+            if (SemanticCoverage.IsCSharp(path))
+            {
+                cs = CSharpTree?.Invoke(path, text);
+                if (cs is null) { cs = CSharpSyntaxTree.ParseText(text); FilesParsed++; }
+            }
             else spans = CFamilySpans(text);
             if (_token is not null) occurrences = Occurrences(text, _token);
         }
