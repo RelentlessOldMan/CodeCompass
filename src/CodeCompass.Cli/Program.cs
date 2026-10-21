@@ -14,7 +14,9 @@ using CodeCompass.Core.Text;
 using CodeCompass.Core.Walking;
 using CodeCompass.Semantics;
 
-ProcessPerformance.RequestFullSpeed(); // opt out of EcoQoS so `index`/`update` run at full speed
+// The status line runs on every Claude Code render: no priority raise and no log line for it.
+bool statusline = args.Length > 0 && args[0].Equals("statusline", StringComparison.OrdinalIgnoreCase);
+if (!statusline) ProcessPerformance.RequestFullSpeed(); // opt out of EcoQoS so `index`/`update` run at full speed
 
 // Route otherwise-unhandled exceptions to the log so a crash mid-command isn't silent. No session marker:
 // CLI commands are short-lived and frequent, so an "abnormal exit" (e.g. Ctrl-C) isn't worth flagging.
@@ -22,7 +24,7 @@ CodeCompass.Core.Diagnostics.DiagnosticsSession.Start("cli", trackSession: false
 
 // Record the version + argv on every run so a user's log pins the exact build behind any report.
 // (Hook subcommands stay silent - their stdout is a protocol channel Claude Code parses.)
-if (args.Length > 0 && args[0] is not ("hook-block" or "hook-context"))
+if (args.Length > 0 && args[0] is not ("hook-block" or "hook-context") && !statusline)
     Log.Global.Info($"cli v{BuildInfo.Version}: {string.Join(' ', args)}");
 
 // A write command blocked behind another process's in-flight write (an MCP session applying edits, another

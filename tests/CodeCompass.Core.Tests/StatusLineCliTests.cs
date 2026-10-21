@@ -26,13 +26,37 @@ public class StatusLineCliTests
         Assert.DoesNotContain("â", line);
     }
 
-    private static string Run(string cli, string? stdin, params string[] args)
+    // SEM-C9: Claude Code runs the status line on every render, so it must not append a log line each time (nor raise
+    // the process priority, which the CLI does for real work like index and update).
+    [Fact]
+    public void Statusline_WritesNoLogLine()
+    {
+        var cli = TestCli.Find();
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { }");
+        var logDir = Path.Combine(Path.GetTempPath(), "cc-sl-log-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(logDir);
+        try
+        {
+            Run(cli, null, "index", repo.Root);
+            var stdin = JsonSerializer.Serialize(new { model = new { display_name = "Opus" }, workspace = new { current_dir = repo.Root } });
+            Assert.Contains("CodeCompass", RunLogged(cli, stdin, logDir, "statusline"));
+            var logged = string.Join("\n", Directory.EnumerateFiles(logDir, "*", SearchOption.AllDirectories).Select(File.ReadAllText));
+            Assert.DoesNotContain("statusline", logged);
+        }
+        finally { try { Directory.Delete(logDir, true); } catch (IOException) { } }
+    }
+
+    private static string Run(string cli, string? stdin, params string[] args) => RunLogged(cli, stdin, null, args);
+
+    private static string RunLogged(string cli, string? stdin, string? logDir, params string[] args)
     {
         var psi = new ProcessStartInfo(cli)
         {
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
             UseShellExecute = false, CreateNoWindow = true, StandardOutputEncoding = new UTF8Encoding(false),
         };
+        if (logDir is not null) psi.Environment["CODECOMPASS_LOG_DIR"] = logDir;
         foreach (var a in args) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
         if (stdin is not null) p.StandardInput.Write(stdin);
