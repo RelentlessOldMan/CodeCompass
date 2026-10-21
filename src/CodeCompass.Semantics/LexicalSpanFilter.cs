@@ -28,6 +28,9 @@ public sealed class LexicalSpanFilter
     // spans and token positions for the whole query kept thousands of files' worth on a broad name.
     private string? _currentPath;
     private (int sl, int sc, int el, int ec)[] _currentSpans = System.Array.Empty<(int, int, int, int)>();
+    // A C# file isn't turned into spans: its tree is asked about each hit's position (CSharpCovers). Building every comment
+    // and string span of the file walked all its tokens and trivia - more than the parse itself - for a handful of hits.
+    private SyntaxTree? _currentCs;
 
     // The symbol this query is about, and where it occurs in each file's CURRENT text (0-based line, col). The hits being
     // classified carry the INDEX's coordinates; if the file changed since, those coordinates may now land inside a
@@ -72,11 +75,13 @@ public sealed class LexicalSpanFilter
     {
         if (!SemanticCoverage.IsCommentAware(path)) return false;
         var spans = SpansFor(path);
-        if (spans.Length == 0) return false;
+        var cs = _currentCs;
+        if (cs is null && spans.Length == 0) return false;
 
         int l = line1Based - 1, c = column1Based - 1;
         if (_token is not null && _currentOccurrences?.Contains((l, c)) != true)
             return false; // the index's position no longer holds the token (file changed): don't trust the classification
+        if (cs is not null) return CSharpCovers(cs, l, c);
         // Binary-search the last span whose start <= (l,c); since spans are disjoint and sorted, only it can
         // contain the point.
         int lo = 0, hi = spans.Length - 1, found = -1;
@@ -95,22 +100,25 @@ public sealed class LexicalSpanFilter
     private (int sl, int sc, int el, int ec)[] SpansFor(string path)
     {
         if (string.Equals(_currentPath, path, StringComparison.Ordinal)) return _currentSpans;
-        (int, int, int, int)[] spans;
+        (int, int, int, int)[] spans = System.Array.Empty<(int, int, int, int)>();
+        SyntaxTree? cs = null;
         HashSet<(int, int)>? occurrences = null;
         try
         {
             string text;
             if (_offered is { } o && string.Equals(o.Path, path, StringComparison.Ordinal)) text = o.Text;
             else { text = File.ReadAllText(path); FilesReadFromDisk++; System.Threading.Interlocked.Increment(ref s_readFromDisk); }
-            spans = SemanticCoverage.IsCSharp(path) ? CSharpSpans(text) : CFamilySpans(text);
+            if (SemanticCoverage.IsCSharp(path)) cs = CSharpSyntaxTree.ParseText(text);
+            else spans = CFamilySpans(text);
             if (_token is not null) occurrences = Occurrences(text, _token);
         }
         catch
         {
             spans = System.Array.Empty<(int, int, int, int)>();   // unreadable/unparsable -> suppress nothing
+            cs = null;
         }
         if (_offered is { } done && string.Equals(done.Path, path, StringComparison.Ordinal)) _offered = null; // classified: drop it
-        (_currentPath, _currentSpans, _currentOccurrences) = (path, spans, occurrences);
+        (_currentPath, _currentSpans, _currentCs, _currentOccurrences) = (path, spans, cs, occurrences);
         FilesClassified++;
         System.Threading.Interlocked.Increment(ref s_classified);
         return spans;
@@ -133,26 +141,20 @@ public sealed class LexicalSpanFilter
 
     // --- C#: exact, via Roslyn's lexer -------------------------------------------------------------------------
 
-    private static (int, int, int, int)[] CSharpSpans(string text)
+    // Whether (0-based line, col) is inside a comment (incl. /// and /** */ doc comments) or a string/char literal. Only the
+    // token at the point and its own trivia are looked at. Interpolation holes {expr} hold ordinary tokens, so a reference
+    // there stays code; #if-disabled text, directives and their trailing comments aren't comments here (as before: they are
+    // structured or disabled trivia, not comment trivia). A point Roslyn's lines can't place is left alone.
+    private static bool CSharpCovers(SyntaxTree tree, int line, int col)
     {
-        var tree = CSharpSyntaxTree.ParseText(text);
-        var src = tree.GetText();
+        var lines = tree.GetText().Lines;
+        if (line < 0 || line >= lines.Count || col < 0) return false;
+        var l = lines[line];
+        if (col >= l.EndIncludingLineBreak - l.Start) return false;
+        int pos = l.Start + col;
         var root = tree.GetRoot();
-        var list = new List<(int, int, int, int)>();
-
-        foreach (var tr in root.DescendantTrivia())
-        {
-            switch (tr.Kind())
-            {
-                case SyntaxKind.SingleLineCommentTrivia:
-                case SyntaxKind.MultiLineCommentTrivia:
-                case SyntaxKind.SingleLineDocumentationCommentTrivia:   // /// ... (covers <see cref="X"/>)
-                case SyntaxKind.MultiLineDocumentationCommentTrivia:    // /** ... */
-                    Add(list, src, tr.Span);
-                    break;
-            }
-        }
-        foreach (var tok in root.DescendantTokens())
+        var tok = root.FindToken(pos);
+        if (tok.Span.Contains(pos))
         {
             switch (tok.Kind())
             {
@@ -164,20 +166,21 @@ public sealed class LexicalSpanFilter
                 case SyntaxKind.MultiLineRawStringLiteralToken:
                 case SyntaxKind.Utf8SingleLineRawStringLiteralToken:
                 case SyntaxKind.Utf8MultiLineRawStringLiteralToken:
-                    Add(list, src, tok.Span);
-                    break;
+                    return true;
             }
+            return false;
         }
-
-        list.Sort(static (a, b) => a.Item1 != b.Item1 ? a.Item1.CompareTo(b.Item1) : a.Item2.CompareTo(b.Item2));
-        return list.ToArray();
-    }
-
-    private static void Add(List<(int, int, int, int)> list, SourceText src, TextSpan span)
-    {
-        if (span.IsEmpty) return;
-        var ls = src.Lines.GetLinePositionSpan(span);
-        list.Add((ls.Start.Line, ls.Start.Character, ls.End.Line, ls.End.Character));
+        var tr = root.FindTrivia(pos);
+        if (!tr.Span.Contains(pos)) return false;
+        switch (tr.Kind())
+        {
+            case SyntaxKind.SingleLineCommentTrivia:
+            case SyntaxKind.MultiLineCommentTrivia:
+            case SyntaxKind.SingleLineDocumentationCommentTrivia:   // /// ... (covers <see cref="X"/>)
+            case SyntaxKind.MultiLineDocumentationCommentTrivia:    // /** ... */
+                return true;
+        }
+        return false;
     }
 
     // --- C/C++: conservative single-pass scanner ---------------------------------------------------------------

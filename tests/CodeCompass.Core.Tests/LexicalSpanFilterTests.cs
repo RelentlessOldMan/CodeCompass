@@ -1,4 +1,7 @@
+using System.Collections.Generic;
+using System.Linq;
 using CodeCompass.Semantics;
+using Microsoft.CodeAnalysis.CSharp;
 using Xunit;
 
 namespace CodeCompass.Core.Tests;
@@ -277,5 +280,105 @@ public class LexicalSpanFilterTests
         Assert.Equal(20, filter.FilesClassified);
         Assert.Equal(1, filter.FilesHeld);
         Assert.True(filter.IsInCommentOrString(System.IO.Path.Combine(repo.Root, "f0.c"), 1, 4)); // revisited: re-read, same answer
+    }
+
+    // SEM-C8: C# hits are classified by asking the tree about each point, not by building all the file's comment/string
+    // spans. The answer must match the span builder it replaced (frozen below) at EVERY position of the text.
+    private static readonly string[] CsPieces =
+    {
+        "a", "hot", " ", "\t", "\n", "\r\n", "\r", "//", "/*", "*/", "///", "/**", "\"", "'", "\\", "@\"", "$\"", "$@\"", "{", "}",
+        "\"\"\"", "$$\"\"\"", "u8", "'x'", "#if X\n", "#else\n", "#endif\n", "#region r // c\n", "<see cref=\"hot\"/>", ";",
+        "class C { void M() { var s = $\"a {hot} b\"; } }\n", "é", "\U0001F600", "(", ")",
+    };
+
+    [Fact]
+    public void CSharp_PointLookup_MatchesTheSpanBuilder_AtEveryPosition()
+    {
+        var rng = new System.Random(20261020);
+        for (int i = 0; i < 1500; i++)
+        {
+            var sb = new System.Text.StringBuilder();
+            int n = rng.Next(0, 60);
+            for (int k = 0; k < n; k++) sb.Append(CsPieces[rng.Next(CsPieces.Length)]);
+            AssertSameAtEveryPosition(sb.ToString(), $"case {i}");
+        }
+        AssertSameAtEveryPosition(string.Join("\n", new[]
+        {
+            "namespace N {",
+            "  /// Sends to <see cref=\"hot\"/>.",
+            "  /** block hot */ class C {",
+            "    void M() { hot(); /* hot */ var s = \"hot\"; var v = @\"x \"\" hot\"; char c = 'h';",
+            "      var i = $\"a {hot(1)} hot {(\"hot\")}\"; var r = \"\"\"",
+            "        raw hot",
+            "        \"\"\"; var u = \"hot\"u8; var ir = $$\"\"\"{{hot}} {hot}\"\"\";",
+            "#if NEVER",
+            "      hot(); // disabled",
+            "#endif",
+            "    } // tail hot",
+            "  }",
+            "}",
+        }), "realistic");
+    }
+
+    private static void AssertSameAtEveryPosition(string text, string label)
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "semc8-never-read.cs");
+        var spans = CSharpSpanBuilder.Spans(text);
+        var lines = Microsoft.CodeAnalysis.Text.SourceText.From(text).Lines;
+        var f = new LexicalSpanFilter();
+        f.Offer(path, text);
+        for (int l = 0; l < lines.Count; l++)
+            for (int c = 0; c < lines[l].EndIncludingLineBreak - lines[l].Start; c++) // every char of the line, its break included
+            {
+                bool expected = spans.Any(s => (s.Item1 < l || (s.Item1 == l && s.Item2 <= c)) && (l < s.Item3 || (l == s.Item3 && c < s.Item4)));
+                bool got = f.IsInCommentOrString(path, l + 1, c + 1);
+                if (expected != got)
+                    Assert.Fail($"{label} at {l}:{c}: expected {expected}, got {got}\n{System.Text.Json.JsonSerializer.Serialize(text)}");
+            }
+        Assert.Equal(0, f.FilesReadFromDisk);
+    }
+
+    // The span builder exactly as it was before SEM-C8 (frozen copy): the oracle for the point lookup.
+    private static class CSharpSpanBuilder
+    {
+        public static (int, int, int, int)[] Spans(string text)
+        {
+            var tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(text);
+            var src = tree.GetText();
+            var root = tree.GetRoot();
+            var list = new List<(int, int, int, int)>();
+            foreach (var tr in root.DescendantTrivia())
+                switch (Microsoft.CodeAnalysis.CSharp.CSharpExtensions.Kind(tr))
+                {
+                    case SyntaxKind.SingleLineCommentTrivia:
+                    case SyntaxKind.MultiLineCommentTrivia:
+                    case SyntaxKind.SingleLineDocumentationCommentTrivia:
+                    case SyntaxKind.MultiLineDocumentationCommentTrivia:
+                        Add(list, src, tr.Span);
+                        break;
+                }
+            foreach (var tok in root.DescendantTokens())
+                switch (Microsoft.CodeAnalysis.CSharp.CSharpExtensions.Kind(tok))
+                {
+                    case SyntaxKind.StringLiteralToken:
+                    case SyntaxKind.CharacterLiteralToken:
+                    case SyntaxKind.InterpolatedStringTextToken:
+                    case SyntaxKind.Utf8StringLiteralToken:
+                    case SyntaxKind.SingleLineRawStringLiteralToken:
+                    case SyntaxKind.MultiLineRawStringLiteralToken:
+                    case SyntaxKind.Utf8SingleLineRawStringLiteralToken:
+                    case SyntaxKind.Utf8MultiLineRawStringLiteralToken:
+                        Add(list, src, tok.Span);
+                        break;
+                }
+            return list.ToArray();
+        }
+
+        private static void Add(List<(int, int, int, int)> list, Microsoft.CodeAnalysis.Text.SourceText src, Microsoft.CodeAnalysis.Text.TextSpan span)
+        {
+            if (span.IsEmpty) return;
+            var ls = src.Lines.GetLinePositionSpan(span);
+            list.Add((ls.Start.Line, ls.Start.Character, ls.End.Line, ls.End.Character));
+        }
     }
 }
