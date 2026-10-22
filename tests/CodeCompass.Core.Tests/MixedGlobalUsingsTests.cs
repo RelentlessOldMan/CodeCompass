@@ -119,6 +119,77 @@ public class MixedGlobalUsingsTests
         Assert.Equal(2, analyzer.ClashBinds);
     }
 
+    // Asking for a file's diagnostics binds all of it (~30 ms a file; on a Roslyn-size repo 700 files pass the name filter:
+    // 18 s on every cold query). A CS0104 sits on a name that binds ambiguously, so a file is asked only when one does -
+    // and for its declarations, only when one does outside a body, where the declaration pass never looks.
+    [Fact]
+    public void DeclarationPass_DoesNotAskForTheDiagnostics_OfAFileWhoseClashIsOnlyInABody()
+    {
+        using var repo = MixedRepo(clash: true);
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var (declarations, files) = analyzer.UsingsClash(System.Array.Empty<string>());
+        Assert.Empty(declarations);
+        Assert.Empty(files);
+        Assert.Equal(1, analyzer.ClashBinds);        // Use.cs names Task, so its names are bound...
+        Assert.Equal(0, analyzer.ClashDiagnostics);  // ...but only inside Go()'s body: no diagnostics needed
+    }
+
+    [Fact]
+    public void CandidatePass_AsksForTheDiagnostics_OnlyOfAFileWithAnAmbiguousName()
+    {
+        using var repo = MixedRepo(clash: true);
+        // Names Task (so it passes the name filter) but binds it unambiguously, through a qualified name.
+        repo.Write("Legacy/Plain.cs",
+            "using Legacy.Jobs;\nnamespace Legacy\n{\n    public static class Plain { public static object Go() => new Legacy.Jobs.Task(); }\n}\n");
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var (_, files) = analyzer.UsingsClash(new[] { "Legacy/Use.cs", "Legacy/Plain.cs" }.Select(repo.FullPath).ToList());
+        Assert.Equal(new[] { repo.FullPath("Legacy/Use.cs") }, files);
+        Assert.Equal(1, analyzer.ClashDiagnostics);  // Use.cs only
+    }
+
+    // The declaration pass skips bodies (blocks and =>) only: every other place the declaration pass binds a name - a constant's
+    // value, a parameter default, an enum member, an attribute argument, a constraint - is still looked at.
+    [Theory]
+    [InlineData("field", "public class D { public Task F; }")]
+    [InlineData("return type", "public abstract class D { public abstract Task M(); }")]
+    [InlineData("parameter", "public abstract class D { public abstract void M(Task t); }")]
+    [InlineData("base type", "public class D : Task { }")]
+    [InlineData("constraint", "public class D<T> where T : Task { }")]
+    [InlineData("generic argument", "public class D { public System.Collections.Generic.List<Task> F; }")]
+    [InlineData("constant", "public class D { public const int C = Task.Max; }")]
+    [InlineData("parameter default", "public abstract class D { public abstract void M(int x = Task.Max); }")]
+    [InlineData("enum member", "public enum D { A = Task.Max }")]
+    [InlineData("attribute argument", "[System.Obsolete(Task.Text)] public class D { }")]
+    [InlineData("expression-bodied type", "public abstract class D { public abstract Task P { get; } public int Q => 1; }")]
+    [InlineData("array", "public class D { public Task[] F; }")]
+    [InlineData("nullable", "#nullable enable\npublic class D { public Task? F; }")]
+    [InlineData("tuple element", "public class D { public (Task a, int b) F; }")]
+    [InlineData("nameof", "[System.Obsolete(nameof(Task))] public class D { }")]
+    [InlineData("using alias", "using T = Task;\npublic class D { public T F; }")]
+    public void DeclarationPass_FindsAClash_WhereverADeclarationNamesIt(string shape, string declaration)
+    {
+        using var repo = MixedRepo(clash: true);
+        repo.Write("Legacy/Jobs.cs", "namespace Legacy.Jobs\n{\n    public class Task { public const int Max = 1; public const string Text = \"t\"; public void RunJob() { } }\n}\n");
+        repo.Write("Legacy/Decl.cs", "using Legacy.Jobs;\nnamespace Legacy\n{\n    " + declaration + "\n}\n");
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var (declarations, _) = analyzer.UsingsClash(System.Array.Empty<string>());
+        Assert.True(declarations.Contains(repo.FullPath("Legacy/Decl.cs")), $"{shape}: the declaration clash was missed");
+    }
+
+    // An attribute is named without its suffix: a [Mark] two imports both declare is a declaration clash too.
+    [Fact]
+    public void DeclarationPass_FindsAClash_InAnAttributeName()
+    {
+        using var repo = MixedRepo(clash: false);
+        repo.Write("Legacy/Marks.cs",
+            "namespace Legacy.A\n{\n    public class MarkAttribute : System.Attribute { }\n}\n" +
+            "namespace Legacy.B\n{\n    public class MarkAttribute : System.Attribute { }\n}\n");
+        repo.Write("Legacy/Marked.cs", "using Legacy.A;\nusing Legacy.B;\nnamespace Legacy\n{\n    [Mark] public class Marked { }\n}\n");
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var (declarations, _) = analyzer.UsingsClash(System.Array.Empty<string>());
+        Assert.Equal(new[] { repo.FullPath("Legacy/Marked.cs") }, declarations);
+    }
+
     // The name set isn't only the injected namespaces' types: the one compilation lets two of a legacy file's own usings
     // clash too (here an attribute, used without its suffix), and that hides references just the same.
     [Fact]

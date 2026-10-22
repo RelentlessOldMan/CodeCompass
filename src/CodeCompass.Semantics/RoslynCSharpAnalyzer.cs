@@ -139,10 +139,14 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             var id = DocumentIdFor(solution, path);
             var doc = id is null ? null : solution.GetDocument(id);
             if (doc is null) return false;
-            if (!filter.MayClash(doc, ct)) return false;
+            if (!filter.MayClash(doc, ct, out var names)) return false;
             Interlocked.Increment(ref _clashBinds);
             var model = doc.GetSemanticModelAsync(ct).GetAwaiter().GetResult();
             if (model is null) return false;
+            // Diagnostics bind the whole file. A CS0104 is reported at a name that binds ambiguously, so when none of the
+            // file's suspect names does, it has none - found by binding those names alone.
+            if (names is not null && !AnyAmbiguousName(model, names, declarationsOnly, ct)) return false;
+            Interlocked.Increment(ref _clashDiagnostics);
             var diags = declarationsOnly ? model.GetDeclarationDiagnostics(cancellationToken: ct) : model.GetDiagnostics(cancellationToken: ct);
             return diags.Any(d => d.Id == "CS0104");
         }
@@ -168,13 +172,33 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         return (declarations, files);
     }
 
-    /// <summary>Per-file clash checks (a bind + GetDiagnostics each) run so far (test hook).</summary>
+    // Does one of these names bind ambiguously in the file? For its declarations, names inside a body (a block or =>) are
+    // skipped: the declaration pass never binds a body - a method's, an accessor's, a lambda's, a local function's - and
+    // C# has no type declared inside one. Everywhere else is looked at: a constant's value, a parameter default, an enum
+    // member, an attribute argument, a doc comment's cref.
+    private static bool AnyAmbiguousName(SemanticModel model, HashSet<string> names, bool declarationsOnly,
+        System.Threading.CancellationToken ct)
+    {
+        var nodes = model.SyntaxTree.GetRoot(ct).DescendantNodes(
+            n => !declarationsOnly || n is not (BlockSyntax or ArrowExpressionClauseSyntax), descendIntoTrivia: true);
+        foreach (var n in nodes.OfType<SimpleNameSyntax>())
+            if (names.Contains(n.Identifier.ValueText) && model.GetSymbolInfo(n, ct).CandidateReason == CandidateReason.Ambiguous)
+                return true;
+        return false;
+    }
+
+    /// <summary>Per-file clash checks (each binds the file's suspect names, and asks its diagnostics only if one is ambiguous)
+    /// run so far (test hook).</summary>
     internal int ClashFileChecks => Volatile.Read(ref _clashFileChecks);
     private int _clashFileChecks;
 
     /// <summary>Files actually bound by the clash check, for declarations or in full (test hook).</summary>
     internal int ClashBinds => Volatile.Read(ref _clashBinds);
     private int _clashBinds;
+
+    /// <summary>Files whose diagnostics the clash check asked for, for declarations or in full (test hook).</summary>
+    internal int ClashDiagnostics => Volatile.Read(ref _clashDiagnostics);
+    private int _clashDiagnostics;
 
     // Built from the project this query holds, and kept only while that's still the model: a rebuild in between (new global
     // usings) must not inherit a filter built from the old one.
@@ -219,8 +243,12 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         /// <summary>Distinct import sets seen so far (diagnostics).</summary>
         public int Sets { get { lock (_lock) return _namesBySet.Count; } }
 
-        public bool MayClash(Document doc, System.Threading.CancellationToken ct)
+        /// <summary>False when the file can't hold a CS0104. When it may, <paramref name="names"/> are the names that could be
+        /// ambiguous in it - or null when that isn't known (an import that doesn't resolve to one target), and only its
+        /// diagnostics can tell.</summary>
+        public bool MayClash(Document doc, System.Threading.CancellationToken ct, out HashSet<string>? names)
         {
+            names = null;
             if (_globalUnresolvable) return true;
             var tree = doc.GetSyntaxTreeAsync(ct).GetAwaiter().GetResult();
             if (tree is null || !_compilation.ContainsSyntaxTree(tree)) return true;
@@ -233,8 +261,10 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
                 foreach (var u in usings)
                     if (!Add(model, u, imports, ct)) return true;
             }
-            var names = NamesFor(imports, ct);
-            return MayNameAny(doc.GetTextAsync(ct).GetAwaiter().GetResult(), names);
+            var ambiguous = NamesFor(imports, ct);
+            if (!MayNameAny(doc.GetTextAsync(ct).GetAwaiter().GetResult(), ambiguous)) return false;
+            names = ambiguous;
+            return true;
         }
 
         // A using's target, keyed by what it is (a namespace, or a `using static` type). An alias (using X = ...) is looked up
