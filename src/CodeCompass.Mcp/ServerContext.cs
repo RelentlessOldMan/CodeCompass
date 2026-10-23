@@ -693,17 +693,26 @@ public static class ServerContext
             _holdWantsRebuild = true; // ...unless a reload succeeds first (see ClearHoldLocked)
         }
         _heldBack = true;
-        // A long unreadable spell can pile up a whole tree of edits: past the cap, rebuild instead (see CaptureIfBusy). Which
-        // ones are held is no longer known, so the model goes too.
+        // A long unreadable spell can pile up a whole tree of edits: past the cap, rebuild instead (see CaptureIfBusy).
         if (_heldPaths.Count > MaxPendingPaths || _pendingPaths.Count > MaxPendingPaths)
         {
             _heldPaths.Clear(); _heldPaths.TrimExcess();
-            _pendingPaths.Clear(); _pendingPaths.TrimExcess();
-            _pendingReconcile = true;
-            _holdWantsRebuild = false; // wanted for its own sake now: a reload mustn't cancel it
-            fresh = paths.ToList();
+            ForgetPendingForReconcileLocked();
+            return;
         }
         if (MayAffectUnindexed(fresh)) { _csharp?.Dispose(); _csharp = null; }
+    }
+
+    // Too many edits are pending to keep a list: drop it and rebuild instead. Which files changed is no longer known - edits
+    // captured during a rebuild among them, which never dropped the C# model (they were to be applied in place) - so the model
+    // goes too: a root that leaves the rebuild to a terminal update must not keep answering C# from pre-edit text meanwhile.
+    // Caller holds the Rw write lock.
+    private static void ForgetPendingForReconcileLocked()
+    {
+        _pendingPaths.Clear(); _pendingPaths.TrimExcess();
+        _pendingReconcile = true;
+        _holdWantsRebuild = false; // wanted for its own sake now: a reload mustn't cancel it
+        _csharp?.Dispose(); _csharp = null;
     }
 
     // A rebuild covered the held-back edits, or the lost-events note speaks for them from here: forget them as held, so a
@@ -1904,7 +1913,7 @@ public static class ServerContext
             {
                 if (batch.FullReconcile) _pendingReconcile = true;
                 else _pendingPaths.UnionWith(batch.ChangedFullPaths);
-                if (_pendingPaths.Count > MaxPendingPaths) { _pendingPaths.Clear(); _pendingReconcile = true; }
+                if (_pendingPaths.Count > MaxPendingPaths) ForgetPendingForReconcileLocked();
                 if (_pendingReconcile) _holdWantsRebuild = false; // wanted for its own sake now: a reload mustn't cancel it
             }
             finally { Rw.ExitWriteLock(); }

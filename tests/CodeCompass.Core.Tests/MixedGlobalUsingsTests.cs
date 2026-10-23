@@ -176,6 +176,37 @@ public class MixedGlobalUsingsTests
         Assert.True(declarations.Contains(repo.FullPath("Legacy/Decl.cs")), $"{shape}: the declaration clash was missed");
     }
 
+    // The candidate pass asks for a file's diagnostics only when a suspect name binds ambiguously: every way a body can name
+    // the clashing type must bind it so, or the file's hidden references go unsaid.
+    [Theory]
+    [InlineData("new", "var t = new Task();")]
+    [InlineData("typeof", "var t = typeof(Task);")]
+    [InlineData("nameof", "var n = nameof(Task);")]
+    [InlineData("static member", "var m = Task.Max;")]
+    [InlineData("cast", "object o = null; var t = (Task)o;")]
+    [InlineData("is pattern", "object o = null; var b = o is Task;")]
+    [InlineData("declaration pattern", "object o = null; if (o is Task t) { }")]
+    [InlineData("as", "object o = null; var t = o as Task;")]
+    [InlineData("default", "var t = default(Task);")]
+    [InlineData("local type", "Task t = null;")]
+    [InlineData("generic method argument", "var l = System.Linq.Enumerable.Empty<Task>();")]
+    [InlineData("array creation", "var a = new Task[1];")]
+    [InlineData("catch", "try { } catch (Task) { }")]
+    [InlineData("lambda parameter", "System.Action<Task> f = (Task t) => { };")]
+    [InlineData("local function", "Task L() => null;")]
+    [InlineData("lambda attribute", "var f = [Mark] () => 1;")]
+    public void CandidatePass_FindsAClash_WhereverABodyNamesIt(string shape, string statement)
+    {
+        using var repo = MixedRepo(clash: true);
+        repo.Write("Legacy/Jobs.cs", "namespace Legacy.Jobs\n{\n    public class Task : System.Exception { public const int Max = 1; public void RunJob() { } }\n" +
+                                     "    public class MarkAttribute : System.Attribute { }\n}\n");
+        repo.Write("Legacy/Marks.cs", "namespace System.Threading.Tasks\n{\n    public class MarkAttribute : System.Attribute { }\n}\n");
+        repo.Write("Legacy/Body.cs", "using Legacy.Jobs;\nnamespace Legacy\n{\n    public static class B { public static void Go() { " + statement + " } }\n}\n");
+        using var analyzer = new RoslynCSharpAnalyzer(repo.Root);
+        var (_, files) = analyzer.UsingsClash(new[] { repo.FullPath("Legacy/Body.cs") });
+        Assert.True(files.Contains(repo.FullPath("Legacy/Body.cs")), $"{shape}: the body clash was missed");
+    }
+
     // An attribute is named without its suffix: a [Mark] two imports both declare is a declaration clash too.
     [Fact]
     public void DeclarationPass_FindsAClash_InAnAttributeName()

@@ -241,6 +241,52 @@ public class WriteLockTests
         }
     }
 
+    // Past the cap, which edits are pending is no longer known - edits captured during a rebuild among them, which never dropped
+    // the C# model (they were to be applied in place). So the model goes too, whatever the batch that tipped it over: else on a
+    // root that defers the reconcile to a terminal update, C# answers kept reading the pre-edit text.
+    [Fact]
+    public void Server_HeldBackEdits_PastTheCap_DropTheCSharpModel_EvenForANonCSharpBatch()
+    {
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "class A { void M() { } void N() { M(); } }\n");
+        foreach (var n in new[] { "n1.md", "n2.md", "n3.md", "n4.md" }) repo.Write(n, "# " + n + "\n");
+        var oldAuto = Environment.GetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE");
+        int oldCap = ServerContext.MaxPendingPathsForTest;
+        ServerContext.Init(repo.Root);
+        try
+        {
+            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", "false");
+            CodeCompassTools.Reindex();
+            Assert.Contains("a.cs", CodeCompassTools.FindReferences("M"));
+            // Another writer commits, changing no C# source (a C# edit would drop the model by itself).
+            var other = new Thread(() =>
+            {
+                using var wl = IndexWriteLock.Acquire(IndexStore.CacheDirPath(repo.Root));
+                wl.SourcesUnchanged();
+                wl.Commit();
+            });
+            other.Start();
+            other.Join();
+            ServerContext.MaxPendingPathsForTest = 3;
+
+            var symbolsManifest = Path.Combine(IndexStore.CacheDirPath(repo.Root), "symbols.manifest");
+            using (new FileStream(symbolsManifest, FileMode.Open, FileAccess.Read, FileShare.None)) // this session can't reload now
+            {
+                ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("n1.md"), repo.FullPath("n2.md") }, FullReconcile: false));
+                Assert.NotNull(ServerContext.ResidentCSharpForTest); // a README edit leaves the model alone...
+                ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("n3.md"), repo.FullPath("n4.md") }, FullReconcile: false));
+                Assert.Equal(0, ServerContext.HeldPathCountForTest);
+                Assert.Null(ServerContext.ResidentCSharpForTest);    // ...but past the cap, what's pending is unknown
+            }
+        }
+        finally
+        {
+            ServerContext.MaxPendingPathsForTest = oldCap;
+            Environment.SetEnvironmentVariable("CODECOMPASS_AUTO_RECONCILE", oldAuto);
+            ServerContext.Init(repo.Root);
+        }
+    }
+
     // A newer CodeCompass rewrote the index mid-session (another install updated first): this session can neither read nor
     // write it. It held edits back forever, kept answering from its old copy as if current, and kept the live-watch role, so
     // the newer session couldn't take over. It must say why, let Grep run, never write over it, and hand the role back.
