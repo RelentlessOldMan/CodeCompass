@@ -36,6 +36,19 @@ public class ReferenceMergeNoteTests
         Assert.DoesNotContain("f6.cs", note);
     }
 
+    // The files arrive in the index's candidate order, which differs between two builds of the same tree: the same set
+    // must read the same, and the five named must be the same five.
+    [Fact]
+    public void FileList_IsTheSame_WhateverOrderTheFilesArriveIn()
+    {
+        var files = new[] { "src/b/Gamma.cs", "src/a/Alpha.cs", "Src/A/beta.cs", "src/c/Delta.cs", "src/a/alpha2.cs", "src/z/Zeta.cs", "src/e/Eta.cs" };
+        var reversed = files.Reverse().ToArray();
+        Assert.Equal(ReferenceMerge.CSharpConditionalNote(files), ReferenceMerge.CSharpConditionalNote(reversed));
+        Assert.Equal(ReferenceMerge.CSharpUnreadableNote(files), ReferenceMerge.CSharpUnreadableNote(reversed));
+        Assert.Equal(ReferenceMerge.CSharpUsingsClashNote(files[..3], files[3..]), ReferenceMerge.CSharpUsingsClashNote(reversed[..3], reversed[3..]));
+        Assert.DoesNotContain("Zeta.cs", ReferenceMerge.CSharpConditionalNote(files)); // sorted: the last one is past the five
+    }
+
     [Fact]
     public void CSharpConditionalCalleesNote_EmptyWhenNoConditionalFiles()
         => Assert.Equal("", ReferenceMerge.CSharpConditionalCalleesNote(System.Array.Empty<string>(), recoveredCount: 0));

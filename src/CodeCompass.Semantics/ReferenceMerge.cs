@@ -220,9 +220,11 @@ public static class ReferenceMerge
                (declarationClash.Count > 0 ? "shown by name across the C# files" : "shown by name in " + (files.Count == 1 ? "that file" : "those files")) + ".";
     }
 
+    // Sorted: the files come in the index's candidate order, which two builds of the same tree don't share - so the same
+    // set reads the same, five named files included.
     private static string FileList(IReadOnlyList<string> files)
     {
-        var shown = string.Join(", ", files.Take(5));
+        var shown = string.Join(", ", files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ThenBy(f => f, StringComparer.Ordinal).Take(5));
         if (files.Count > 5) shown += $", +{files.Count - 5} more";
         return shown;
     }
