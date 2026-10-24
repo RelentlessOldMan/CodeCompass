@@ -2028,6 +2028,7 @@ public static class ServerContext
     private static int MaxPendingPaths = 50_000; // not const: a test lowers it
     internal static int MaxPendingPathsForTest { get => MaxPendingPaths; set => MaxPendingPaths = value; }
     internal static int HeldPathCountForTest { get { Rw.EnterReadLock(); try { return _heldPaths.Count; } finally { Rw.ExitReadLock(); } } }
+    internal static Task? LinkedLoadReconcileForTest(string root) => FindLinked(PathSafety.NormalizeDir(root))?.LoadReconcile;
     internal static int LinkedHeldCountForTest(string root) => FindLinked(PathSafety.NormalizeDir(root))?.HeldBack.Count ?? -1;
 
     private static void OnChanges(ChangeBatch batch)

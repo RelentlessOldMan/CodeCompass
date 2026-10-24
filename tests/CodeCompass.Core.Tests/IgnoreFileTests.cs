@@ -576,7 +576,8 @@ public class IgnoreFileTests
         bool sawCancel = false;
         ServerContext.LinkedReconcileHoldForTest = (root, ct) =>
         {
-            if (!PathSafety.SameDir(root, lib.Root) || Interlocked.Increment(ref reconciles) == 1) return; // the startup one runs
+            if (!PathSafety.SameDir(root, lib.Root)) return;
+            if (Interlocked.Increment(ref reconciles) == 1) { Thread.Sleep(1000); return; } // the startup one runs - slowly, as on CI
             parked.Set();
             try { release.Wait(TimeSpan.FromSeconds(30), ct); }
             catch (OperationCanceledException) { sawCancel = true; throw; }
@@ -586,6 +587,8 @@ public class IgnoreFileTests
         {
             CodeCompassTools.Reindex();
             Assert.Contains("lib.cs", CodeCompassTools.SearchCode("LibRace")); // loaded + owned
+            // Its startup reconcile done first: one still to walk would take the edit in, leaving the update nothing to do.
+            Assert.True(ServerContext.LinkedLoadReconcileForTest(lib.Root)?.Wait(TimeSpan.FromSeconds(30)), "the startup reconcile never finished");
             lib.Write(".gitignore", "*.tmp\n");
             ServerContext.OnLinkedChangesForTest(lib.Root, new ChangeBatch(new[] { lib.FullPath(".gitignore") }, FullReconcile: false));
             Assert.True(parked.Wait(TimeSpan.FromSeconds(30)), "no reconcile ran after the ignore file changed");
