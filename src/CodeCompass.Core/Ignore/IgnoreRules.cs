@@ -45,6 +45,11 @@ public sealed class IgnoreRules
 
     public long MaxFileSizeBytes { get; }
 
+    /// <summary>Does the walk honour the repo's own .gitignore / .ignore files (see <see cref="IgnoreFile"/>)?</summary>
+    public bool UseIgnoreFiles { get; }
+
+    private readonly HashSet<string> _keptDirs;
+
     /// <summary>
     /// Build ignore rules. When <paramref name="maxFileSizeBytes"/> is null the cap comes from
     /// CODECOMPASS_MAX_FILE_MB (default 5 MB); CODECOMPASS_IGNORE (comma/semicolon-separated
@@ -65,7 +70,9 @@ public sealed class IgnoreRules
             foreach (var d in extraIgnoredDirs)
                 _ignoredDirs.Add(d);
         // keepDirs wins: a monorepo with real sources under packages/ (or a repo with build/ scripts) opts back in.
-        foreach (var d in CodeCompassConfig.KeptDirs(cfg)) _ignoredDirs.Remove(d);
+        _keptDirs = new HashSet<string>(CodeCompassConfig.KeptDirs(cfg), StringComparer.OrdinalIgnoreCase);
+        foreach (var d in _keptDirs) _ignoredDirs.Remove(d);
+        UseIgnoreFiles = CodeCompassConfig.UseIgnoreFiles(cfg);
         _ignoredExtensions = DefaultIgnoredExtensions;
         _ignoredDirSpans = new SpanNameSet(_ignoredDirs);
         MaxFileSizeBytes = maxFileSizeBytes ?? CodeCompassConfig.MaxFileBytes(cfg);
@@ -81,6 +88,9 @@ public sealed class IgnoreRules
     }
 
     public bool IsIgnoredDirectory(string directoryName) => _ignoredDirs.Contains(directoryName);
+
+    /// <summary>Is this a keepDirs name? Those are indexed whatever a default rule or an ignore file says.</summary>
+    public bool IsKeptDirectory(string directoryName) => _keptDirs.Contains(directoryName);
 
     // Default-skipped names that are usually build output but can hold real SOURCE (a pnpm/yarn monorepo's packages/,
     // checked-in build/ scripts, a Go/Rust out/ or target/). A walk counts how many it skipped so a zero result can say

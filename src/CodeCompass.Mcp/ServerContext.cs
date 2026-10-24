@@ -91,6 +91,9 @@ public static class ServerContext
         public volatile bool HasUnsure;
         public volatile bool NewerFormat; // its index is a newer CodeCompass's: given up (see GiveUpLinkedRoot)
         public volatile string? FailedGen; // a generation that wouldn't load: not retried on every query until it moves
+        // When an ignore file changed here and no walk may pick up what it no longer ignores (see AfterIgnoreFilesChanged):
+        // every answer says so until an index built after it loads. 0 = not.
+        public long IgnoreFilesStaleSinceTicks;
         // Its startup reconcile (see StartLinkedWatch), cancelled and waited for when the root is torn down: left running, it
         // held the index's write lock against a purge and could write a purged index back.
         public CancellationTokenSource? LoadCts;
@@ -493,6 +496,10 @@ public static class ServerContext
         if (held.Count > 0)
             sb.Append($"\n(Note: recent edits in linked root(s) {RootNames(held)} aren't in their index yet - it couldn't be " +
                       "updated just now; retrying. Results from them may be STALE until then.)");
+        var ignoreStale = _linked.Where(IgnoreFilesStillStale).Select(l => l.Root).ToList();
+        if (ignoreStale.Count > 0)
+            sb.Append($"\n(Note: an ignore file (.gitignore/.ignore) changed in linked root(s) {RootNames(ignoreStale)} and files it " +
+                      "no longer ignores aren't indexed there; results may be STALE until: codecompass update <root>.)");
         var newer = _linked.Where(l => l.NewerFormat).Select(l => l.Root).ToList();
         if (newer.Count > 0)
             sb.Append($"\n(Note: linked root(s) {RootNames(newer)} were re-indexed by a NEWER CodeCompass, which this one can't " +
@@ -614,6 +621,28 @@ public static class ServerContext
             catch (Exception ex) { Log.For(lr.Root).Warn($"linked root reload skipped: {ex.Message}"); }
             finally { BuildGate.Release(); }
         }
+    }
+
+    // A linked root's ignore-file note holds until its index is rebuilt or updated after the change (a terminal update).
+    private static bool IgnoreFilesStillStale(LinkedRoot lr)
+    {
+        long since = Interlocked.Read(ref lr.IgnoreFilesStaleSinceTicks);
+        if (since == 0) return false;
+        if (!BuiltSince(lr.Root, since)) return true;
+        Interlocked.CompareExchange(ref lr.IgnoreFilesStaleSinceTicks, 0, since);
+        return false;
+    }
+
+    private static bool BuiltSince(string root, long utcTicks)
+    {
+        try
+        {
+            var m = IndexMetaFile.Read(root);
+            return m is not null && DateTime.TryParse(m.BuiltUtc, System.Globalization.CultureInfo.InvariantCulture,
+                                                      System.Globalization.DateTimeStyles.RoundtripKind, out var built)
+                   && built.ToUniversalTime().Ticks > utcTicks;
+        }
+        catch { return false; }
     }
 
     private static void ClearEventsLostIfRefreshed()
@@ -918,6 +947,7 @@ public static class ServerContext
                 // editor's vanished temp file or a folder whose timestamp moved (see ApplyIncremental).
                 affects = RoslynCSharpAnalyzer.MayAffect(retried is null ? paths : paths.Where(p => !retried.Contains(p)).ToList())
                           || u.Stats.FullRebuild || u.Stats.CSharpInputsChanged;
+                if (u.Stats.IgnoreFilesChanged) AfterIgnoreFilesChanged(linkedRoot, linked: true, ct);
                 if (lr is not null)
                 {
                     bool wasUnsure = lr.Unsure.Count > 0 || retried is not null;
@@ -1024,6 +1054,76 @@ public static class ServerContext
         if (stats.Untouched && IndexGeneration.Read(cacheDir) is { } current) return current;
         if (!changed) wl.SourcesUnchanged();
         return wl.Commit(); // also when the token couldn't be read: a spurious reload is safe, a missed one isn't
+    }
+
+    // An ignore file was added, edited or deleted. The targeted update dropped what it now leaves out; what it no longer
+    // leaves out takes a walk to find, so reconcile - in the background, once the caller has let go of the gates - where a
+    // walk is allowed. Where it isn't (a network share, a huge repo), queries say what's missing until a terminal update.
+    // Called with the gates held: ct and the epoch are the caller's, so a re-point since makes it a no-op.
+    private static void AfterIgnoreFilesChanged(string root, bool linked, CancellationToken ct)
+    {
+        var changedUtc = DateTime.UtcNow;
+        if (linked) { AfterLinkedIgnoreFilesChanged(root, changedUtc); return; }
+        int epoch = Volatile.Read(ref _epoch);
+        bool Current() => !ct.IsCancellationRequested && Volatile.Read(ref _epoch) == epoch;
+        Task.Run(() =>
+        {
+            try
+            {
+                if (!Current()) return;
+                if (ShouldAutoReconcile(root))
+                {
+                    Log.For(root).Info("an ignore file changed; reconciling to index what it no longer ignores");
+                    BackgroundReconcile(epoch, ct);
+                    return;
+                }
+                Log.For(root).Warn("an ignore file changed; files it no longer ignores aren't indexed until: " +
+                                   $"codecompass update \"{root}\"");
+                Rw.EnterWriteLock(); // against a re-point between the check and the flag: Init clears it under this lock
+                try
+                {
+                    if (!Current()) return;
+                    _staleReason = IgnoreFileChangedReason;
+                    _eventsLostUtc = changedUtc;
+                    _eventsLost = true;
+                }
+                finally { Rw.ExitWriteLock(); }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { Log.For(root).Warn($"reconcile after an ignore file changed skipped: {ex.Message}"); }
+        });
+    }
+
+    private const string IgnoreFileChangedReason =
+        "an ignore file (.gitignore/.ignore) changed and files it no longer ignores aren't indexed on this network/large workspace";
+
+    // A linked root's follow-up runs on the root's own lifetime token, queued behind its startup reconcile as that task: so
+    // unlinking or giving up the root cancels it and waits it out (StopLoadReconcile), and it can't write back an index a
+    // purge deleted. Called from the root's watcher, which teardown drains before it stops that task.
+    private static void AfterLinkedIgnoreFilesChanged(string root, DateTime changedUtc)
+    {
+        var lr = FindLinked(root);
+        CancellationToken ct;
+        try { if (lr?.LoadCts is not { } cts) return; ct = cts.Token; } // not live-indexed here (any more)
+        catch (ObjectDisposedException) { return; }
+        lr.LoadReconcile = (lr.LoadReconcile ?? Task.CompletedTask).ContinueWith(_ =>
+        {
+            try
+            {
+                if (ct.IsCancellationRequested) return;
+                if (ShouldAutoReconcile(root))
+                {
+                    Log.For(root).Info("an ignore file changed; reconciling to index what it no longer ignores");
+                    ReconcileLinked(root, ct);
+                    return;
+                }
+                Log.For(root).Warn("an ignore file changed; files it no longer ignores aren't indexed until: " +
+                                   $"codecompass update \"{root}\"");
+                Interlocked.Exchange(ref lr.IgnoreFilesStaleSinceTicks, changedUtc.Ticks);
+            }
+            catch (OperationCanceledException) { Log.For(root).Info("linked root reconcile canceled (unlink/re-point/shutdown)"); }
+            catch (Exception ex) { Log.For(root).Warn($"reconcile after an ignore file changed skipped: {ex.Message}"); }
+        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
     private static void ReconcileLinked(string linkedRoot, CancellationToken ct)
@@ -2094,6 +2194,7 @@ public static class ServerContext
             // renamed or deleted). An editor's vanished temp file, or a folder whose timestamp moved, changes nothing: a
             // README or .json edit leaves the ~15 s model valid.
             affects |= c.CSharpInputsChanged;
+            if (c.IgnoreFilesChanged) AfterIgnoreFilesChanged(Root, linked: false, ShutdownToken);
             if (c.Added != 0 || c.Modified != 0 || c.Removed != 0)
                 Log.For(Root).Info($"incremental reindex: +{c.Added} ~{c.Modified} -{c.Removed} " +
                                    $"({changedFullPaths.Count} path(s) changed)");

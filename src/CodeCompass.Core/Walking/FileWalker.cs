@@ -80,7 +80,13 @@ public sealed class FileWalker
         AttributesToSkip = 0,
     };
 
-    public IEnumerable<FileRecord> Walk(string root)
+    public IEnumerable<FileRecord> Walk(string root) => Walk(root, IgnoreScope.None, "");
+
+    /// <summary>Walk a folder inside a repo: <paramref name="scope"/> holds the ignore files above it (see <see
+    /// cref="IgnoreFileSet.ScopeOf"/> of its parent) and <paramref name="dirRel"/> is its repo-relative path, which their
+    /// patterns are matched against. The folder itself isn't judged; its own ignore files are read like any other's.
+    /// <see cref="FileRecord.RelativePath"/> stays relative to <paramref name="root"/>.</summary>
+    public IEnumerable<FileRecord> Walk(string root, IgnoreScope scope, string dirRel)
     {
         root = Path.GetFullPath(root);
         _overCapSkipped = 0;
@@ -95,7 +101,49 @@ public sealed class FileWalker
         // access error swallowed by IgnoreInaccessible), silently dropping a whole subtree from the index.
         bool network = NetworkPath.IsNetwork(root);
         int degree = _walkThreads > 0 ? _walkThreads : CodeCompassConfig.WalkThreads(Environment.ProcessorCount);
-        return degree <= 1 ? WalkSerial(root, network) : WalkParallel(root, degree, network);
+        var start = new Dir(root, dirRel, scope);
+        return degree <= 1 ? WalkSerial(start, network) : WalkParallel(start, degree, network);
+    }
+
+    // A folder to read: its full path, its repo-relative path (what ignore-file patterns match), and the ignore files above it.
+    private readonly record struct Dir(string Full, string Rel, IgnoreScope Scope);
+
+    // A folder's scope: the one above it plus the folder's own ignore files, read off its listing.
+    private IgnoreScope ScopeIn(Dir dir, List<FileSystemInfo> entries, string root, bool network)
+    {
+        if (!_ignore.UseIgnoreFiles) return dir.Scope;
+        List<string>? texts = null;
+        foreach (var name in IgnoreFile.Names)
+            foreach (var e in entries)
+                if (e is FileInfo f && string.Equals(f.Name, name, StringComparison.Ordinal))
+                {
+                    if (IsLink(f)) break; // never followed - and never indexed, so a targeted update couldn't find it either
+                    // Over a share, one more try before giving up on it (see ReadDir).
+                    var t = IgnoreFileSet.ReadText(f.FullName);
+                    if (t is null && network) { System.Threading.Thread.Sleep(RetryDelayMs); t = IgnoreFileSet.ReadText(f.FullName); }
+                    if (t is not null) (texts ??= new()).Add(t);
+                    else Log.For(root).Warn($"walk couldn't read an ignore file - what it ignores may be indexed: {f.FullName}");
+                    break;
+                }
+        return texts is null ? dir.Scope : dir.Scope.With(IgnoreFile.Parse(dir.Rel, texts));
+    }
+
+    private static string ChildRel(Dir dir, string name) => dir.Rel.Length == 0 ? name : dir.Rel + "/" + name;
+
+    // A subfolder to descend into, as a Dir; null if a name rule, a link or an ignore file says not to.
+    private Dir? Child(Dir dir, IgnoreScope scope, DirectoryInfo sub)
+    {
+        if (!KeepSubdir(sub)) return null;
+        if (!_ignore.UseIgnoreFiles) return new Dir(sub.FullName, "", scope);
+        var rel = ChildRel(dir, sub.Name); // kept even with no ignore files above: one below matches against it
+        return IgnoreFileSet.IsIgnoredIn(scope, rel, isDir: true, _ignore) ? null : new Dir(sub.FullName, rel, scope);
+    }
+
+    // A file's record, unless an ignore file, a rule or the size cap leaves it out.
+    private bool TryFile(Dir dir, IgnoreScope scope, FileInfo file, string root, out FileRecord rec)
+    {
+        if (!scope.IsEmpty && IgnoreFileSet.IsIgnoredIn(scope, ChildRel(dir, file.Name), isDir: false, _ignore)) { rec = default; return false; }
+        return TryFileRecord(file, root, out rec);
     }
 
     // Keep a subdirectory (not ignored, not a reparse point). Attributes are cached from the enumeration.
@@ -217,20 +265,23 @@ public sealed class FileWalker
         try { return Directory.Exists(dir); } catch { return false; }
     }
 
-    private IEnumerable<FileRecord> WalkSerial(string root, bool network)
+    private IEnumerable<FileRecord> WalkSerial(Dir start, bool network)
     {
+        var root = start.Full;
         var opts = EnumOpts();
-        var stack = new Stack<string>();
-        stack.Push(root);
+        var stack = new Stack<Dir>();
+        stack.Push(start);
 
         while (stack.Count > 0)
         {
-            var entries = ReadDir(stack.Pop(), root, opts, network);
+            var dir = stack.Pop();
+            var entries = ReadDir(dir.Full, root, opts, network);
             if (entries is null) continue;
+            var scope = ScopeIn(dir, entries, root, network);
             foreach (var info in entries)
             {
-                if (info is DirectoryInfo sub) { if (KeepSubdir(sub)) stack.Push(sub.FullName); }
-                else if (info is FileInfo file) { if (TryFileRecord(file, root, out var rec)) yield return rec; }
+                if (info is DirectoryInfo sub) { if (Child(dir, scope, sub) is { } child) stack.Push(child); }
+                else if (info is FileInfo file) { if (TryFile(dir, scope, file, root, out var rec)) yield return rec; }
             }
         }
     }
@@ -239,15 +290,16 @@ public sealed class FileWalker
     // concurrently (overlapping SMB round-trips), pushing files to a bounded output the caller drains.
     // A pending-directory counter drives completion; a cancellation token lets an early-breaking consumer
     // stop the workers without a hang or a thread leak.
-    private IEnumerable<FileRecord> WalkParallel(string root, int degree, bool network)
+    private IEnumerable<FileRecord> WalkParallel(Dir start, int degree, bool network)
     {
+        var root = start.Full;
         var opts = EnumOpts();
         var output = new BlockingCollection<FileRecord>(8192); // bounded => backpressure paces the walk
-        var dirs = new BlockingCollection<string>();
+        var dirs = new BlockingCollection<Dir>();
         var cts = new System.Threading.CancellationTokenSource();
         var token = cts.Token;
         int pending = 1; // root
-        dirs.Add(root);
+        dirs.Add(start);
 
         var workers = new System.Threading.Tasks.Task[degree];
         for (int w = 0; w < degree; w++)
@@ -260,21 +312,24 @@ public sealed class FileWalker
                     {
                         try
                         {
-                            var entries = ReadDir(dir, root, opts, network);
+                            var entries = ReadDir(dir.Full, root, opts, network);
                             if (entries is not null)
+                            {
+                                var scope = ScopeIn(dir, entries, root, network);
                                 foreach (var info in entries)
                                 {
                                     if (info is DirectoryInfo sub)
                                     {
                                         // Increment BEFORE enqueue so the pending count can't hit zero
                                         // while a child is in flight. (The current dir still holds its +1.)
-                                        if (KeepSubdir(sub)) { System.Threading.Interlocked.Increment(ref pending); dirs.Add(sub.FullName); }
+                                        if (Child(dir, scope, sub) is { } child) { System.Threading.Interlocked.Increment(ref pending); dirs.Add(child); }
                                     }
                                     else if (info is FileInfo file)
                                     {
-                                        if (TryFileRecord(file, root, out var rec)) output.Add(rec, token);
+                                        if (TryFile(dir, scope, file, root, out var rec)) output.Add(rec, token);
                                     }
                                 }
+                            }
                         }
                         finally
                         {

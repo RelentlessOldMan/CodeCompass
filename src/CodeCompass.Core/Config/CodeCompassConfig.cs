@@ -24,6 +24,8 @@ public sealed class RepoConfig
     [JsonPropertyName("ignore")] public string[]? Ignore { get; set; }
     // Directory names to index even though they're skipped by default as build output (packages, build, out, ...).
     [JsonPropertyName("keepDirs")] public string[]? KeepDirs { get; set; }
+    // Leave out what the repo's own .gitignore / .ignore files ignore (default true).
+    [JsonPropertyName("useIgnoreFiles")] public bool? UseIgnoreFiles { get; set; }
 }
 
 /// <summary>
@@ -54,6 +56,9 @@ public static class CodeCompassConfig
   // "keepDirs": ["packages"], // directory names to index even though they're skipped by default as build
                               //   output (packages, build, out, target, dist, ...) - e.g. a monorepo whose
                               //   sources live under packages/. (env: CODECOMPASS_KEEP, comma-separated.)
+  // "useIgnoreFiles": true,  // leave out what the repo's .gitignore / .ignore files ignore (default true).
+                              //   false = index it anyway. keepDirs wins over them. (env:
+                              //   CODECOMPASS_USE_IGNORE_FILES=0)
   // "maxAutoMb": 100,        // repos bigger than this wait for a one-time `codecompass index` instead
                               //   of auto-indexing inside a tool call (default 100).
   // "autoReconcile": true,   // on startup, pick up changes made outside the session (e.g. a source-
@@ -160,6 +165,10 @@ public static class CodeCompassConfig
     /// CODECOMPASS_STATUS_LINE / config `statusLine`.</summary>
     public static bool StatusLinePublish() => StatusLinePublish(Current);
     public static bool StatusLinePublish(RepoConfig cfg) => EnvBool("CODECOMPASS_STATUS_LINE") ?? cfg.StatusLine ?? true;
+
+    /// <summary>Whether the walk honours the repo's own <c>.gitignore</c> and <c>.ignore</c> files (see IgnoreFile). Default
+    /// true. Env CODECOMPASS_USE_IGNORE_FILES / config `useIgnoreFiles`.</summary>
+    public static bool UseIgnoreFiles(RepoConfig cfg) => EnvBool("CODECOMPASS_USE_IGNORE_FILES") ?? cfg.UseIgnoreFiles ?? true;
 
     /// <summary>Minutes the long-lived server keeps a built semantic analyzer (Roslyn, C#)
     /// resident with no semantic query before evicting it to free memory (it rebuilds lazily on the next

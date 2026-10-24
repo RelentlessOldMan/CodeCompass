@@ -27,6 +27,9 @@ public sealed record UpdateStats(int Added, int Modified, int Removed, double Se
 
     /// <summary>An update that wrote nothing (see <see cref="ChangeCounts.Untouched"/>): the caller can skip its commit.</summary>
     public bool Untouched { get; init; }
+
+    /// <summary>See <see cref="ChangeCounts.IgnoreFilesChanged"/>.</summary>
+    public bool IgnoreFilesChanged { get; init; }
 }
 
 public sealed record ChangeCounts(int Added, int Modified, int Removed, bool CSharpInputsChanged = false)
@@ -45,6 +48,11 @@ public sealed record ChangeCounts(int Added, int Modified, int Removed, bool CSh
     /// nothing to save, and a commit would only make every session reload an unchanged index. Counts of zero aren't enough:
     /// a touched-but-identical file still records a new ledger entry.</summary>
     public bool Untouched { get; init; }
+
+    /// <summary>An ignore file (.gitignore, .ignore) was added, edited or deleted. What the ignore files now leave out was
+    /// dropped; what they no longer leave out is on disk unindexed until a walk (<see cref="RepositoryIndexer.Update"/>) finds
+    /// it - the caller's call, as a full walk is for lost events.</summary>
+    public bool IgnoreFilesChanged { get; init; }
 }
 
 /// <summary>
@@ -754,8 +762,16 @@ public static class RepositoryIndexer
         var ignore = IgnoreRules.ForRoot(root);
         var prune = new HashSet<string>(text.AllPaths(), StringComparer.Ordinal);
         foreach (var p in symbols.AllPaths()) prune.Add(p);
-        prune.RemoveWhere(p => !ignore.IsIgnoredPath(p));
-        if (prune.Count == 0) return (text, symbols, 0);
+        // The ledger's entries go with them: left there, a later walk that no longer ignores a file (keepDirs added, an
+        // ignore file edited or turned off) finds it unchanged against its entry and never indexes it again.
+        using var snapshot = TryLoadSnapshot(root, out var s) ? s : null;
+        var ledger = snapshot?.Keys.ToList() ?? new List<string>();
+        // ...and what the repo's ignore files leave out, for an index built before they were read (or with them turned off).
+        var ignoreFiles = IgnoreFileSet.ForSnapshot(root, ignore, prune.Concat(ledger));
+        bool Ignored(string p) => ignore.IsIgnoredPath(p) || ignoreFiles.IsIgnored(p, isDir: false);
+        prune.RemoveWhere(p => !Ignored(p));
+        var unledger = ledger.Where(Ignored).ToList();
+        if (prune.Count == 0 && unledger.Count == 0) return (text, symbols, 0);
 
         var dir = IndexStore.GetCacheDir(root);
         foreach (var rel in prune)
@@ -764,8 +780,11 @@ public static class RepositoryIndexer
             symbols.RemovePath(rel);
             PositionalSidecar.Delete(dir, rel); // idempotent; drop any block sidecar for the pruned file too
         }
+        foreach (var rel in unledger) snapshot!.Remove(rel);
         text.Flush();
         symbols.Flush();
+        snapshot?.Save();
+        prune.UnionWith(unledger); // a ledger-only drop is a change too: the server must install it, not keep its cached ledger
         // Refresh the doc count in meta; carry the other coverage fields forward unchanged (a prune doesn't
         // re-measure size caps / symbol skips / landscape).
         var pm = IndexMetaFile.Read(root);
@@ -798,7 +817,8 @@ public static class RepositoryIndexer
             var counts = ApplyChanges(text, symbols, snapshot, root, changedFullPaths);
             if (!counts.Untouched) SaveAll(root, text, symbols, snapshot);
             return (text, symbols, new UpdateStats(counts.Added, counts.Modified, counts.Removed, sw.Elapsed.TotalSeconds, false,
-                                                   counts.CSharpInputsChanged) { Unsure = counts.Unsure, Untouched = counts.Untouched });
+                                                   counts.CSharpInputsChanged)
+                { Unsure = counts.Unsure, Untouched = counts.Untouched, IgnoreFilesChanged = counts.IgnoreFilesChanged });
         }
     }
 
@@ -879,6 +899,11 @@ public static class RepositoryIndexer
         var irrelevant = inRepo.Where(p => IrrelevantIgnoredType(snapshot, p.Rel, ignore)).Select(p => p.Full).ToList();
         var irrelevantFolders = irrelevant.Count == 0 ? null : FolderProbe.Folders(irrelevant);
         var skip = new HashSet<string>(irrelevant.Where(p => !irrelevantFolders!.Contains(p)), StringComparer.Ordinal);
+        // The repo's own ignore files, read as paths under them are judged: the index holds every one in a folder the walk
+        // entered (see IgnoreFileSet.IsIgnoredIn), and the batch names any just made.
+        var batchRels = new HashSet<string>(inRepo.Select(p => p.Rel), StringComparer.Ordinal);
+        var ignoreFiles = IgnoreFileSet.Lazy(root, ignore, r => batchRels.Contains(r) || snapshot.TryGetValue(r, out _));
+        var changedIgnoreFiles = new List<string>();
         var unsure = new List<string>();
         bool touched = false; // did any path reach the index or the snapshot (see ChangeCounts.Untouched)?
         bool? rootAnswered = null;
@@ -887,10 +912,29 @@ public static class RepositoryIndexer
         foreach (var (full, rel) in inRepo)
         {
             if (skip.Contains(full)) continue;
+            // Left out by an ignore file whether it's a file or a folder (one above it is ignored, say): judged without asking
+            // the disk, as an ignored file type is - a build writing into a gitignored output folder sends thousands.
+            if (ignoreFiles.IsIgnored(rel, isDir: false) && ignoreFiles.IsIgnored(rel, isDir: true))
+            {
+                if (snapshot.TryGetValue(rel, out _) || snapshot.KeysWithPrefix(rel + "/").Any())
+                {
+                    touched = true;
+                    RemovePathAndChildren(text, symbols, snapshot, dir, rel, ref removed, csharp);
+                }
+                continue;
+            }
 
             var kind = Probe(full, batch.RootIsNetwork, RootAnswers);
             if (kind != PathKind.Unknown) touched = true;
-            if (kind == PathKind.Folder)
+            // An ignore file whose text the index changed (added, edited, deleted) - not one saved unchanged.
+            bool ignoreFile = ignore.UseIgnoreFiles && IgnoreFile.IsIgnoreFileName(Path.GetFileName(rel.AsSpan()))
+                              && !IsIgnoredRelPath(rel, ignore);
+            if (ignoreFile && kind == PathKind.Gone && snapshot.TryGetValue(rel, out _)) changedIgnoreFiles.Add(rel);
+            if (kind == PathKind.Folder && ignoreFiles.IsIgnored(rel, isDir: true))
+            {
+                RemovePathAndChildren(text, symbols, snapshot, dir, rel, ref removed, csharp); // made, or moved, into an ignored place
+            }
+            else if (kind == PathKind.Folder)
             {
                 // A folder in a batch is a new subtree (created, renamed or moved in) - or one REPLACED by a same-named folder
                 // within the debounce window, whose missing files no event reports. So also drop what the index holds under
@@ -898,12 +942,14 @@ public static class RepositoryIndexer
                 // failing (an access-denied subfolder, a share hiccup), and a walk that couldn't list a subfolder proves nothing.
                 var walker = new FileWalker(ignore);
                 var seen = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var f in walker.Walk(full))
+                int cut = rel.LastIndexOf('/');
+                foreach (var f in walker.Walk(full, ignoreFiles.ScopeOf(cut < 0 ? "" : rel[..cut])!, rel))
                 {
                     var childRel = Path.GetRelativePath(root, f.FullPath).Replace('\\', '/');
                     seen.Add(childRel);
                     int before = added + modified + removed;
-                    bool unread = ApplyFile(text, symbols, snapshot, dir, childRel, f.FullPath, ignore, extractor, batch,
+                    // The walk judged it by the ignore files, its folder's own included.
+                    bool unread = ApplyFile(text, symbols, snapshot, dir, childRel, f.FullPath, ignore, null, extractor, batch,
                                             ref added, ref modified, ref removed);
                     if (added + modified + removed != before && SemanticInputs.IsCSharpInput(childRel)) csharp.Add(childRel);
                     if (unread && SemanticInputs.IsCSharpInput(childRel)) csharpUnread.Add(childRel);
@@ -911,6 +957,11 @@ public static class RepositoryIndexer
                 if (walker.DroppedDirs == 0)
                     foreach (var stale in snapshot.KeysWithPrefix(rel + "/").Where(k => !seen.Contains(k)).ToList())
                     {
+                        if (ignoreFiles.IsIgnored(stale, isDir: false))
+                        {
+                            RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, csharp, withChildren: false);
+                            continue;
+                        }
                         var staleFull = Path.Combine(root, stale.Replace('/', Path.DirectorySeparatorChar));
                         switch (Probe(staleFull, batch.RootIsNetwork, RootAnswers))
                         {
@@ -924,8 +975,9 @@ public static class RepositoryIndexer
             else if (kind == PathKind.File)
             {
                 int before = added + modified + removed;
-                bool unread = ApplyFile(text, symbols, snapshot, dir, rel, full, ignore, extractor, batch,
+                bool unread = ApplyFile(text, symbols, snapshot, dir, rel, full, ignore, ignoreFiles, extractor, batch,
                                         ref added, ref modified, ref removed);
+                if (ignoreFile && added + modified + removed != before) changedIgnoreFiles.Add(rel);
                 if (added + modified + removed != before && SemanticInputs.IsCSharpInput(rel)) csharp.Add(rel);
                 if (unread && SemanticInputs.IsCSharpInput(rel)) csharpUnread.Add(rel);
             }
@@ -936,9 +988,19 @@ public static class RepositoryIndexer
             else unsure.Add(full);
         }
 
+        // An ignore file added, edited or deleted: drop what the ignore files now leave out under its folder. What they no
+        // longer leave out only a walk finds (see ChangeCounts.IgnoreFilesChanged).
+        foreach (var baseRel in changedIgnoreFiles.Select(r => r.Contains('/') ? r[..r.LastIndexOf('/')] : "").Distinct())
+        {
+            var under = baseRel.Length == 0 ? snapshot.Keys : snapshot.KeysWithPrefix(baseRel + "/");
+            foreach (var k in under.Where(k => ignoreFiles.IsIgnored(k, isDir: false)).ToList())
+                RemovePathAndChildren(text, symbols, snapshot, dir, k, ref removed, csharp, withChildren: false);
+        }
+
         // A C# file whose text the index couldn't take may have changed too: what a model reads of it is unknown.
         return new ChangeCounts(added, modified, removed, csharp.Count > 0 || csharpUnread.Count > 0) {
             Unsure = unsure, Untouched = !touched, CSharpPaths = csharp, CSharpUnread = csharpUnread,
+            IgnoreFilesChanged = changedIgnoreFiles.Count > 0,
         };
     }
 
@@ -996,15 +1058,15 @@ public static class RepositoryIndexer
     // True when the file's text couldn't be taken (see ChangeCounts.CSharpUnread).
     private static bool ApplyFile(
         SegmentedIndex text, SegmentedSymbolIndex symbols, DiskSnapshot snapshot, string dir,
-        string rel, string full, IgnoreRules ignore, TreeSitterSymbolExtractor extractor, ApplyBatch batch,
-        ref int added, ref int modified, ref int removed)
+        string rel, string full, IgnoreRules ignore, IgnoreFileSet? ignoreFiles, TreeSitterSymbolExtractor extractor,
+        ApplyBatch batch, ref int added, ref int modified, ref int removed)
     {
         FileState? oldState = snapshot.TryGetValue(rel, out var ps) ? ps : (FileState?)null;
 
         // These two guards are specific to the TARGETED path: a single path can become newly-ignored or
         // grow over the file cap, and must then be dropped. Build/Update never hit them because their
-        // full walk pre-filters ignored and over-cap files.
-        if (IsIgnoredRelPath(rel, ignore))
+        // full walk pre-filters ignored and over-cap files. (ignoreFiles is null when a walk already judged it.)
+        if (IsIgnoredRelPath(rel, ignore) || ignoreFiles?.IsIgnored(rel, isDir: false) == true)
         {
             if (oldState is not null) { RemoveFromIndex(text, symbols, dir, rel); snapshot.Remove(rel); removed++; }
             return false;

@@ -1017,6 +1017,9 @@ static int CmdWatch(string[] args)
                     Console.Error.WriteLine($"reindexed: +{c.Added} ~{c.Modified} -{c.Removed}");
                     Log.For(root).Info($"watch reindex: +{c.Added} ~{c.Modified} -{c.Removed}");
                 }
+                // What a changed ignore file left out was just dropped; what it no longer leaves out takes a walk to find.
+                if (c.IgnoreFilesChanged)
+                    Console.Error.WriteLine($"an ignore file changed: run `codecompass update \"{root}\"` to index files it no longer ignores");
 
                 // Keep a long-running watch from accumulating unbounded segments/tombstones.
                 // Merge existing segments in place (no source-file re-read). Nothing applied adds none.

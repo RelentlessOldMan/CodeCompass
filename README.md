@@ -191,6 +191,7 @@ editing source:
 | `CODECOMPASS_MAX_FILE_MB` | Per-file size cap for indexing entirely (default 2000, i.e. 2 GB). Files ≥128 MB are indexed by **streaming** (bounded memory), so a high cap won't blow up RAM; its real cost is read time on a full build (large files get re-read), so lower it per-repo if you don't want big generated files indexed. |
 | `CODECOMPASS_IGNORE` | Comma/semicolon-separated directory names to exclude (e.g. `generated,vendor`). |
 | `CODECOMPASS_KEEP` | Comma/semicolon-separated directory names to index **even though they're skipped by default** as build output — e.g. `packages` for a pnpm/yarn monorepo whose sources live under `packages/`. (Config: `keepDirs`.) A zero result says when directories named `packages`/`build`/`out`/`target`/`dist` were skipped, so this is never a silent gap. |
+| `CODECOMPASS_USE_IGNORE_FILES` | `0` to index what the repo's `.gitignore` / `.ignore` files ignore (default `1`: left out). (Config: `useIgnoreFiles`.) See *Ignore files* below. |
 | `CODECOMPASS_CACHE_DIR` | Where indexes and logs live (default `%LOCALAPPDATA%\CodeCompass`). Keep it on a **local** disk: the cross-process write lock relies on local file-handle semantics. |
 | `CODECOMPASS_COMPACT_SEGMENTS` | Merge on-disk segments after this many accumulate from incremental edits (default 64). |
 | `CODECOMPASS_SEMANTIC_IDLE_MIN` | Minutes the server keeps the C# semantic model resident with no `find_references` before freeing it (default 10; 0 = keep). |
@@ -275,7 +276,7 @@ travel with the repo instead of being set on every run. Precedence is **env var 
 default**. Fields: `maxSymbolMb`, `maxFileMb`, `maxAutoMb`, `ignore` (array of directory names), `keepDirs`
 (array of default-skipped directory names to index anyway),
 `threads`, `walkThreads`, `segmentMb`, `compactSegments`, `stallWarnSec`, `readBudgetMb`, `autoReconcile`,
-`statusLine`, `semanticIdleMinutes`.
+`statusLine`, `semanticIdleMinutes`, `useIgnoreFiles`.
 
 Don't hand-write it — run **`codecompass init <path>`** to drop a documented starter (every setting
 commented out, so it's all defaults until you edit; `//` comments and trailing commas are allowed).
@@ -292,6 +293,31 @@ reliable signal of parse safety (a valid 5 MB file parses fast, a degenerate one
 raising a cap is a judgement only the repo owner can make. Raising the symbol cap is safe from the
 data-blob crawl — above 1 MB, overwhelmingly numeric/hex files are auto-skipped for symbols by
 content (see *Tuning* above).
+
+### Ignore files
+
+What the repo's own **`.gitignore`** and **`.ignore`** files ignore is left out of the index, in every
+folder, as git reads them: `#` comments, `!` to re-include, a trailing `/` for folders only, a leading or
+middle `/` to anchor a pattern to its file's folder, `*` `?` `[...]` (POSIX classes like `[[:digit:]]` included) within a name and `**` across folders.
+The deepest file whose pattern matches decides; in one folder `.ignore` wins over `.gitignore` (as in
+ripgrep). As in git, a file inside an ignored folder can't be re-included. Patterns match
+case-insensitively on Windows and macOS.
+
+The built-in rules still apply first (`bin/`, `node_modules/`, binary types, the size cap, ...), and
+**`keepDirs` wins over both**: a folder named there is indexed even if an ignore file ignores it. The ignore
+files themselves are always indexed. Like git, only files named exactly `.gitignore` / `.ignore` are read,
+and never through a symbolic link. Not read: your global git excludes file and `.git/info/exclude` - they
+belong to one machine, not the repo, so two machines would index the same tree differently.
+
+Editing an ignore file applies at once to what it now ignores (those files leave the index). What it no
+longer ignores needs a walk to find: done automatically where a reconcile is (see *Staying fresh*);
+on a network share or huge repo - the project or a linked root - answers say so, naming the root, until
+you run `codecompass update` there. Saving an ignore file without changing its text does nothing. A real
+change re-checks the indexed files under that folder against the new rules, so on a very large tree
+expect each edit to take a moment.
+
+To index everything regardless, set `"useIgnoreFiles": false` in `.codecompass.json` (or
+`CODECOMPASS_USE_IGNORE_FILES=0`) and run `codecompass update`.
 
 ### C/C++ references
 
