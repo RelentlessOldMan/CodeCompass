@@ -89,6 +89,8 @@ public static class RepoDiagnostics
                 w.WriteLine($"symbols skipped:  {meta.FilesSymbolSkipped:N0} file(s) text-searchable but no symbols (over symbol cap / data blob / streamed)");
             if (meta.DroppedDirs > 0)
                 w.WriteLine($"dirs dropped:     {meta.DroppedDirs:N0} director(y/ies) unreadable during the walk - their files are NOT indexed (re-run update/index; usually a transient network error)");
+            if (meta.IgnoredDirs > 0 || meta.IgnoredFiles > 0)
+                w.WriteLine($"ignore files:     left out {meta.IgnoredDirs:N0} folder(s) and {meta.IgnoredFiles:N0} file(s) (.gitignore / .ignore)");
             if (!string.IsNullOrEmpty(meta.Landscape))
                 w.WriteLine($"repo shape:       {meta.Landscape}");
             var scMb = meta.SidecarThresholdBytes / (1024.0 * 1024);

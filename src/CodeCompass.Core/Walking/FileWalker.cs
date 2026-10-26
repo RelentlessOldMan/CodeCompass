@@ -61,6 +61,13 @@ public sealed class FileWalker
     public int AmbiguousDirsSkipped => _ambiguousDirsSkipped;
     private int _ambiguousDirsSkipped;
 
+    /// <summary>Folders and files the repo's ignore files left out of the last <see cref="Walk"/>. A left-out folder isn't
+    /// walked, so what's under it isn't counted: one entry per path git would list as ignored. Valid after enumeration
+    /// completes.</summary>
+    public int IgnoredDirs => _ignoredDirs;
+    public int IgnoredFiles => _ignoredFiles;
+    private int _ignoredDirs, _ignoredFiles;
+
     private const int RetryDelayMs = 75; // brief pause before a single network re-read of a failed directory
 
     // Test-only fault-injection seam: invoked with each directory path just before it is enumerated, so a
@@ -92,6 +99,8 @@ public sealed class FileWalker
         _overCapSkipped = 0;
         _droppedDirs = 0;
         _ambiguousDirsSkipped = 0;
+        _ignoredDirs = 0;
+        _ignoredFiles = 0;
         LargestOverCapBytes = 0;
         LargestOverCapPath = null;
         _overCapFiles = CollectOverCapFiles ? new List<(string, long)>() : null;
@@ -136,13 +145,20 @@ public sealed class FileWalker
         if (!KeepSubdir(sub)) return null;
         if (!_ignore.UseIgnoreFiles) return new Dir(sub.FullName, "", scope);
         var rel = ChildRel(dir, sub.Name); // kept even with no ignore files above: one below matches against it
-        return IgnoreFileSet.IsIgnoredIn(scope, rel, isDir: true, _ignore) ? null : new Dir(sub.FullName, rel, scope);
+        if (!IgnoreFileSet.IsIgnoredIn(scope, rel, isDir: true, _ignore)) return new Dir(sub.FullName, rel, scope);
+        System.Threading.Interlocked.Increment(ref _ignoredDirs);
+        return null;
     }
 
     // A file's record, unless an ignore file, a rule or the size cap leaves it out.
     private bool TryFile(Dir dir, IgnoreScope scope, FileInfo file, string root, out FileRecord rec)
     {
-        if (!scope.IsEmpty && IgnoreFileSet.IsIgnoredIn(scope, ChildRel(dir, file.Name), isDir: false, _ignore)) { rec = default; return false; }
+        if (!scope.IsEmpty && IgnoreFileSet.IsIgnoredIn(scope, ChildRel(dir, file.Name), isDir: false, _ignore))
+        {
+            System.Threading.Interlocked.Increment(ref _ignoredFiles);
+            rec = default;
+            return false;
+        }
         return TryFileRecord(file, root, out rec);
     }
 

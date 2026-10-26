@@ -19,8 +19,9 @@ namespace CodeCompass.Core.Storage;
 /// flagged stale. <see cref="DroppedDirs"/> is the number of directory subtrees the last walk gave up on
 /// after a retry (their files are absent from this index) - a durable coverage-gap signal like
 /// <see cref="FilesOverCap"/>, so doctor/report can flag a known-incomplete index even after the build log
-/// has rotated away. 0 = complete.</summary>
-public sealed record IndexMeta(string Root, string Version, string BuiltUtc, int Files, int FilesOverCap = 0, int FilesSymbolSkipped = 0, int ContentVersion = 0, int DroppedDirs = 0, long SidecarThresholdBytes = 8L << 20, string? Landscape = null, int AmbiguousDirsSkipped = 0);
+/// has rotated away. 0 = complete. <see cref="IgnoredDirs"/> and <see cref="IgnoredFiles"/> count what the repo's ignore files
+/// left out of the last walk (a left-out folder once, not what's in it).</summary>
+public sealed record IndexMeta(string Root, string Version, string BuiltUtc, int Files, int FilesOverCap = 0, int FilesSymbolSkipped = 0, int ContentVersion = 0, int DroppedDirs = 0, long SidecarThresholdBytes = 8L << 20, string? Landscape = null, int AmbiguousDirsSkipped = 0, int IgnoredDirs = 0, int IgnoredFiles = 0);
 
 public static class IndexMetaFile
 {
@@ -31,13 +32,13 @@ public static class IndexMetaFile
     /// the build did - otherwise an edited mid-size file could leave a stale/orphaned sidecar.</summary>
     public static void Write(string repoRoot, int files, int filesOverCap = 0, int filesSymbolSkipped = 0, int droppedDirs = 0,
                              long sidecarThresholdBytes = 8L << 20, string? landscape = null, int ambiguousDirsSkipped = 0,
-                             int? contentVersion = null)
+                             int? contentVersion = null, int ignoredDirs = 0, int ignoredFiles = 0)
     {
         try
         {
             var meta = new IndexMeta(Path.GetFullPath(repoRoot), BuildInfo.Version,
                 DateTime.UtcNow.ToString("o"), files, filesOverCap, filesSymbolSkipped, contentVersion ?? BuildInfo.IndexerContentVersion, droppedDirs,
-                sidecarThresholdBytes, landscape, ambiguousDirsSkipped);
+                sidecarThresholdBytes, landscape, ambiguousDirsSkipped, ignoredDirs, ignoredFiles);
             AtomicFile.WriteText(Path.Combine(IndexStore.GetCacheDir(repoRoot), Name), w => w.Write(JsonSerializer.Serialize(meta)));
         }
         catch { /* best-effort; never break a build over metadata */ }

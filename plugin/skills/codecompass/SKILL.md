@@ -15,5 +15,8 @@ grepping or reading whole files, and the index auto-updates as files change.
 - **manage_links** — link external directories into the search; `action=focus` scopes searches to some roots (answers say what was excluded).
 - **reindex** — rebuild the index for the workspace from scratch.
 
+To test CodeCompass itself on a repo (every tool, each answer checked, an HTML report), run
+`codecompass selftest "<repo>"` in a shell; it prints a summary and the report's path.
+
 This **complements** the host's native search rather than replacing it: reach for CodeCompass first on a
 large or unfamiliar codebase, and fall back to native tools when a query isn't code-structure-shaped.

@@ -465,7 +465,8 @@ public static class RepositoryIndexer
         // but with no symbols extracted) so the search tools can be honest about a zero result and
         // doctor/cache can report by real path.
         IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, totalSymbolSkipped, walker.DroppedDirs,
-                            sidecarThreshold, landscape.Summary(), walker.AmbiguousDirsSkipped);
+                            sidecarThreshold, landscape.Summary(), walker.AmbiguousDirsSkipped,
+                            ignoredDirs: walker.IgnoredDirs, ignoredFiles: walker.IgnoredFiles);
         return (text, symbols, stats);
     }
 
@@ -756,7 +757,8 @@ public static class RepositoryIndexer
             // when untouched: its BuiltUtc says a full walk confirmed the index, and readers read it from disk, not a reload.
             IndexMetaFile.Write(root, text.DocumentCount, walker.OverCapSkipped, carriedSymbolSkipped, walker.DroppedDirs,
                                 sidecarThreshold, priorMeta?.Landscape, walker.AmbiguousDirsSkipped,
-                                contentVersion: IndexMetaFile.CarriedContentVersion(priorMeta)); // unchanged files weren't re-extracted
+                                contentVersion: IndexMetaFile.CarriedContentVersion(priorMeta), // unchanged files weren't re-extracted
+                                ignoredDirs: walker.IgnoredDirs, ignoredFiles: walker.IgnoredFiles);
             return (text, symbols, new UpdateStats(added, modified, removed, sw.Elapsed.TotalSeconds, false) { Untouched = untouched });
         }
     }
@@ -807,7 +809,8 @@ public static class RepositoryIndexer
         var pm = IndexMetaFile.Read(root);
         IndexMetaFile.Write(root, text.DocumentCount, pm?.FilesOverCap ?? 0, pm?.FilesSymbolSkipped ?? 0,
                             pm?.DroppedDirs ?? 0, pm?.SidecarThresholdBytes ?? RepoLandscape.DefaultSidecarThreshold, pm?.Landscape,
-                            pm?.AmbiguousDirsSkipped ?? 0, contentVersion: IndexMetaFile.CarriedContentVersion(pm));
+                            pm?.AmbiguousDirsSkipped ?? 0, contentVersion: IndexMetaFile.CarriedContentVersion(pm),
+                            ignoredDirs: pm?.IgnoredDirs ?? 0, ignoredFiles: (pm?.IgnoredFiles ?? 0) + prune.Count);
         return (text, symbols, prune.Count);
     }
 

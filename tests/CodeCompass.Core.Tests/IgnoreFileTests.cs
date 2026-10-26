@@ -237,6 +237,44 @@ public class IgnoreFileTests
         finally { b.Text.Dispose(); b.Symbols.Dispose(); }
     }
 
+    // What the ignore files left out is counted where it's decided (a left-out folder isn't walked, so it counts once, as
+    // git lists it), and recorded with the index - so `doctor` and `selftest` can say it without another walk.
+    [Fact]
+    public void Build_RecordsWhatTheIgnoreFilesLeftOut()
+    {
+        using var repo = Sample();
+        RepositoryIndexer.Build(repo.Root).Text.Dispose();
+        var meta = IndexMetaFile.Read(repo.Root)!;
+        Assert.Equal(1, meta.IgnoredDirs);  // artifacts/
+        Assert.Equal(4, meta.IgnoredFiles); // run.log, rootonly.txt, src/deep/trace.log, lib/secret.cs
+    }
+
+    [Fact]
+    public void Update_RecountsWhatTheIgnoreFilesLeftOut()
+    {
+        using var repo = Sample();
+        RepositoryIndexer.Build(repo.Root).Text.Dispose();
+        repo.Write("more.log", "noise");
+        var u = RepositoryIndexer.Update(repo.Root);
+        u.Text.Dispose(); u.Symbols.Dispose();
+        var meta = IndexMetaFile.Read(repo.Root)!;
+        Assert.Equal(1, meta.IgnoredDirs);
+        Assert.Equal(5, meta.IgnoredFiles);
+    }
+
+    // A prune runs because the ignore files now leave out more: what it drops counts as left out, not the old figure.
+    [Fact]
+    public void PruneIgnored_CountsWhatItDropped_AsLeftOut()
+    {
+        using var repo = Sample();
+        RepositoryIndexer.Build(repo.Root).Text.Dispose();
+        repo.Write(".gitignore", "*.log\nartifacts/\n/rootonly.txt\n!important.log\nother/\n");
+        var p = RepositoryIndexer.PruneIgnored(repo.Root);
+        p.Text.Dispose(); p.Symbols.Dispose();
+        Assert.Equal(1, p.Pruned);
+        Assert.Equal(5, IndexMetaFile.Read(repo.Root)!.IgnoredFiles); // the 4 before + other/secret.cs
+    }
+
     [Fact]
     public void Build_OptedOutInConfig_IndexesThem()
     {

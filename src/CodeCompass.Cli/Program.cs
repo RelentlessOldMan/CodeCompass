@@ -50,6 +50,7 @@ return args.Length == 0
         "parsebench" => CmdParseBench(args),
         "statusline" => CmdStatusline(args),
         "doctor" => CmdDoctor(args),
+        "selftest" => CmdSelfTest(args),
         "cache" => CmdCache(args),
         "report" => CmdReport(args),
         "logs" => CmdLogs(),
@@ -90,6 +91,7 @@ static int Usage()
     Console.Error.WriteLine("  codecompass parsebench                   tree-sitter parse-time vs size sweep (synthetic)");
     Console.Error.WriteLine("  codecompass statusline [--wrap \"<cmd>\"]  Claude Code status line: shows index state (reads stdin JSON)");
     Console.Error.WriteLine("  codecompass doctor  <path>               diagnose a repo's index (health + metadata)");
+    Console.Error.WriteLine("  codecompass selftest <path> [--html <file>] [--anonymize]   index + run every tool, check each answer, HTML report");
     Console.Error.WriteLine("  codecompass cache   [list|gc|clear <path>|clear-all]   inspect/manage the per-user index cache");
     Console.Error.WriteLine("  codecompass report  <path> [--no-logs]   zip diagnostics + logs for a bug report (never source)");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
@@ -99,6 +101,49 @@ static int Usage()
     Console.Error.WriteLine("        caveat is a correctness qualifier on the answer, so it also goes to STDOUT (a");
     Console.Error.WriteLine("        `refs ... > out.txt` keeps the disclosure).");
     return 1;
+}
+
+// The standard user test of one repo: a full index, every MCP tool driven over stdio with each answer checked against
+// the files, a find_references sweep over the broadest names, and an HTML report. Read-only: nothing is written into the
+// repo (the report goes to the user's folder unless --html says where). Exit 0 = all passed, 2 = something failed.
+static int CmdSelfTest(string[] args)
+{
+    if (args.Length < 2) return Usage();
+    var root = Path.GetFullPath(args[1]);
+    if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
+    string? html = null, mcp = null;
+    bool anonymize = false;
+    for (int i = 2; i < args.Length; i++)
+    {
+        switch (args[i].ToLowerInvariant())
+        {
+            case "--html" when i + 1 < args.Length: html = Path.GetFullPath(args[++i]); break;
+            case "--mcp" when i + 1 < args.Length: mcp = Path.GetFullPath(args[++i]); break;
+            case "--anonymize": anonymize = true; break;
+            default: Console.Error.WriteLine($"unknown option: {args[i]}"); return Usage();
+        }
+    }
+    var exeSuffix = OperatingSystem.IsWindows() ? ".exe" : "";
+    mcp ??= Path.Combine(AppContext.BaseDirectory, "CodeCompass.Mcp" + exeSuffix);
+    if (!File.Exists(mcp)) { Console.Error.WriteLine($"the MCP server isn't next to the CLI ({mcp}); pass --mcp <path to CodeCompass.Mcp>"); return 1; }
+    // The apphost next to this assembly: run as `dotnet CodeCompass.Cli.dll`, the process is dotnet itself.
+    var apphost = Path.Combine(AppContext.BaseDirectory, "CodeCompass.Cli" + exeSuffix);
+    var cli = File.Exists(apphost) ? apphost : Environment.ProcessPath ?? apphost;
+
+    var result = CodeCompass.Core.SelfTest.SelfTestRunner.Run(
+        new CodeCompass.Core.SelfTest.SelfTestOptions(root, cli, mcp, anonymize, msg => Console.Error.WriteLine("selftest: " + msg)));
+
+    if (html is null)
+    {
+        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodeCompass", "selftest");
+        var safe = string.Concat(result.RepoLabel.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.' ? c : '_'));
+        html = Path.Combine(dir, $"{safe}-{result.StartedUtc:yyyyMMdd-HHmmss}.html");
+    }
+    Directory.CreateDirectory(Path.GetDirectoryName(html)!);
+    File.WriteAllText(html, CodeCompass.Core.SelfTest.SelfTestReport.Html(result));
+    Console.Write(CodeCompass.Core.SelfTest.SelfTestReport.Summary(result));
+    Console.WriteLine($"report: {html}");
+    return result.Failed > 0 ? 2 : 0;
 }
 
 // Report what the current caps would skip, so an operator can decide whether to raise them

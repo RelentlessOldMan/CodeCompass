@@ -146,6 +146,7 @@ codecompass symstats <path>           profile symbol-file sizes + parse cost per
 codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)
 codecompass statusline [--wrap "<cmd>"]  Claude Code status-line segment (index state)
 codecompass doctor  <path>            diagnose a repo's index (health + metadata)
+codecompass selftest <path> [--html <file>] [--anonymize]   the standard user test: every tool, checked, HTML report
 codecompass cache   [list|gc|clear <path>|clear-all]   inspect/manage the per-user index cache
 codecompass report  <path> [--no-logs]  zip diagnostics + logs for a bug report (never source)
 codecompass logs                      show the log folder and files
@@ -489,6 +490,18 @@ The command is fast, never errors out loudly, and publishing is off via `statusL
   config presence, index metadata (documents, segments, the version/time that built it), the cache-file
   listing (names + sizes), and explicit pass/warn checks (index builds? loads cleanly? built by the
   current version? on a network path?). Read-only — the first thing to run when search behaves oddly.
+- **`codecompass selftest <path>`** — the standard user test of one repo. It runs a full index (timed, peak memory
+  sampled), starts the MCP server the way Claude Code and Codex do (stdio), and calls every tool with inputs it picks
+  from the repo itself: names from each language present, so it works on C#, C/C++, mixed or any other repo. Every
+  answer row is checked against the file on disk (the name really is at that line and column; the definition is the
+  one expected; asked twice, find_references gives the same answer). It then looks up the repo's most-used names with
+  find_references (up to 1,000 each, the costliest lookups there are) for time and memory. Out comes one
+  self-contained HTML page: pass/fail per feature, every check with its timing and the tool's answer, repo stats and
+  the deep sweep. It never writes into the repo; the index cache is rebuilt. The page goes to
+  `%LOCALAPPDATA%\CodeCompass\selftest\` unless `--html` says where. `--anonymize` hashes names and paths and leaves
+  the answers out, for a page you can share. Exit code 0 = all passed, 2 = something failed. Allow 10-30+ minutes on
+  a huge or network repo (the full index and the deep sweep dominate). An agent can run it too: "run the CodeCompass
+  self-test on C:\src\foo".
 - **`codecompass cache`** — inspect/manage the per-user cache under `%LOCALAPPDATA%\CodeCompass`:
   `cache list` (each repo by real path + size + build info), `cache gc` (drop caches whose repo no
   longer exists), `cache clear <path>` / `cache clear-all`. (Each index writes a `meta.json` recording

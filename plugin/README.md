@@ -153,7 +153,7 @@ routes it onto CodeCompass. A small/medium repo indexes in the background on fir
 briefly say "indexing… N%"). For a **large** repo, build the index once from a terminal —
 `codecompass index "C:\path\to\repo"` — then it serves and self-updates. Diagnose with
 `codecompass doctor "<repo>"`; bundle a bug report (diagnostics + logs, never source) with
-`codecompass report "<repo>"`.
+`codecompass report "<repo>"`. Test every tool on a repo, with an HTML report, with `codecompass selftest "<repo>"`.
 
 ## Notes
 
