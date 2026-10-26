@@ -583,6 +583,23 @@ public static class RepositoryIndexer
     }
 
     /// <summary>
+    /// May a walk of <paramref name="root"/> run unasked (the MCP server's startup and lost-events reconciles, and both
+    /// live watchers after an ignore file changed)? The tri-state <c>autoReconcile</c> config wins; by default only a local
+    /// root within the auto limit - network shares and huge repos are left to a manual update (a full-tree stat-walk is slow
+    /// over SMB, and the file watcher is unreliable there anyway). Reads THAT root's own config, never the ambient one,
+    /// which is whichever root was written last.
+    /// </summary>
+    public static bool AutoReconciles(string root)
+    {
+        var cfg = CodeCompassConfig.ReadFrom(root) ?? new RepoConfig();
+        var ar = CodeCompassConfig.AutoReconcile(cfg);
+        if (ar == false) return false;
+        if (ar == true) return true;
+        if (NetworkPath.IsNetwork(root)) return false;
+        return !ExceedsAutoLimit(root, cfg, out _);
+    }
+
+    /// <summary>
     /// Per-worker trigram/symbol segment byte budgets, scaled so total build buffers
     /// (cores x (text+symbol)) fit a fraction of available RAM - keeps first-time builds
     /// within reach on small machines. Override the text budget with CODECOMPASS_SEGMENT_MB.

@@ -312,7 +312,8 @@ belong to one machine, not the repo, so two machines would index the same tree d
 Editing an ignore file applies at once to what it now ignores (those files leave the index). What it no
 longer ignores needs a walk to find: done automatically where a reconcile is (see *Staying fresh*);
 on a network share or huge repo - the project or a linked root - answers say so, naming the root, until
-you run `codecompass update` there. Saving an ignore file without changing its text does nothing. A real
+you run `codecompass update` there. `codecompass watch` does the same: it walks where a reconcile is
+automatic, and otherwise prints the `codecompass update` to run. Saving an ignore file without changing its text does nothing. A real
 change re-checks the indexed files under that folder against the new rules, so on a very large tree
 expect each edit to take a moment.
 

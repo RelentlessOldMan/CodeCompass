@@ -1861,19 +1861,8 @@ public static class ServerContext
     // Called as a startup reconcile task starts (true) and ends (false).
     internal static Action<bool>? StartupReconcileHookForTest;
 
-    // Auto-reconcile (on startup, or after the watcher lost events)? Tri-state config wins; default is "local and within the
-    // auto limit" (network shares and huge repos are left to a manual reindex - a full-tree stat-walk is slow over SMB, and
-    // the file watcher is unreliable there anyway). Reads THAT root's own config, for the project root and a linked root
-    // alike - never the ambient one, which is whichever root was written last.
-    private static bool ShouldAutoReconcile(string root)
-    {
-        var cfg = CodeCompassConfig.ReadFrom(root) ?? new RepoConfig();
-        var ar = CodeCompassConfig.AutoReconcile(cfg);
-        if (ar == false) return false;
-        if (ar == true) return true;
-        if (NetworkPath.IsNetwork(root)) return false;
-        return !RepositoryIndexer.ExceedsAutoLimit(root, cfg, out _);
-    }
+    // Auto-reconcile (on startup, or after the watcher lost events)? See RepositoryIndexer.AutoReconciles.
+    private static bool ShouldAutoReconcile(string root) => RepositoryIndexer.AutoReconciles(root);
 
     // Reconcile the loaded index against the current tree (picks up out-of-session changes), in the
     // background, while the loaded index keeps serving reads. Mirrors BackgroundBuild's guard usage:

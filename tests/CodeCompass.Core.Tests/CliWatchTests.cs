@@ -130,6 +130,60 @@ public class CliWatchTests
         }
     }
 
+    // An ignore file's pattern taken out: `watch` only said to run `codecompass update`, even on a small local repo where the
+    // MCP server reconciles by itself. It now reconciles where the server would (RepositoryIndexer.AutoReconciles).
+    [Fact]
+    public async Task Watch_AnIgnorePatternRemoved_OnASmallLocalRepo_IndexesTheFileAgain()
+    {
+        var cli = TestCli.Find();
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class AlphaLocal { } }");
+        repo.Write(".gitignore", "*.tmp\n");
+        repo.Write("keep.tmp", "UnignoredWord");
+        using var p = TestCli.Start(cli, "watch", repo.Root);
+        try
+        {
+            var lines = await StartedWatch(p);
+            Assert.False(IndexHas(repo.Root, "UnignoredWord"));
+            repo.Write(".gitignore", "# nothing ignored now\n");
+            bool landed = false;
+            for (int i = 0; i < 300 && !landed; i++) { Thread.Sleep(100); landed = IndexHas(repo.Root, "UnignoredWord"); }
+            Assert.True(landed, "the file no longer ignored was never indexed: " + string.Join(" | ", lines));
+        }
+        finally
+        {
+            p.Kill(entireProcessTree: true);
+            p.WaitForExit(30_000);
+        }
+    }
+
+    // Where the server wouldn't reconcile (autoReconcile off here; a network share or a repo over the size limit alike), the
+    // watch still says what to run and doesn't walk.
+    [Fact]
+    public async Task Watch_AnIgnorePatternRemoved_WithAutoReconcileOff_SaysToUpdate()
+    {
+        var cli = TestCli.Find();
+        using var repo = new TempRepo();
+        repo.Write("a.cs", "namespace N { class AlphaLocal { } }");
+        repo.Write(".codecompass.json", "{ \"autoReconcile\": false }");
+        repo.Write(".gitignore", "*.tmp\n");
+        repo.Write("keep.tmp", "UnignoredWord");
+        using var p = TestCli.Start(cli, "watch", repo.Root);
+        try
+        {
+            var lines = await StartedWatch(p);
+            repo.Write(".gitignore", "# nothing ignored now\n");
+            for (int i = 0; i < 300 && !lines.Any(l => l.Contains("an ignore file changed")); i++) Thread.Sleep(100);
+            Assert.Contains(lines, l => l.Contains("an ignore file changed") && l.Contains("codecompass update"));
+            Assert.False(IndexHas(repo.Root, "UnignoredWord"));
+        }
+        finally
+        {
+            p.Kill(entireProcessTree: true);
+            p.WaitForExit(30_000);
+        }
+    }
+
     // At start, an index briefly unreadable (another process has it open - a terminal `index` committing, a virus scan)
     // was treated as missing: the watch rebuilt the whole repo over it.
     [Fact]

@@ -1017,8 +1017,20 @@ static int CmdWatch(string[] args)
                     Console.Error.WriteLine($"reindexed: +{c.Added} ~{c.Modified} -{c.Removed}");
                     Log.For(root).Info($"watch reindex: +{c.Added} ~{c.Modified} -{c.Removed}");
                 }
-                // What a changed ignore file left out was just dropped; what it no longer leaves out takes a walk to find.
-                if (c.IgnoreFilesChanged)
+                // What a changed ignore file left out was just dropped; what it no longer leaves out takes a walk to find:
+                // run here, under this batch's lock, where the MCP server would run one too - else said.
+                bool walked = false;
+                if (c.IgnoreFilesChanged && RepositoryIndexer.AutoReconciles(root))
+                {
+                    var u = RepositoryIndexer.Update(root); // reads what was just persisted: the walk adds what's no longer ignored
+                    text.Dispose(); symbols.Dispose(); snapshot.Dispose();
+                    text = u.Text; symbols = u.Symbols;
+                    snapshot = RepositoryIndexer.LoadSnapshot(root);
+                    walked = u.Stats.FullRebuild || u.Stats.Added != 0 || u.Stats.Modified != 0 || u.Stats.Removed != 0;
+                    Console.Error.WriteLine($"an ignore file changed: reconciled +{u.Stats.Added} ~{u.Stats.Modified} -{u.Stats.Removed}");
+                    Log.For(root).Info($"watch: an ignore file changed; reconciled +{u.Stats.Added} ~{u.Stats.Modified} -{u.Stats.Removed}");
+                }
+                else if (c.IgnoreFilesChanged)
                     Console.Error.WriteLine($"an ignore file changed: run `codecompass update \"{root}\"` to index files it no longer ignores");
 
                 // Keep a long-running watch from accumulating unbounded segments/tombstones.
@@ -1034,7 +1046,7 @@ static int CmdWatch(string[] args)
                 // sessions reload the index but keep their C# model (see ServerContext.ApplyIncremental).
                 // A retry isn't a new edit: that edit counted when it arrived.
                 var fresh = retried is null ? paths : paths.Where(p => !retried.Contains(p)).ToList();
-                if (!RoslynCSharpAnalyzer.MayAffect(fresh) && !c.CSharpInputsChanged) wl.SourcesUnchanged();
+                if (!walked && !RoslynCSharpAnalyzer.MayAffect(fresh) && !c.CSharpInputsChanged) wl.SourcesUnchanged();
                 // Nothing written (a retry the share still didn't answer, say): no new generation for sessions to reload.
                 if (c.Untouched) wl.SkipBump(); else loadedGen = wl.Commit();
                 heldBack.Clear(); // only now: a write that throws keeps them held (and said at exit)
