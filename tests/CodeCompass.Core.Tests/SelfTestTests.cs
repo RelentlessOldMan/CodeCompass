@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using CodeCompass.Core.Indexing;
 using CodeCompass.Core.SelfTest;
 using CodeCompass.Core.Storage;
 using Xunit;
@@ -89,6 +90,48 @@ public class SelfTestTests
     [InlineData("No root matches: r. Known roots: C:\\r. Focus unchanged - pass a repo folder name", false)]
     public void FocusTook_ReadsTheFocusAnswer(string answer, bool expected) =>
         Assert.Equal(expected, AnswerChecks.FocusTook(answer));
+
+    // ---- picking inputs: from the whole repo, not the corner a query reaches first ----
+
+    // Fillers that every one-letter query matches, stored ahead of the name the rest of the repo calls.
+    private static TempRepo HotNameLast()
+    {
+        var repo = new TempRepo();
+        for (int i = 0; i < 120; i++)
+            repo.Write($"a{i:D3}/unit.c", $"int f{i:D3}_abcdefghijklmnopqrstuvwxyz(int x) {{ return x + {i}; }}\n" +
+                                         (i % 3 == 0 ? $"int caller_{i:D3}(void) {{ return zebra_hot_path(1); }}\n" : ""));
+        repo.Write("zz/last.c", "int zebra_hot_path(int v)\n{\n    return v * 2;\n}\n");
+        RepositoryIndexer.Build(repo.Root).Text.Dispose();
+        return repo;
+    }
+
+    [Fact]
+    public void SymbolSample_SpreadsOverTheWholeIndex()
+    {
+        using var repo = HotNameLast();
+        Assert.True(RepositoryIndexer.TryLoad(repo.Root, out var text, out var symbols));
+        using (text) using (symbols)
+        {
+            var all = symbols.Sample(10_000);
+            Assert.Contains(all, s => s.Name == "zebra_hot_path"); // more asked for than there are: every one
+            Assert.Equal(all.Count, all.Select(s => (s.RelativePath, s.Line, s.Name)).Distinct().Count());
+            var some = symbols.Sample(20);
+            Assert.InRange(some.Count, 15, 20);
+            Assert.True(some.Select(s => s.RelativePath).Distinct().Count() >= 15);
+            var order = all.Select((s, i) => (Key: (s.RelativePath, s.Line, s.Name), i)).ToDictionary(x => x.Key, x => x.i);
+            var at = some.Select(s => order[(s.RelativePath, s.Line, s.Name)]).ToList();
+            Assert.Contains(at, i => i < all.Count / 4);        // not twenty from one end:
+            Assert.Contains(at, i => i >= all.Count * 3 / 4);   // from the front and the back of the index alike
+        }
+    }
+
+    [Fact]
+    public void Picks_TheSweepGetsTheBroadestName_WhereverTheIndexStoresIt()
+    {
+        using var repo = HotNameLast();
+        var p = SelfTestRunner.Picks.From(repo.Root, 5)!;
+        Assert.Equal("zebra_hot_path", p.Broad[0].Name);
+    }
 
     // ---- the anonymized report's names ----
 

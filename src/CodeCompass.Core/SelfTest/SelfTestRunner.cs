@@ -213,8 +213,10 @@ public static class SelfTestRunner
 
     // ---- what to look up, picked from the repo's own index ----
 
-    private sealed class Picks
+    internal sealed class Picks
     {
+        private const int PoolSample = 4000;        // symbols sampled from the index for the pool
+        private const int BreadthCandidates = 200;  // names whose uses are counted to find the sweep's broadest
         public List<Symbol> Defs { get; } = new();      // defined once: find_definition, search_symbols
         public List<Symbol> Searches { get; } = new();  // a few uses each: search_code (all of them shown), find_references
         public List<Symbol> Callers { get; } = new();   // C# methods with a body: find_callees
@@ -234,17 +236,15 @@ public static class SelfTestRunner
                     .GroupBy(x => Path.GetExtension(x).ToLowerInvariant() is { Length: > 0 } e ? e : "(none)")
                     .OrderByDescending(g => g.Count()).Take(12).Select(g => $"{g.Key} {g.Count():N0}"));
 
-                // A pool across the alphabet (the symbol listing comes back in storage order, so one query would pick only
-                // names from one end of it), and then spread across file types so a mixed repo tests each language.
+                // A pool sampled evenly over the whole index (a query's matches come back in storage order, so they'd all
+                // be from one end of the repo), and then spread across file types so a mixed repo tests each language.
                 var pool = new List<Symbol>();
                 var seen = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var c in "abcdefghijklmnopqrstuvwxyz")
-                    foreach (var s in symbols.Find(c.ToString(), 60))
-                        if (s.Name.Length is >= 5 and <= 40 && IsIdentifier(s.Name) && seen.Add(s.Name)) pool.Add(s);
+                foreach (var s in symbols.Sample(PoolSample))
+                    if (s.Name.Length is >= 5 and <= 40 && IsIdentifier(s.Name) && seen.Add(s.Name)) pool.Add(s);
                 if (p.HasCSharp && !pool.Any(IsCSharpMethod))
-                    foreach (var c in "abcdefghijklmnopqrstuvwxyz")
-                        foreach (var s in symbols.Find(c.ToString(), 400))
-                            if (IsCSharpMethod(s) && s.Name.Length is >= 5 and <= 40 && IsIdentifier(s.Name) && seen.Add(s.Name)) pool.Add(s);
+                    foreach (var s in symbols.Sample(PoolSample * 10))
+                        if (IsCSharpMethod(s) && s.Name.Length is >= 5 and <= 40 && IsIdentifier(s.Name) && seen.Add(s.Name)) pool.Add(s);
                 var spread = Spread(pool);
 
                 foreach (var s in spread)
@@ -254,7 +254,7 @@ public static class SelfTestRunner
                 }
                 // Used in a few places: every hit of a search fits in one answer, so the definition's own line must be in it.
                 var breadth = new List<(Symbol Sym, int Hits)>();
-                foreach (var s in spread.Take(60))
+                foreach (var s in spread.Take(BreadthCandidates))
                 {
                     int hits = text.Search(s.Name, 1001, caseSensitive: true).Count;
                     breadth.Add((s, hits));

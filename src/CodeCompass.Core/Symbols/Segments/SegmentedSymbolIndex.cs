@@ -182,6 +182,36 @@ public sealed class SegmentedSymbolIndex : IDisposable
         return result;
     }
 
+    /// <summary>Up to <paramref name="count"/> symbols taken at an even stride over the whole index, so they come from
+    /// across the repo rather than from the end a query reaches first. A stride that lands on a tombstoned or ignored
+    /// path is skipped, so a few fewer may come back. No source reads.</summary>
+    public IReadOnlyList<Symbol> Sample(int count)
+    {
+        if (_pending is { Count: > 0 }) FlushPending();
+        long total = 0;
+        foreach (var seg in _segments) total += seg.Count;
+        var result = new List<Symbol>();
+        if (count <= 0 || total == 0) return result;
+        double stride = Math.Max(1.0, (double)total / count);
+        double next = 0;
+        long baseIndex = 0;
+        for (int segId = 0; segId < _segments.Count && result.Count < count; segId++)
+        {
+            var seg = _segments[segId];
+            _tombstones.TryGetValue(segId, out var tomb);
+            for (; next < baseIndex + seg.Count && result.Count < count; next += stride)
+            {
+                int i = (int)((long)next - baseIndex);
+                var path = seg.GetSymbolPath(i);
+                if (tomb is not null && tomb.Contains(path)) continue;
+                if (QueryIgnore.IsIgnoredPath(path)) continue;
+                result.Add(seg.GetSymbol(i));
+            }
+            baseIndex += seg.Count;
+        }
+        return result;
+    }
+
     public void Flush()
     {
         FlushPending();
