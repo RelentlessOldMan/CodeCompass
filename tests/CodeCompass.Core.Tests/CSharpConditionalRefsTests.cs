@@ -11,8 +11,8 @@ namespace CodeCompass.Core.Tests;
 // code in inactive #if/#elif branches is disabled text - invisible to semantic find_references / find_callees.
 // A Login method that calls GetAllGroups() only inside `#if NET6_0_OR_GREATER` reported ZERO such refs/callees,
 // silently. The honest fix: when a candidate .cs uses conditional compilation, treat the C# pass as incomplete
-// -> refs backfills lexical (so the guarded use is still found) AND discloses; callees discloses. (Work box
-// field report, independently reproduced, 2026-09-29.)
+// -> refs backfills lexical (so the guarded use is still found) AND discloses; callees discloses. (Field
+// report, independently reproduced, 2026-09-29.)
 public class CSharpConditionalRefsTests
 {
     [Theory]

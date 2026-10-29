@@ -4,8 +4,8 @@
   renders an HTML + text-summary report with ReportGenerator.
 
 .NOTES
-  This runs the FULL test suite under instrumentation - it is machine-saturating and MUST be
-  gated through ComputeWarden (see CLAUDE.md). Do not invoke inside a warden-BUSY window.
+  This runs the FULL test suite under instrumentation - it is machine-saturating, so run it when
+  the machine is otherwise idle.
 
   Usage:
     pwsh scripts/coverage.ps1                 # full run -> coverage/report/index.html + Summary.txt

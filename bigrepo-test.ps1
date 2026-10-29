@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  ON-DEMAND "repo of death" simulation: fabricate a work-scale firmware tree (~50k files, ~90 GB, with
+  ON-DEMAND big-repo simulation: fabricate a work-scale firmware tree (~50k files, ~90 GB, with
   10+ headers OVER 1 GB - the real repo's headline pathology), optionally stage it on a remote SMB share,
   then index + search it end to end while measuring time, throughput, and peak memory.
 
@@ -27,16 +27,16 @@
 .PARAMETER Scale       Count multiplier for the rest of the tree (default 1.0 ~= 50k files).
 .PARAMETER GenerateOnly  Fabricate (+ stage) only; skip the index/search test.
 .PARAMETER Cleanup     Delete the generated tree / staged copy / index cache when done. OFF by default -
-                       the death corpus is expensive to build and meant to be REUSED, so it is kept unless
+                       the generated corpus is expensive to build and meant to be REUSED, so it is kept unless
                        you explicitly ask to remove it.
 
 .EXAMPLE
-  # Full real-scale run against the mini-PC share (hours, ~90 GB both ends):
-  pwsh ./deathrepo-test.ps1 -Network -Dest \\yourserver\share\scratch
+  # Full real-scale run against a remote share (hours, ~90 GB both ends):
+  pwsh ./bigrepo-test.ps1 -Network -Dest \\yourserver\share\scratch
 
 .EXAMPLE
   # Quick local proof that a >1 GB header indexes at all (a few GB, minutes):
-  pwsh ./deathrepo-test.ps1 -Dest .corpus/_death_probe -TargetGB 3 -GiantHeaders 1 -Scale 0.05 -Keep
+  pwsh ./bigrepo-test.ps1 -Dest .corpus/_bigrepo_probe -TargetGB 3 -GiantHeaders 1 -Scale 0.05 -Keep
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Dest,
@@ -58,7 +58,7 @@ if ($GiantHeaderGB -ge 2) { throw "GiantHeaderGB must be < 2 (per-file streaming
 function Say($m) { Write-Host $m -ForegroundColor Cyan }
 
 # Where we generate: locally always (per-file writes over SMB are far too slow); with -Network we then copy.
-$genDir = if ($Network) { Join-Path $env:TEMP ("cc-death-" + [Guid]::NewGuid().ToString("N")) } else { $Dest }
+$genDir = if ($Network) { Join-Path $env:TEMP ("cc-bigrepo-" + [Guid]::NewGuid().ToString("N")) } else { $Dest }
 
 # Scale the big-header population to approach TargetGB: giants carry GiantHeaders*GiantHeaderGB; big headers
 # (avg ~0.055 GB) make up the rest. This is approximate - the generator reports the true size when done.
@@ -82,7 +82,7 @@ $genDir = (Resolve-Path $genDir).Path
 # Plant a unique marker at the very end of the largest giant header, to exercise positional search on a
 # multi-GB file. Appending opens at EOF - it does not rewrite the file.
 $giant = Get-ChildItem $genDir -Recurse -Filter "regmap_block*.h" | Sort-Object Length -Descending | Select-Object -First 1
-$marker = "ZZ_DEATH_MARKER_" + ([Guid]::NewGuid().ToString("N").Substring(0, 8))
+$marker = "ZZ_BIGREPO_MARKER_" + ([Guid]::NewGuid().ToString("N").Substring(0, 8))
 if ($giant) {
     Add-Content -Path $giant.FullName -Value "#define $marker 0x00000001" -Encoding ascii
     Say ("planted marker {0} at end of {1} ({2:N2} GB giant)" -f $marker, $giant.Name, ($giant.Length / 1GB))

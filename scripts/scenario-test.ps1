@@ -19,7 +19,7 @@
                                   OUTSIDE the repo: its target's content must never be indexed or served.
 
   Every step prints PASS/FAIL; the script exits nonzero if any step failed. Caches it created are removed.
-  Not heavy (small repos, a few processes) - no ComputeWarden lease needed.
+  Not heavy (small repos, a few processes).
 
 .PARAMETER Bin
   Folder holding CodeCompass.Cli.exe and CodeCompass.Mcp.exe. Default: plugin\bin next to this repo.

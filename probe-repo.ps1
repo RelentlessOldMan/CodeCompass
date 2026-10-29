@@ -4,7 +4,7 @@
   and emit an ANONYMIZED, Discord-sized report plus a rich local JSON for analysis.
 
 .WHY
-  The load has to run where the big real repo lives (e.g. the 90 GB tree on the work box);
+  The load has to run where the big real repo lives (e.g. a 90 GB tree on another machine);
   the ANALYSIS is better done by the agent from a compact bundle. This decouples the two:
   the script produces raw observations, you paste the fenced report into Discord, the agent
   reads the curve. The report is data-rich (peak RSS + plateau-vs-climb per query), NOT a

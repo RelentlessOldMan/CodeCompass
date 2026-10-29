@@ -5,11 +5,12 @@
   consolidated table + a rich local JSON. Read-only w.r.t. the repos (index caches live under LOCALAPPDATA).
 
 .NOTES
-  Machine-saturating (indexes many repos). Gate via ComputeWarden before running.
+  Machine-saturating (indexes many repos). Run it when the machine is otherwise idle.
 #>
 [CmdletBinding()]
 param(
-    [string[]]$Repos,                          # repo paths; default = git repos under C:\Playground
+    [string[]]$Repos,                          # repo paths; default = git repos next to this one
+    [string[]]$Exclude = @(),                  # folder names to leave out of the default list
     [string]$Exe,                              # CodeCompass.Cli.exe; default: plugin\bin next to this script
     [int]$CeilMB = 0,                          # kill a step above this RSS (0 => 60% physical RAM)
     [int]$IntervalMs = 200,
@@ -24,8 +25,8 @@ if (-not (Test-Path $Exe)) { throw "CLI exe not found: $Exe" }
 if ($CeilMB -le 0) { $CeilMB = [int]([math]::Floor(((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB) * 0.60)) }
 
 if (-not $Repos -or $Repos.Count -eq 0) {
-    $Repos = @(Get-ChildItem -Path 'C:\Playground' -Directory |
-        Where-Object { Test-Path (Join-Path $_.FullName '.git') -and $_.Name -ne 'TheMemoryKeeper_Backup_1' } |
+    $Repos = @(Get-ChildItem -Path (Split-Path $scriptDir -Parent) -Directory |
+        Where-Object { (Test-Path (Join-Path $_.FullName '.git')) -and $Exclude -notcontains $_.Name } |
         ForEach-Object { $_.FullName })
 }
 Write-Host "sweep: $($Repos.Count) repo(s)  ceil=${CeilMB}MB" -ForegroundColor Cyan
