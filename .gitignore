@@ -514,3 +514,6 @@ plugin/INSTALL.txt
 probe-*.json
 probe-*.txt
 sweep-*.json
+
+# Machine-specific notes for Claude Code sessions on one box; not part of the project
+CLAUDE.md
