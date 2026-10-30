@@ -339,6 +339,93 @@ program's digest is pinned too: `gen --lang cpp` at the default seed 1337 gives
 `2cf4070df906e79da20248902e948ebb3b76fe289f1baee186fc5f0d9f2c4e99` (unit test + bench), and a release that moves
 it says so in the CHANGELOG.
 
+## `firmware` — the firmware corpus (optional)
+
+The top-level `firmware` object is present with `gen --firmware`
+([docs/firmware-design.md](firmware-design.md), which also gives the rules the truth is built from). It is additive:
+`manifestVersion` stays 1, and the object is absent without `--firmware`. Paths in `bigHeaders`, `denseHeaders`,
+`wholeIncludedFromOutside` and the lists' contents are relative to `root`. Every other path is relative to the corpus
+root.
+
+```json
+"firmware": {
+  "root": "fw", "compileDb": "fw-build/compile_commands.json", "maxParseBytes": 20000000,
+  "treeSha256": "…", "cases": "fw-truth/cases.tsv",
+  "roots": ["Reset_Handler"], "compileDbUnion": "fw-build/compile_commands.world2.json",
+  "functionCases": "fw-truth/cases.functions.tsv",
+  "counts": { "units": 285, "families": 10000, "traps": 8, "cases": 229,
+              "bigHeadersKept": 10, "denseHeaders": 5, "wholeIncludedFromOutside": 1,
+              "pasteMacros": …, "forwardingMacros": …, "totalDefineLines": …,
+              "mustKeep": 17019, "mustDrop": 1197207, "open": 1118, "bytesBefore": …,
+              "definesDroppedMin": …, "definesDroppedMax": …, "bytesAfterMin": …, "bytesAfterMax": … },
+  "bigHeaders": ["big/regs_0.h", "…", "src/bigsrc_0.c"],
+  "denseHeaders": [{ "path": "dense/dense_5999.h", "edge": true }, …],
+  "wholeIncludedFromOutside": ["dense/shared_0.h"],
+  "hostile": [{ "path": "fw/misc/late.bin", "kind": "nul-late" }, …],
+  "builds": {
+    "main":  { "mustKeepDefines": { "path": "fw-truth/main.mustKeepDefines.txt", "sha256": "…", "count": 17019 },
+               "mustDropDefines": {…}, "openDefines": {…}, "mustKeepFiles": {…},
+               "mustKeepFunctions": {…}, "mustDropFunctions": {…}, "openFunctions": {…} },
+    "union": { "mustKeepDefines": { "path": "fw-truth/union.mustKeepDefines.txt", … }, … }
+  }
+}
+```
+
+- **`roots`**, **`compileDbUnion`** and **`functionCases`** (phase 2, 1.5.0; absent with `--fw-work`):
+  - `roots` are the functions execution starts from (the grader's entry points), always `["Reset_Handler"]`. Reach
+    starts from exactly these, plus what the assumed link itself keeps (its scripts' names and `KEEP`s, the prebuilt
+    object's undefined names, `retain`). The assumed link is C at `-ffunction-sections -fdata-sections`, then
+    `ld.lld --gc-sections -T fw/ld/fw.ld -L fw/ld`, with no `-u` and no `-e`. **An input section is kept whole once
+    any symbol in it is reached.** See firmware-design.md "Functions";
+  - `compileDbUnion` is a second compile db (world.c at `-DFW_WORLD=2`) that only the union build compiles;
+  - `functionCases` is a `name`, `case`, `site` TSV of the designed function cases.
+- **`treeSha256`** is a sha256 over every file under `root`, in ordinal order of its root-relative path (`/`
+  separators): the path, `\n`, the decimal byte length, `\n`, then the bytes. Check it before carving.
+- **`bigHeaders`** are the files longer than `maxParseBytes`; `.c` files count too.
+- **`denseHeaders`** lists every dense file, plus any file that one line would make dense (`edge: true`).
+  - An edge file may be dense (the 0.60 fixture) or not (the 0.5999 decoy).
+  - `counts.denseHeaders` counts only the dense ones.
+  - `counts.bigHeadersKept` counts every big or dense file.
+- **`wholeIncludedFromOutside`** lists the big or dense files that a unit outside `root` includes. They are kept
+  whole and are not carved.
+- **`builds`**: one build, `main`, in phase 1. `union` is the union of all builds (here the same lists).
+  - Each list is a file of names (or `root`-relative paths for `mustKeepFiles`), ordinal-sorted, one per line, LF.
+  - `sha256` and `count` are over the uncompressed text. A list over 100 MB is written as `.txt.gz`.
+  - **`mustKeepDefines`** (soundness: carve ⊇ it), **`mustDropDefines`** (precision: carve ∩ it = ∅) and
+    **`openDefines`** (undecided) cover every name defined in a carved file.
+  - **`mustKeepFunctions`** is empty (count 0) with `--fw-work`. Without it (phase 2, 1.5.0) it comes with
+    **`mustDropFunctions`** and **`openFunctions`**, and these three differ by build: `main` is the main db's world,
+    `union` adds `compileDbUnion`'s. Each build names its own `main.`/`union.` file.
+  - **`mustKeepFiles`** lists the files under `root` that define a must-keep name, and every file under `root` in a
+    unit's include closure. A file no build compiles and nothing includes is never listed, even if it defines a
+    must-keep name (Carver ruling, 1.5.3). An unlisted file is open (a carve may keep or drop it); this is the rule,
+    not a gap.
+- **`counts`** are exact, except the `…Min`/`…Max` pairs, which bound a sound carve: definesKept + definesDropped =
+  `totalDefineLines`.
+  - **`definesDroppedMin`** is the must-drop define lines in carved files, and **`definesDroppedMax`** every define
+    line there that is not must-keep.
+  - **`bytesAfterMin`** = `bytesBefore` − every non-must-keep define line, terminator included (the most a carve can
+    remove).
+  - **`bytesAfterMax`** = `bytesBefore` − the must-drop define lines without their terminators (the least a carve can
+    remove, blanking each line).
+- **`hostile`** lists the hostile files and their kinds: `empty`, `utf8-bom`, `latin1`, `unterminated-comment`,
+  `crlf`, `nul-early` (binary, not read), `nul-late` (text), `utf16`, `hidden` (under `fw/misc/`, and one under
+  `ext/include/` that a build includes), the size boundaries, and big headers
+  with no guard or with CRLF.
+- **`cases`** points to a TSV (`name\tcase\tsite`): each case's target name, its case kind, and where it is
+  exercised (relative to `root`; `../` for a site outside it, such as `../fw-build/compile_commands.json` for the
+  `-D` case, since 1.4.7).
+
+`verify` recomputes all of it from the tree, with the same engine gen used, and FAILs on any difference. It also
+checks the names' spelling against their class, the lists element by element, each cases row's site, each hostile
+path, and `work` (required when `_meta.gen.fwWork` is true or `fw/work/` exists). An unreadable compile db is a
+`FAIL firmware compileDb`. `treeSha256` doesn't cover `ext/` or the compile db. `verify --reference-carve <dir>` writes the
+carve the truth describes, so that it can be compiled. Sizes and generation times at each scale, the per-kind cases
+and the hostile-file list are in [firmware-design.md](firmware-design.md).
+
+With `--fw-work`, `firmware` also holds **`work`**, the work carve's construction counts (verify recounts them from the
+lists). Its fields are in [firmware-design.md](firmware-design.md#work-shape---fw-work---preset-firmware-work).
+
 ## Stable invariants consumers may rely on
 
 - `func_i` is defined in `src_i.c` and calls `func_{i-1}` (the linear chain). Keyed on the `src_<i>.c`

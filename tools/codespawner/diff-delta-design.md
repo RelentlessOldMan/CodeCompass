@@ -268,7 +268,10 @@ mutated sibling trees `B_v1/` + `B_v2/`, their standard `deltaKind:"diff"` delta
 `B-delta-v2.json`, and `B-conflict.json` (`deltaKind:"conflict-3way"`, `_meta.conflictTruthSha`). All edits
 land on **odd base lines** so every even line is a stable anchor (the stable-separator guarantee ⇒ each
 conflict region is one base line, region-level ≡ line-level); `f` = fraction of V2's edited lines that coincide
-with V1's. `conflictTruthSha` canonical form (identical discipline to `diffTruthSha`), two sections in this
+with V1's. `--files-changed N` picks N files, and each variant draws its own edits in them, so a picked file
+can come out with no edits on one side (more often a short file at a low density). Such a file is unchanged in
+that variant and absent from its delta, so each delta lists **up to N** files (the huge corpus's v1/v2 deltas list
+1,989 and 1,986 of 2,000). `conflictTruthSha` canonical form (identical discipline to `diffTruthSha`), two sections in this
 fixed order:
 
 | # | section | fields (US-joined) |
@@ -350,12 +353,12 @@ all counts are then explicit, so scaling is bypassed. The tree regenerates byte-
 so a replay of a corpus that used the default (scaled) `--dirs` placed files in different directories.
 `macroDensity` is present only when `--macro-density` was set: it caps giants at that many defines, while the
 default leaves them uncapped (filled to `maxHeaderMB`). Before 1.1.6 it was always recorded, so a replay capped
-every giant at 1M defines (a death-scale giant came back ~56 MB instead of ~1.2 GB) — in a pre-1.1.6
+every giant at 1M defines (a huge-scale giant came back ~56 MB instead of ~1.2 GB) — in a pre-1.1.6
 manifest a recorded `1000000` is ambiguous, so drop it when replaying unless the original run set it (e.g.
 `--preset memory`).
 
 ### Paged / sharded delta (`--shard-size N`)
-A death-scale 2-way delta can exceed what a consumer streams through `JsonDocument.Parse` whole. `--shard-size
+A huge-scale 2-way delta can exceed what a consumer streams through `JsonDocument.Parse` whole. `--shard-size
 N` (0 = monolithic default) switches the **2-way** delta to a paged transport:
 
 - **`<corpus>-delta.index.json`** — the `_meta` (incl a `shardSize: N` marker + the sharding-invariant
@@ -368,8 +371,8 @@ N` (0 = monolithic default) switches the **2-way** delta to a paged transport:
 
 ```json
 "shards": [
-  { "file": "death-delta.shard-000.json", "firstPath": "a/…", "lastPath": "f/…", "count": 1000, "shardSha": "…" },
-  { "file": "death-delta.shard-001.json", "firstPath": "g/…", "lastPath": "z/…", "count":  742, "shardSha": "…" }
+  { "file": "huge-delta.shard-000.json", "firstPath": "a/…", "lastPath": "f/…", "count": 1000, "shardSha": "…" },
+  { "file": "huge-delta.shard-001.json", "firstPath": "g/…", "lastPath": "z/…", "count":  742, "shardSha": "…" }
 ]
 ```
 

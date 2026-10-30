@@ -5,9 +5,9 @@ include, with the closure of every unit recorded in the manifest. It was asked f
 translation unit's include closure, and it is shaped by their answers (2026-10-15/16). The web is off by default,
 and a corpus without it is byte-identical to one made by 1.2.3.
 
-`--preset death` carries the web at full size. `--preset death-lite` carries all of death's shapes in about 0.5 GB:
-`--scale 0.05` (1/20 of death's source counts) with 3 giants of 32 MB, 1 big and 12 medium headers, and the web at
-death's counts with small headers.
+`--preset huge` carries the web at full size. `--preset huge-lite` carries all of huge's shapes in about 0.5 GB:
+`--scale 0.05` (1/20 of huge's source counts) with 3 giants of 32 MB, 1 big and 12 medium headers, and the web at
+huge's counts with small headers.
 
 ## Layout
 
@@ -50,7 +50,7 @@ Each register map, template and unit has LF, CRLF (`--web-crlf-frac`) or mixed l
 third line (`--web-mixed-eol-frac`). `cfg.h`, the aggregators and the `vx` pairs are LF.
 
 `--web-tail` register maps are instead **tail headers** of about `--web-tail-mb` MB. They have the same blocks and
-many more define lines; the knob sets the line count, so a tail comes out about 1.25× the knob (death's 48 MB tails
+many more define lines; the knob sets the line count, so a tail comes out about 1.25× the knob (huge's 48 MB tails
 are about 60 MB).
 
 ### What a unit holds
@@ -81,7 +81,7 @@ int web_u5(void) { int s = 0; s += u5_r1_t16(); ... s += web_u4(); return s; }
 
 A deep site (`--web-template-reach-frac`) includes a register map that the unit has not entered yet and whose
 chain reaches carriers, and only templates not instantiated there before. Instances are therefore made
-well past depth 8: about half of death-lite's instances are deeper than 8, and the deepest is at 46. A unit compiles
+well past depth 8: about half of huge-lite's instances are deeper than 8, and the deepest is at 46. A unit compiles
 cleanly with `clang -fsyntax-only` and the web's `-I` order.
 
 ## The closure (`closures` in the manifest)
@@ -101,9 +101,12 @@ These are the definitions, used by both the generator and verify:
 - **`templateInstances`** — template entries made while `TNAME` is defined.
 
 The generator computes all of these from its model of the files, not from the text it wrote. `verify` recomputes
-them from the text with its own preprocessor and compares all seven numbers. As a one-off check when the web was
-built (1.3.0, not run by verify or the tests), clang `-H` listed the same files, reads and depth for all 40 units of
-a small web and 30 of death-lite, once cycle re-entries were dropped; bytes are the sizes of the files it listed.
+them from the text with its own preprocessor and compares all seven numbers. When clang is installed,
+`scripts\bench.ps1` checks verify's preprocessor against a real compiler: for all 40 units of a small web, the headers
+clang `-H` opens give the same files, bytes, reads, readBytes and depth as the closure, once cycle re-entries are
+dropped (bytes and readBytes are the sizes of the files it lists). At 1.3.2 the same check passed by hand on a web
+with huge's web knobs (2000-line headers, 48 MB tails): its first 20 units, its deepest (72) and its largest read
+(889 MB). Neither verify nor the tests run clang.
 
 Every closure is at most 190 deep (gen refuses a web whose closures would go deeper), under the 200 nested includes
 gcc and clang allow. `--web-depth` is capped at 150 for that reason; a deep site's chain and the aggregators add
@@ -144,9 +147,9 @@ web uses:
 Function-like macros are never expanded, except `CAT(a, b)`, which pastes `a_b`. In headers it tracks only the names
 that conditions, computed includes and `TNAME` need, and the names their definitions use (every `#define` still
 counts). Each file is parsed once into
-events, so a closure costs its directives, not its bytes: death-lite's 3000 closures verify in about 20 s.
+events, so a closure costs its directives, not its bytes: huge-lite's 3000 closures verify in about 20 s.
 
-At death's settings the web is 1.65 GB of headers, with closures of about 350 MB at p50, 645 MB at p95 and
+At huge's settings the web is 1.65 GB of headers, with closures of about 350 MB at p50, 645 MB at p95 and
 850 MB at most per unit, and verify still recomputes all 3000 in about 11 s.
 
 ## Knobs
@@ -156,8 +159,8 @@ refused with the web, and so is a template knob with `--web-templates 0` or `--w
 
 `gen --from-profile ... --with-oracle` takes them too (since 1.3.1): the web is written at the root beside the
 profile's `d*` tree, which stays byte-identical, and its truth is added to the oracle manifest. This is how the
-real-shape death keeper carries the web. A `--preset` cannot be combined with `--from-profile`, so the knobs are spelled
-out; `death`'s are `--web-units 3000 --web-headers 3000 --web-depth 15 --web-window 18-28 --web-aggregators 40
+real-shape huge keeper carries the web. A `--preset` cannot be combined with `--from-profile`, so the knobs are spelled
+out; `huge`'s are `--web-units 3000 --web-headers 3000 --web-depth 15 --web-window 18-28 --web-aggregators 40
 --web-templates 60 --web-template-sites 4 --web-tail 24 --web-header-lines 2000 --web-tail-mb 48`.
 
 | Knob | Default | Shape |
