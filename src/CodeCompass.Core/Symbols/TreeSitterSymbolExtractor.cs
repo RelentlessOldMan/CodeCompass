@@ -19,6 +19,9 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<(Language Language, Query Query)?>> Shared = new();
     private readonly int _maxChars = CodeCompassConfig.MaxSymbolChars();
 
+    /// <summary>The symbol cap: a longer text is never parsed (see <see cref="Extract"/>).</summary>
+    public int MaxChars => _maxChars;
+
     public IReadOnlyList<Symbol> Extract(string relativePath, string text)
     {
         var def = LanguageRegistry.ForPath(relativePath);
@@ -49,7 +52,7 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
     /// data-blob guard - as opposed to parsing it and finding nothing? Mirrors Extract's guards exactly,
     /// so the indexer can COUNT symbol-skipped files (for honest go-to-definition zeros) without paying to
     /// parse them. False for a non-symbol language (nothing to skip) and for files that will be parsed.</summary>
-    public bool WouldSkipSymbols(string relativePath, string text)
+    public bool WouldSkipSymbols(string relativePath, ReadOnlySpan<char> text)
     {
         if (LanguageRegistry.ForPath(relativePath) is null) return false;
         if (text.Length > _maxChars) return true;
@@ -65,7 +68,7 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
     /// inside numeric or hex literals, so a giant numeric array has ~0% of them while real code (and
     /// even register #define headers, which carry macro-name letters) has plenty. One cheap pass.
     /// </summary>
-    public static bool IsLikelyNumericData(string text)
+    public static bool IsLikelyNumericData(ReadOnlySpan<char> text)
     {
         long nonHexLetters = 0, nonWhitespace = 0;
         foreach (char c in text)

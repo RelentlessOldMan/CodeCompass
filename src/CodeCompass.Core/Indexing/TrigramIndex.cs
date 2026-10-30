@@ -75,8 +75,7 @@ public sealed class TrigramIndex
         if (text.Length < 3) return Array.Empty<long>();
         try
         {
-            for (int i = 0; i + 3 <= text.Length; i++)
-                scratch.Add(text[i], text[i + 1], text[i + 2]);
+            AddAll(text, scratch);
             // Trim past the cap: one huge file left its worker's set at hundreds of MB for the rest of the build.
             return scratch.Drain(ScratchTrimAbove);
         }
@@ -86,6 +85,29 @@ public sealed class TrigramIndex
             scratch.Reset();
             throw;
         }
+    }
+
+    /// <summary>As <see cref="ComputeTrigrams(string, TrigramSet)"/>, but the result is in the set's own buffer (see
+    /// <see cref="TrigramSet.DrainReused"/>): valid until the set is next used, so it must be consumed first.</summary>
+    public static ReadOnlySpan<long> ComputeTrigramsReused(ReadOnlySpan<char> text, TrigramSet scratch)
+    {
+        if (text.Length < 3) return ReadOnlySpan<long>.Empty;
+        try
+        {
+            AddAll(text, scratch);
+            return scratch.DrainReused(ScratchTrimAbove);
+        }
+        catch
+        {
+            scratch.Reset();
+            throw;
+        }
+    }
+
+    private static void AddAll(ReadOnlySpan<char> text, TrigramSet scratch)
+    {
+        for (int i = 0; i + 3 <= text.Length; i++)
+            scratch.Add(text[i], text[i + 1], text[i + 2]);
     }
 
     internal const int ScratchTrimAbove = 1 << 20; // distinct trigrams; a large source file has well under 100k

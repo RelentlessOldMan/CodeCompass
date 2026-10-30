@@ -47,8 +47,34 @@ public sealed class TrigramSet
     /// <paramref name="trimAbove"/> distinct trigrams the buffers are shrunk, so one outlier file doesn't pin them.</summary>
     public long[] Drain(int trimAbove)
     {
+        var result = Count == 0 ? Array.Empty<long>() : new long[Count];
+        DrainInto(result, trimAbove);
+        return result;
+    }
+
+    /// <summary>As <see cref="Drain"/>, but into a result buffer the set keeps (valid until its next use), so a build
+    /// worker allocates no array per file. A file with more than <see cref="KeepDrained"/> distinct trigrams gets a
+    /// one-off array instead, so an outlier doesn't pin a big buffer.</summary>
+    public ReadOnlySpan<long> DrainReused(int trimAbove)
+    {
         int total = Count;
-        var result = total == 0 ? Array.Empty<long>() : new long[total];
+        long[] result;
+        if (total > KeepDrained) result = new long[total];
+        else
+        {
+            if (_drained.Length < total) _drained = new long[Math.Min((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)total), KeepDrained)];
+            result = _drained;
+        }
+        DrainInto(result, trimAbove);
+        return result.AsSpan(0, total);
+    }
+
+    private long[] _drained = Array.Empty<long>();
+    internal const int KeepDrained = 1 << 18; // 2 MB; a large source file has well under 100k distinct trigrams
+
+    private void DrainInto(long[] result, int trimAbove)
+    {
+        int total = Count;
         for (int i = 0; i < _asciiCount; i++)
         {
             int idx = _ascii[i];
@@ -63,7 +89,6 @@ public sealed class TrigramSet
             if (_ascii.Length > InitialAscii) _ascii = new int[InitialAscii];
             _other.TrimExcess();
         }
-        return result;
     }
 
     /// <summary>Empties the set without building a result - after a file failed mid-way (the build skips a file that ran

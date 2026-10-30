@@ -27,7 +27,7 @@ public sealed class SegmentBuilder
     public int DocCount => _paths.Count;
     public long ApproxBytes { get; private set; }
 
-    public void AddDocument(string relPath, long[] distinctTrigrams)
+    public void AddDocument(string relPath, ReadOnlySpan<long> distinctTrigrams)
     {
         int id = _paths.Count;
         _paths.Add(relPath);

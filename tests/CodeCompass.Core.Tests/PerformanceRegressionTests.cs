@@ -104,4 +104,47 @@ public class PerformanceRegressionTests
         Assert.True(at.Length > TrigramIndex.ScratchTrimAbove, $"ASCII outlier has only {at.Length} trigrams");
         Assert.True(scratch.RetainedCapacity < 8192, $"scratch kept capacity {scratch.RetainedCapacity:N0} after the ASCII outlier");
     }
+
+    // The build drains each file's trigrams into the set's own buffer (no array per file): same trigrams as Drain, the
+    // buffer reused for an ordinary file, and an outlier's one-off array never kept.
+    [Fact]
+    public void DrainReused_GivesDrainsTrigrams_ReusesItsBuffer_AndKeepsNoOutlier()
+    {
+        var rnd = new Random(20261030);
+        var text = string.Create(20_000, rnd, (span, r) => { for (int i = 0; i < span.Length; i++) span[i] = r.Next(9) == 0 ? (char)(0x4E00 + r.Next(50)) : (char)('a' + r.Next(26)); });
+        var expected = TrigramIndex.ComputeTrigrams(text, new TrigramSet());
+        Array.Sort(expected);
+
+        var scratch = new TrigramSet();
+        var first = TrigramIndex.ComputeTrigramsReused(text, scratch).ToArray();
+        Array.Sort(first);
+        Assert.Equal(expected, first);
+        // A fresh array per drain is ~8 bytes a trigram (over 2 MB for 20 drains of this text); the bound leaves room for
+        // the few KB of runtime noise a busy full-suite run adds, and is still far below one array per drain.
+        long perArray = first.Length * 8L;
+        long steady = Alloc(() => { for (int i = 0; i < 20; i++) _ = TrigramIndex.ComputeTrigramsReused(text, scratch); });
+        Assert.True(steady < perArray, $"20 reused drains allocated {steady:N0} bytes (one array is {perArray:N0})");
+
+        var big = string.Create(1_000_000, rnd, (span, r) => { for (int i = 0; i < span.Length; i++) span[i] = (char)r.Next(128); });
+        int outlier = TrigramIndex.ComputeTrigramsReused(big, scratch).Length;
+        Assert.True(outlier > TrigramSet.KeepDrained, $"outlier has only {outlier} trigrams");
+        long after = Alloc(() => { for (int i = 0; i < 20; i++) _ = TrigramIndex.ComputeTrigramsReused(text, scratch); });
+        Assert.True(after < perArray, $"20 ordinary drains after the outlier allocated {after:N0} bytes (one array is {perArray:N0})");
+    }
+
+    // The build's per-worker file buffers: reused up to their keep size, freed after a bigger file.
+    [Fact]
+    public void NativeBuffer_IsReusedUpToItsKeepSize_AndFreedPastIt()
+    {
+        using var buf = new CodeCompass.Core.Storage.NativeBuffer<byte>(1 << 20);
+        buf.Get(100_000).Fill(1);
+        int kept = buf.Capacity;
+        Assert.InRange(kept, 100_000, 1 << 20);
+        buf.Trim();
+        Assert.Equal(kept, buf.Capacity);
+        Assert.Equal(5_000_000, buf.Get(5_000_000).Length);
+        buf.Trim();
+        Assert.Equal(0, buf.Capacity);
+        Assert.Equal(10, buf.Get(10).Length);
+    }
 }

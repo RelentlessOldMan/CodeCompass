@@ -138,12 +138,12 @@ public static class LargeFileIndexer
     /// the remainder stays bounded (O(n), not O(n^2)) and the on-disk format matches byte-for-byte. Returns
     /// null for empty/binary/non-UTF-8 content (no line-based blocks), so the caller simply writes no sidecar
     /// and search falls back to a whole-file scan for that file - i.e. current behavior. Never throws.</summary>
-    public static LargeFileBlocks? BuildBlocks(byte[] bytes)
+    public static LargeFileBlocks? BuildBlocks(ReadOnlySpan<byte> bytes)
     {
         try
         {
             if (bytes.Length == 0) return null;
-            if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000)))) return null;
+            if (IgnoreRules.LooksBinary(bytes[..Math.Min(bytes.Length, 8000)])) return null;
             var (enc, bomLen) = DetectBom(bytes);
             bool utf8 = ReferenceEquals(enc, Encoding.UTF8) || bomLen == 3 || bomLen == 0;
             if (!utf8) return null; // non-UTF-8: 0x0A isn't a line boundary, so no positional index (matches streaming)
@@ -158,7 +158,7 @@ public static class LargeFileIndexer
             for (int off = 0; off < bytes.Length; off += ChunkBytes)
             {
                 int n = Math.Min(ChunkBytes, bytes.Length - off);
-                blockBuf.Write(bytes, off, n);
+                blockBuf.Write(bytes.Slice(off, n));
                 DrainFullBlocks(blockBuf, null, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: false);
             }
             DrainFullBlocks(blockBuf, null, blockList, ref blockStartByte, ref blockStartLine, ref seamTail, bomLen, force: true);

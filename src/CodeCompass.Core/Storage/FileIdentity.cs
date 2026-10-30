@@ -87,6 +87,27 @@ public readonly record struct FileIdentity(long Size, long MTimeTicks, long Chan
         return bytes;
     }
 
+    /// <summary>As <see cref="ReadAllBytes"/>, but into a buffer the caller keeps (a build worker's, so a file costs no
+    /// new array). The span is the bytes read, valid until the buffer is next used.</summary>
+    internal static ReadOnlySpan<byte> ReadAll(string path, NativeBuffer<byte> into, out FileIdentity before, out FileIdentity after)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.SequentialScan);
+        before = Of(fs.SafeFileHandle);
+        long len = fs.Length;
+        if (len > Array.MaxLength) throw new IOException($"file too large to read whole: {path}");
+        var bytes = into.Get((int)len);
+        int read = 0;
+        while (read < bytes.Length)
+        {
+            int n = fs.Read(bytes[read..]);
+            if (n == 0) break;
+            read += n;
+        }
+        var (m, c) = before.Known ? TimesOf(fs.SafeFileHandle) : default;
+        after = before with { MTimeTicks = m, ChangeTicks = c };
+        return bytes[..read]; // shrank while reading: the read size won't match
+    }
+
     /// <summary>The <c>\\?\</c> form of a full path (<c>\\?\UNC\server\share\...</c> for a UNC path), which lifts the
     /// 260-character limit for a raw CreateFileW.</summary>
     internal static string LongPath(string path)

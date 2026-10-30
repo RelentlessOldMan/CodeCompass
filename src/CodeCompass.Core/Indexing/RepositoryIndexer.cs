@@ -292,39 +292,52 @@ public static class RepositoryIndexer
                 }
 
                 // Whole-file path (normal files). Reserve the real processing footprint, not just the
-                // raw size: while trigrams are computed the raw bytes (1x) and the decoded UTF-16 string
+                // raw size: while trigrams are computed the raw bytes (1x) and the decoded UTF-16 text
                 // (2x) are both live, so peak is ~3x the file size. Reserving 3x makes the budget's
                 // RAM-scaling honest - a budget of N genuinely fits a file up to ~N/3, and a bigger one
                 // reserves the whole budget and runs solo (ByteBudget clamps the reservation, no deadlock).
+                long allocStart = OnFileDoneForTests is null ? 0 : GC.GetAllocatedBytesForCurrentThread();
                 long footprint = ProcessingFootprint(file.Size);
                 reads.Acquire(footprint);
                 inFlight[tid] = (file.RelativePath, file.Size, clock.ElapsedMilliseconds); // for the watchdog
                 try
                 {
                     OnFileStartForTests?.Invoke(file.RelativePath);
-                    byte[] bytes;
+                    ReadOnlySpan<byte> bytes;
                     Storage.FileIdentity before = default, after = default;
                     // OutOfMemory here is NOT an I/O error: it means the machine can't commit the read.
                     // Let it fall to the memory-pressure handler below (which reclaims and skips the file
                     // without aborting the whole build) rather than mislabeling it "transient I/O".
                     // The read handle is statted just before and after the read (LedgerTrust, ledger v2).
-                    try { bytes = Storage.FileIdentity.ReadAllBytes(file.FullPath, out before, out after); }
+                    try { bytes = Storage.FileIdentity.ReadAll(file.FullPath, worker.FileBytes, out before, out after); }
                     catch (OutOfMemoryException) { throw; }
                     // WARN, not Debug: a read failure silently drops the file from the index (the "N fewer
                     // files, no log" symptom over SMB); surface it at the default level so it's diagnosable.
                     catch (Exception ex) { Log.For(root).Warn($"NOT INDEXED - file unreadable (transient I/O over a share?): {file.RelativePath}: {ex.Message}"); return worker; }
+                    int length = bytes.Length;
                     FileState Record(string h) => LedgerTrust.Record(
-                        new ReadStamp(file.Size, mtime, before, after, readStart, DateTime.UtcNow.Ticks), isNetwork, null, 0, bytes.Length, h);
-                    if (IgnoreRules.LooksBinary(bytes.AsSpan(0, Math.Min(bytes.Length, 8000))))
+                        new ReadStamp(file.Size, mtime, before, after, readStart, DateTime.UtcNow.Ticks), isNetwork, null, 0, length, h);
+                    if (IgnoreRules.LooksBinary(bytes[..Math.Min(bytes.Length, 8000)]))
                     {
                         worker.Snapshot[file.RelativePath] = Record(FileState.BinaryHash);
                         return worker;
                     }
 
-                    var content = TextDecoder.FromBytes(bytes);
+                    // tree-sitter parses a string, so a file that may be parsed for symbols (a symbol language, and no more
+                    // bytes than the symbol cap allows chars) is decoded straight into one - the string IS its text, 2x like
+                    // the buffer, so the 3x reservation holds. Any other file is decoded into the worker's buffer.
+                    bool parsable = LanguageRegistry.ForPath(file.RelativePath) is not null && bytes.Length <= worker.Extractor.MaxChars;
+                    string? text = parsable ? TextDecoder.FromBytes(bytes) : null;
+                    ReadOnlySpan<char> content;
+                    if (text is not null) content = text;
+                    else
+                    {
+                        var chars = worker.FileText.Get(bytes.Length);
+                        content = chars[..TextDecoder.Decode(bytes, chars)];
+                    }
                     var hash = ContentHasher.Hash(bytes);
 
-                    var tg = TrigramIndex.ComputeTrigrams(content, worker.TrigramScratch);
+                    var tg = TrigramIndex.ComputeTrigramsReused(content, worker.TrigramScratch);
                     worker.Text.AddDocument(file.RelativePath, tg);
                     worker.TrigramPostings += tg.Length;
 
@@ -345,12 +358,14 @@ public static class RepositoryIndexer
                         // A symbol-bearing file whose symbols are skipped by a cap / data-blob guard is
                         // counted (not parsed) so a go-to-definition zero can be honest about it.
                         if (worker.Extractor.WouldSkipSymbols(file.RelativePath, content)) worker.SymbolSkipped++;
-                        else foreach (var s in worker.Extractor.Extract(file.RelativePath, content)) worker.Symbols.Add(s);
+                        // (A multi-byte file over the cap in bytes but not in chars is the rare one copied into a string here.)
+                        else foreach (var s in worker.Extractor.Extract(file.RelativePath, text ?? new string(content))) worker.Symbols.Add(s);
                     }
                     worker.Snapshot[file.RelativePath] = Record(hash);
                     worker.Bytes += bytes.Length;
                     Interlocked.Increment(ref progressFiles);
                     Interlocked.Add(ref progressBytes, bytes.Length);
+                    OnFileDoneForTests?.Invoke(file.RelativePath, GC.GetAllocatedBytesForCurrentThread() - allocStart);
 
                     if (worker.Text.ApproxBytes >= textBudget) FlushText(worker, dir, ref textSegCounter, textSegFiles);
                     if (worker.Symbols.ApproxBytes >= symBudget) FlushSymbols(worker, dir, ref symSegCounter, symSegFiles);
@@ -365,6 +380,7 @@ public static class RepositoryIndexer
                     // snapshot, so a later `codecompass update` re-indexes it once memory frees (self-heals).
                     // The read budget is normally sized to prevent this (it caps against available commit);
                     // this catches the case where the machine tightened further mid-build.
+                    worker.FileBytes.Trim(); worker.FileText.Trim(); // hand an outlier's buffers back before reclaiming
                     GC.Collect(2, GCCollectionMode.Aggressive, blocking: true);
                     worker.MemorySkipped++;
                     Log.For(root).Warn($"NOT INDEXED - skipped under memory pressure (machine near its commit limit): " +
@@ -372,7 +388,12 @@ public static class RepositoryIndexer
                         $"CODECOMPASS_READ_BUDGET_MB, then re-run 'codecompass update' to pick it up.");
                     return worker;
                 }
-                finally { inFlight.TryRemove(tid, out var _gone); reads.Release(footprint); }
+                finally
+                {
+                    worker.FileBytes.Trim(); worker.FileText.Trim();
+                    OnBuffersTrimmedForTests?.Invoke(file.RelativePath, worker.FileBytes.Capacity + 2L * worker.FileText.Capacity);
+                    inFlight.TryRemove(tid, out var _gone); reads.Release(footprint);
+                }
             },
             worker => idleWorkers.Add(worker));
             ct.ThrowIfCancellationRequested(); // cancelled during, or right after, the loop (before the persist below)
@@ -413,7 +434,7 @@ public static class RepositoryIndexer
             // (including OperationCanceledException on a re-point/shutdown) - otherwise a cancelled build
             // would leak the dedicated watchdog thread and the progress Timer.
             sw.Stop();
-            foreach (var w in workers) w.Extractor.Dispose(); // the tree-sitter parsers (native), however the build ended
+            foreach (var w in workers) { w.Extractor.Dispose(); w.FileBytes.Dispose(); w.FileText.Dispose(); } // native, however the build ended
             progressTimer?.Dispose();
             buildDone.Set();           // stop the watchdog thread
             watchdog.Join(1000);
@@ -517,6 +538,10 @@ public static class RepositoryIndexer
     // throws OutOfMemoryException (to hit the per-file memory backstop). StallWarnMsForTests shortens the
     // watchdog window below the 5 s config floor so those tests run in well under a second.
     internal static Action<string>? OnFileStartForTests;
+    // Runs on the worker when a whole-read file is indexed, with what that file allocated on the worker's thread.
+    internal static Action<string, long>? OnFileDoneForTests;
+    // Runs on the worker after a whole-read file, with the native bytes its file buffers still hold.
+    internal static Action<string, long>? OnBuffersTrimmedForTests;
     // Runs as Compact starts merging (a test holds a compaction there).
     internal static Action? OnCompactForTests;
     /// <summary>Test seam (null in production): runs as Update starts on a file the walk found new or changed.</summary>
@@ -633,6 +658,12 @@ public static class RepositoryIndexer
         public Dictionary<string, FileState> Snapshot { get; } = new(StringComparer.Ordinal);
         public TreeSitterSymbolExtractor Extractor { get; } = new();
         public readonly TrigramSet TrigramScratch = new(); // reused per file (this worker's thread only) to avoid a per-file set alloc
+        // The file's bytes and its decoded text, kept for the next file up to 1 MB of file (3 MB of native memory: a char is
+        // two bytes) and freed right after a bigger one: fresh arrays per file were large-object garbage, and the 88 GB
+        // share's index peaked at 6-7 GB waiting for it. With TrigramScratch's drain buffer, ~5 MB a worker outside the budget.
+        public readonly NativeBuffer<byte> FileBytes = new(KeepFileBytes);
+        public readonly NativeBuffer<char> FileText = new(KeepFileBytes);
+        private const int KeepFileBytes = 1 << 20;
         public long Bytes;
         public long TrigramPostings; // sum of per-doc distinct-trigram counts (deterministic total)
         public int SymbolSkipped;    // symbol-language files indexed for text but with NO symbols extracted
