@@ -1,11 +1,11 @@
 # Ground-Truth Manifest — Schema v1 (+ v2 for C++)
 
 `manifestVersion: 1`. This is the **contract** that couples the generator to its consumers
-(CodeCompass `-Verify`, CodeCarver's oracle, and CodeSpawner's own `verify`). The corpus bytes may
-change between generator versions; **this schema is the stable coupling point.** Both consumers MUST
+(indexers, carvers, diff tools, and CodeSpawner's own `verify`). The corpus bytes may
+change between generator versions; **this schema is the stable coupling point.** Every consumer MUST
 hard-assert `_meta.manifestVersion` before trusting a manifest.
 
-> **Versioning rule** (agreed across consumers): *additive optional fields never bump `manifestVersion`;
+> **Versioning rule**: *additive optional fields never bump `manifestVersion`;
 > renames, removals, or semantic changes do.* New optional fields (`_meta.populations`, `_meta.gen`,
 > `expectedMiss`, `dupGroups`, and the **oracle-v1** block — `_meta.roots` / `_meta.indirectTruthSha` /
 > `_meta.totalOracleBytes`, per-symbol `indirectEdges` / `bytes`, and non-linear DAG `edges`) all ship at
@@ -56,9 +56,9 @@ The generator writes the manifest as a sibling of the corpus directory: for `--o
 | `manifestVersion` | Schema version: `1` for a C corpus (everything above the v2 section), `2` for a C++ corpus ([Manifest v2](#manifest-v2-c-gen---lang-cpp)). Consumers assert on it. |
 | `generatorVersion` | CodeSpawner version that emitted the corpus. |
 | `seed` | RNG seed. Consumers should assert this matches the corpus they think they have. |
-| `corpusRoot` | The absolute `--out` dir at generation time. **Informational only** — do NOT resolve paths against it (the corpus may have been copied/staged on an SMB share). Resolve against the corpus dir you are actually reading. |
+| `corpusRoot` | The absolute `--out` dir at generation time. **Informational only** — do NOT resolve paths against it (the corpus may have been copied or moved). Resolve against the corpus dir you are actually reading. |
 | `populations` | *(optional)* Per-population shape stats: `{ "<name>": {fileCount, totalBytes, identCount} }`. Lets a consumer assert the corpus is the shape it expects *before* trusting any pass/fail. Present for the header bands (`giant-headers`/`big-headers`/`med-headers`/`dense-band`), the pathology populations (`broad-token`/`long-lines`/`encoding-mix`/`pathological-symbols`/`dup-content`), and the mutate-seed pools (`mutate-shrink-seed`/`mutate-restream-seed`) when those knobs are active. Additive — absent on older manifests. |
-| `gen` | *(optional)* The effective generation knobs — a `{ "<knob>": <value> }` block recording the full recipe (scale, seed, all count/size knobs, and every oracle knob) needed to regenerate this corpus byte-identically. Emitted on every plain `gen` manifest. For `--from-profile` (the profile itself is the recipe) it holds only the `--web-*` knobs when there is an include web (since 1.3.1), and is absent otherwise. Absent on manifests from before 1.1.1. Additive. |
+| `gen` | *(optional)* The effective generation knobs — a `{ "<knob>": <value> }` block recording the full recipe (scale, seed, all count/size knobs, and every oracle knob) needed to regenerate this corpus byte-identically. Emitted on every plain `gen` manifest. For `--from-profile` (the profile itself is the recipe) it holds only the `--web-*` knobs when there is an include web, and is absent otherwise. Absent on manifests from before 1.1.1. Additive. |
 | `roots` | *(optional, oracle-v1)* Array of **symbol-name strings** — the declared call-graph entry points. The reachable set is `BFS(roots)` over `edges`. Present when the oracle overlay runs (`--with-oracle`), and always in a v2 manifest (where reachability adds the v2 edge kinds; see Manifest v2). See [`_meta.roots` + reachability](#_metaroots--reachability-oracle-v1). |
 | `indirectTruthSha` | *(optional, oracle-v1)* Lowercase-hex SHA-256 **component digest** of the indirect-edge ground truth + `roots`, over a LOCKED canonical byte-form. Deliberately separate from the frozen primary `prevTruthSha`; a rewired indirect edge or moved root trips this. Present iff any symbol has `indirectEdges`. See [`indirectTruthSha`](#indirecttruthsha--the-canonical-component-digest-oracle-v1). |
 | `includeDirs` | *(optional, include web)* The `-I` search order, relative to the corpus root (`["inc", "inc_vnd"]`), under which every `closures` unit was preprocessed. Present iff `closures` is. See [`closures`](#closures--include-closures-include-web-optional). |
@@ -67,7 +67,7 @@ The generator writes the manifest as a sibling of the corpus directory: for `--o
 ### Notable symbols
 
 - **`hot_shared`** — a hot symbol called from every giant-including `.c`; its `refs` are the aggregate-query expected-set.
-- **`broad_hot`** — (`broad-token` preset) one def, a large expected ref-set: every hot-token call site across the 2–8 MB carrier band, seeded at deterministic offsets including near-EOF. This is a `find_references`-at-scale expected-set *and* a block-selective ("sidecar") read-amplification test.
+- **`broad_hot`** — (`broad-token` preset) one def, a large expected ref-set: every hot-token call site across the 2–8 MB carrier band, seeded at deterministic offsets including near-EOF. This is a `find_references`-at-scale expected-set *and* a block-selective read-amplification test.
 - **`vendor_gated`** — the negative case (see `unreachableRefs`).
 
 ## `symbols`
@@ -84,13 +84,13 @@ A map keyed by **symbol name**. The symbol name — not the path — is the **se
 | `indirectEdges` | *(optional, oracle-v1)* Address-taken / indirect-call ground truth, one record per edge. See [`indirectEdges`](#indirectedges--indirect-call-ground-truth-oracle-v1). |
 | `unreachableRefs` | *(optional)* Reference sites that are resolvable **only if a missing macro is known** — see below. |
 | `templateHead` / `includedVia` | *(optional, include web)* On a template instance only, always together: the instance's primary head (`"inc/tmpl_T.h:<line>"`) and the template header it is in. Its `def` is the unit's `#include` line that led there; its name is token-pasted and never appears at the def. See [`closures`](#closures--include-closures-include-web-optional). |
-| `defNotLiteral` | *(optional, bool, since 1.3.2)* `true` on a template instance: its `def` is not the name's literal text, but its `refs` are real call sites an indexer is expected to resolve (unlike `expectedMiss`). Only ever `true`, and only beside `templateHead`; verify refuses anything else (exit 2). **Not** part of `truthSha`, so adding it changed no digest. Manifests from 1.3.0/1.3.1 leave it off. |
+| `defNotLiteral` | *(optional, bool)* `true` on a template instance: its `def` is not the name's literal text, but its `refs` are real call sites an indexer is expected to resolve (unlike `expectedMiss`). Only ever `true`, and only beside `templateHead`; verify refuses anything else (exit 2). **Not** part of `truthSha`, so adding it changed no digest. Manifests from 1.3.0/1.3.1 leave it off. |
 | `expectedMiss` | *(optional, bool)* `true` = a lexical / preprocessor-blind indexer is EXPECTED not to resolve this symbol. The name is macro-synthesized (token-paste `##`) and never appears literally in the source; `def` points at the generator-macro invocation site. Not finding it is **correct**, not a recall failure — the honest-miss dual of `unreachableRefs`. See below. |
 
 ### Paths
 
 - All paths in `def`/`refs`/`unreachableRefs` are **repo-relative to the corpus root**, using
-  **forward slashes**. One manifest therefore validates a local copy *and* an SMB copy of the same seed
+  **forward slashes**. One manifest therefore validates any copy of the same seed
   without any basename gymnastics.
 - The line number is 1-based and points at the line containing the symbol token
   (`func_i(` for a definition or a call).
@@ -181,9 +181,8 @@ declared exactly once, with the same `def`, `templateHead` and `includedVia`. Ad
 
 ## Oracle-v1 fields (non-linear DAG + indirect edges + byte mass)
 
-These ship at `manifestVersion: 1` (additive). They are emitted by the `--with-oracle` overlay and are
-**locked with CodeCarver + CodeCompass** (3-way agreement, 2026-09-30). Reproduce the digest against the
-shipped golden vector (below) before trusting a recompute — the same gate that locked `prevTruthSha`.
+These ship at `manifestVersion: 1` (additive). They are emitted by the `--with-oracle` overlay. Their format is
+fixed: a change bumps `manifestVersion`. Reproduce the golden vector (below) before trusting a recompute.
 
 ### `_meta.roots` + reachability (oracle-v1)
 
@@ -209,13 +208,13 @@ Per-symbol array; each record is an indirect (address-taken) edge from the ownin
 | Field | Meaning |
 |---|---|
 | `target` | Callee symbol name. Resolved targets are named `itgt_<k>` (defined in `_oracle/indirect_targets.c`); external ones `iext_<k>`. |
-| `via` | The C construct the address is taken through. **Exactly one of** `fnptr` \| `vector-table` \| `init_array` (hyphenation is significant — both oracles bucket on this string). `vector-table` is the C flavor; a C++ vtable is a **v2** concern, not this. |
+| `via` | The C construct the address is taken through. **Exactly one of** `fnptr` \| `vector-table` \| `init_array` (hyphenation is significant — consumers bucket on this string). `vector-table` is the C flavor; a C++ vtable is a **v2** concern, not this. |
 | `dispatched` | `true` = the corpus actually calls through the pointer (`acc += slot(x);`). `false` = the address is taken but **never invoked**. |
 | `resolved` | `true` = `target` is a declared symbol in this manifest (closed-world). `false` = external — `target` is deliberately NOT a symbol. |
 
 Two properties a carver oracle exercises:
 - **Soundness** — a `dispatched` indirect edge is a real call; dropping its (reachable) target breaks soundness. Keep all dispatched targets.
-- **Indirection tax** — a **reachable source** with a `dispatched: false` edge is a *legitimate over-keep*: address-taken-but-never-called is indistinguishable from a real target without whole-program dispatch analysis, so a sound carver keeps it. As of **1.0.9** the generator guarantees ≥1 such edge from a reachable function when `--oracle-indirect ≥ 2` (earlier builds welded `dispatched:false` to dead sources, leaving the tax quadrant empty).
+- **Indirection tax** — a **reachable source** with a `dispatched: false` edge is a *legitimate over-keep*: address-taken-but-never-called is indistinguishable from a real target without whole-program dispatch analysis, so a sound carver keeps it. The generator guarantees ≥1 such edge from a reachable function when `--oracle-indirect ≥ 2`.
 
 Verifier checks: `resolved ⇒ target is a symbol`; `unresolved ⇒ target is NOT a symbol`.
 
@@ -371,12 +370,12 @@ root.
 }
 ```
 
-- **`roots`**, **`compileDbUnion`** and **`functionCases`** (phase 2, 1.5.0; absent with `--fw-work`):
+- **`roots`**, **`compileDbUnion`** and **`functionCases`** (the function truth; absent with `--fw-bulk`):
   - `roots` are the functions execution starts from (the grader's entry points), always `["Reset_Handler"]`. Reach
     starts from exactly these, plus what the assumed link itself keeps (its scripts' names and `KEEP`s, the prebuilt
     object's undefined names, `retain`). The assumed link is C at `-ffunction-sections -fdata-sections`, then
     `ld.lld --gc-sections -T fw/ld/fw.ld -L fw/ld`, with no `-u` and no `-e`. **An input section is kept whole once
-    any symbol in it is reached.** See firmware-design.md "Functions";
+    any symbol in it is reached.** See firmware-design.md "Function truth";
   - `compileDbUnion` is a second compile db (world.c at `-DFW_WORLD=2`) that only the union build compiles;
   - `functionCases` is a `name`, `case`, `site` TSV of the designed function cases.
 - **`treeSha256`** is a sha256 over every file under `root`, in ordinal order of its root-relative path (`/`
@@ -388,17 +387,17 @@ root.
   - `counts.bigHeadersKept` counts every big or dense file.
 - **`wholeIncludedFromOutside`** lists the big or dense files that a unit outside `root` includes. They are kept
   whole and are not carved.
-- **`builds`**: one build, `main`, in phase 1. `union` is the union of all builds (here the same lists).
+- **`builds`**: the define lists have one build, `main`, and `union` is the union of all builds (here the same lists).
   - Each list is a file of names (or `root`-relative paths for `mustKeepFiles`), ordinal-sorted, one per line, LF.
   - `sha256` and `count` are over the uncompressed text. A list over 100 MB is written as `.txt.gz`.
   - **`mustKeepDefines`** (soundness: carve ⊇ it), **`mustDropDefines`** (precision: carve ∩ it = ∅) and
     **`openDefines`** (undecided) cover every name defined in a carved file.
-  - **`mustKeepFunctions`** is empty (count 0) with `--fw-work`. Without it (phase 2, 1.5.0) it comes with
+  - **`mustKeepFunctions`** is empty (count 0) with `--fw-bulk`. Without it (the function truth) it comes with
     **`mustDropFunctions`** and **`openFunctions`**, and these three differ by build: `main` is the main db's world,
     `union` adds `compileDbUnion`'s. Each build names its own `main.`/`union.` file.
   - **`mustKeepFiles`** lists the files under `root` that define a must-keep name, and every file under `root` in a
     unit's include closure. A file no build compiles and nothing includes is never listed, even if it defines a
-    must-keep name (Carver ruling, 1.5.3). An unlisted file is open (a carve may keep or drop it); this is the rule,
+    must-keep name. An unlisted file is open (a carve may keep or drop it); this is the rule,
     not a gap.
 - **`counts`** are exact, except the `…Min`/`…Max` pairs, which bound a sound carve: definesKept + definesDropped =
   `totalDefineLines`.
@@ -414,7 +413,7 @@ root.
   with no guard or with CRLF.
 - **`cases`** points to a TSV (`name\tcase\tsite`): each case's target name, its case kind, and where it is
   exercised (relative to `root`; `../` for a site outside it, such as `../fw-build/compile_commands.json` for the
-  `-D` case, since 1.4.7).
+  `-D` case).
 
 `verify` recomputes all of it from the tree, with the same engine gen used, and FAILs on any difference. It also
 checks the names' spelling against their class, the lists element by element, each cases row's site, each hostile
@@ -423,8 +422,8 @@ path, and `work` (required when `_meta.gen.fwWork` is true or `fw/work/` exists)
 carve the truth describes, so that it can be compiled. Sizes and generation times at each scale, the per-kind cases
 and the hostile-file list are in [firmware-design.md](firmware-design.md).
 
-With `--fw-work`, `firmware` also holds **`work`**, the work carve's construction counts (verify recounts them from the
-lists). Its fields are in [firmware-design.md](firmware-design.md#work-shape---fw-work---preset-firmware-work).
+With `--fw-bulk`, `firmware` also holds **`work`**, the bulk carve's construction counts (verify recounts them from the
+lists); the key keeps its older name. Its fields are in [firmware-design.md](firmware-design.md#bulk-shape---fw-bulk---preset-firmware-bulk).
 
 ## Stable invariants consumers may rely on
 
@@ -437,3 +436,15 @@ lists). Its fields are in [firmware-design.md](firmware-design.md#work-shape---f
   is exactly `BFS(roots)` over `edges` (no separate reachability field to trust).
 - `indirectTruthSha` reproduces byte-for-byte from `indirectEdges` + `roots` via the locked canonical form;
   prove your recompute against the golden `fa9432bd…` (`digest-selftest`) before relying on it.
+
+## Reading older manifests
+
+- Manifests from before 1.0.9 may have no `dispatched: false` edge from a reachable source, so the indirection-tax
+  quadrant can be empty.
+- Firmware manifests from before 1.4.7 give the `-DKDV_9=KDV_VAL` case's site as the corpus-relative
+  `fw-build/compile_commands.json`, not `../fw-build/compile_commands.json`.
+- Firmware manifests from before 1.4.11 have the bulk carve's use-tree counts at the top level of `firmware.work`,
+  and no `tree`.
+- Firmware manifests from before 1.5.0 have no function truth: no `roots`, `compileDbUnion` or `functionCases`.
+- Manifests from before 1.1.5 record `_meta.gen.dirs` unscaled, so replaying one that used the default (scaled)
+  `--dirs` places files in different directories.

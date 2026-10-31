@@ -1,13 +1,14 @@
-# C++ language profile + manifest v2 — design
+# C++ profile and manifest v2
 
-**Status:** LOCKED 2026-10-14 (every consumer question answered). Shipped in 1.2.0, corrected in 1.2.1; see
-"As built" below for the additions and the few places the build narrows a decision.
+`gen --lang cpp` writes a self-contained C++ program with a known call graph and a `manifestVersion: 2`
+manifest. The decisions D1–D10 define the contract; "As built" below describes the generated program, the
+additions to the contract, and the few places the generator narrows a decision.
 
 ## Why
 
-CodeCarver's hardest reachability cases are C++: virtual dispatch, overrides, and templates. Today they are
-checked only by ad-hoc real-repo build sweeps (tinyxml2/pugixml/fmt/simdjson), never against a known call
-graph. Oracle v1 gave C a known direct + indirect graph; this extends that to C++. It is the change the
+The hardest reachability cases for a carver (CodeCarver, for example) are C++: virtual dispatch, overrides,
+and templates. Without a generated corpus they can be checked only by building real repos, never against a
+known call graph. Oracle v1 gives C a known direct + indirect graph; this extends that to C++. It is the change the
 schema doc reserves `manifestVersion: 2` for, because C++ needs a symbol identity and an edge meaning that
 v1 readers would misread.
 
@@ -35,14 +36,14 @@ tell symbols apart. Each symbol gains `kind`: `function` | `method` | `ctor` | `
 `instance`. A `template` symbol is the uninstantiated definition; each `instance` symbol is one concrete
 instantiation, and `instanceOf` names its template.
 
-Each symbol also carries `simpleName` (`m_2` for `ns_1::Cls_4::m_2`). Name-keyed indexers (CodeCompass keys
-its table on the simple name and searches refs by whole word) map key → `simpleName`. The generator reuses
+Each symbol also carries `simpleName` (`m_2` for `ns_1::Cls_4::m_2`). A name-keyed indexer (one that keys
+its table on the simple name and searches refs by whole word) maps key → `simpleName`. The generator reuses
 simple names on purpose (the same `m_2` in several classes, as overrides do), so a name-keyed tool sees
 real collisions. Those collisions are derivable by grouping on `simpleName`, so no separate list is needed.
 
 `def` is the line of the **definition with a body**, never a bodiless declaration: for a method declared
 in-class and defined out-of-class, the out-of-class `void Cls_4::m_2() {` line; for an in-class inline
-definition, that line. (Matches CodeCompass's extractor, 2026-10-14.)
+definition, that line. This matches an extractor that records only definitions with a body.
 
 ### D3. Virtual dispatch: a call site records both sound and precise target sets
 
@@ -85,8 +86,9 @@ explicit `x.~Cls_4()` call is a ref site of the dtor. A static-storage object's 
 A template body is reachable only through its instances. `edges` from an `instance` point at other
 instances, never at the template. Each template has a fixed, generator-chosen instance set, and the
 manifest lists them all, so an "instantiated but unreachable" instance is a real dead-code population.
-Unused templates (no instances) are a population a carver can drop entirely. Truth for a per-template carver
-(CodeCarver grades per source definition): a template is reachable iff at least one of its instances is.
+Unused templates (no instances) are a population a carver can drop entirely. Truth for a carver that grades
+per source definition (a template is one definition to it): a template is reachable iff at least one of its
+instances is.
 
 ### D6. Roots
 
@@ -98,9 +100,9 @@ over `edges ∪ implicitEdges ∪ virtualEdges.cha ∪ memberPtrEdges` (sound) o
 
 ### D7. Component digest
 
-A new `_meta.cppTruthSha` over a locked canonical form (US/RS/GS, ordinal sort, dedup, the same
+A new `_meta.cppTruthSha` over a fixed canonical form (US/RS/GS, ordinal sort, dedup, the same
 construction as `indirectTruthSha`): virtual-edge records, then `implicitEdges`, then `memberPtrEdges`, then
-`kind`/`instanceOf` records, then `staticInitRoots`. It ships with a golden vector in `digest-selftest`. `prevTruthSha` and
+`kind`/`instanceOf` records, then `staticInitRoots`. Its golden vector is under "As built". `prevTruthSha` and
 `indirectTruthSha` keep their exact current definitions.
 
 ### D8. Knobs (all classic-gen; `--lang cpp` required)
@@ -128,7 +130,7 @@ The `&Cls_4::m_2` token names the method, so that line is recorded in `m_2`'s `r
 function name is in v1). The `->*` / `.*` call has no name token: no ref site, an expected miss for a
 name-based indexer that `dispatched` lets it classify.
 
-## As built (1.2.0, corrected in 1.2.1)
+## As built
 
 `gen --lang cpp --out <dir>` writes ONLY a self-contained C++ program under `<dir>/cpp/` plus
 `<dir>-manifest.json` (v2). The C population knobs (`--scale`, `--with-oracle`, `--preset`, …) are refused with
@@ -170,7 +172,7 @@ pointers that are null, and method↔free-function cycles exist. All truth is st
   member of a concrete class unrelated to it and never constructed in reachable code (dead code may construct
   it), which is then live only because the subclass's complete objects contain it. (Skipped when no such pair
   exists — in practice at `--cpp-depth 0`, and at `--cpp-depth 16` with the default 12 classes — or when it would leave
-  fewer than two such classes for the dispatch-only construction; 1.2.2.)
+  fewer than two such classes for the dispatch-only construction.)
 - Templates alternate: a function template `tf_t` (symbol `ns::tf_t`, instance `ns::tf_t<int>`) and a class
   template `Tmpl_t` with one method (symbol `ns::Tmpl_t::m_0`, instance `ns::Tmpl_t<int>::m_0`). An instance's
   `def` is its template's body line. With two or more templates, the last is never used. Template 0 gets
@@ -182,13 +184,13 @@ pointers that are null, and method↔free-function cycles exist. All truth is st
 **Additions to the contract** (all additive, v2 only):
 1. `pure: true` on a pure virtual method (absent otherwise). It has no body, so its `def` is the
    `virtual void m_0() = 0;` declaration line: the one exception to the D2 def rule. (A body-only extractor
-   finds no def for it; `pure` lets it classify that as a known gap. Asked for by CodeCompass, 2026-10-14.)
+   finds no def for it; `pure` lets it classify that as a known gap.)
 2. `_meta.classes`: `{ "ns::Cls_4": ["ns::Cls_1", "ns::Mix_0"], … }`, every class and mixin with its direct
    bases. `verify` uses it to check that each `cha` target sits at or below `static`'s class.
 3. `staticInitRoots` lists BOTH the ctor and the dtor of each static-storage object (the dtor runs at exit;
    D6 named only the ctor). The `ns::Cls_4 g_static_0;` line is a ref site of the ctor.
 4. `lang: "cpp"` in `_meta`, and the `--cpp-*` / oracle knobs in `_meta.gen`.
-5. **Class symbols** (`kind: "class"`, every class and mixin; agreed with CodeCompass and CodeCarver, 2026-10-14).
+5. **Class symbols** (`kind: "class"`, every class and mixin).
    Key `ns_1::Cls_4`, simpleName `Cls_4`, `def` = the `class Cls_4 … {` line. Its `refs` are EVERY other line
    where the name appears as a whole word outside strings and `#include`s: forward declarations, base lists,
    receiver-pointer and member declarations, `Cls_4::` qualifiers on out-of-class bodies, ctor and dtor
@@ -196,9 +198,9 @@ pointers that are null, and method↔free-function cycles exist. All truth is st
    super-calls, member-pointer types and `&Cls_4::m` lines. So the def + refs of everything with simpleName
    `Cls_4` (the class and its ctor) is exactly what a whole-word name search returns. A class symbol has no
    edges of any kind and is outside reachability: graders skip `kind: class` the way they skip `template`
-   (CodeCarver excludes both from its denominators). It is in `cppTruthSha` through the kinds section.
+   (both stay out of a carver's denominators). It is in `cppTruthSha` through the kinds section.
 
-**Narrowed for the first cut:**
+**Narrowed by the generator:**
 - Member-function pointers target NON-virtual methods only. The D10 rule for a pointer to a virtual method
   (dispatch over its `cha`/`rta`) stays reserved and is not generated yet.
 - `new Cls_4()` assigns a receiver pointer and is never deleted, so a `new` adds no dtor edge. A local
@@ -225,8 +227,8 @@ A ref line inside a template body counts once for each instance that reaches it,
 substituted target (`tf_0<T>()` in `Tmpl_1<int>::m_0` is a ref of `tf_0<int>`). A `template` symbol itself has
 no edges. The body of a template that is never instantiated still names things: there, a free-function call is
 a ref of the function, and `tf_0<T>()` / `tv_n.m_0()` (on a `Tmpl_1<T>`) are refs of the template symbols
-`ns::tf_0` / `ns::Tmpl_1::m_0`, with no edges. Those are the only refs a template symbol has (1.2.1; 1.2.0
-recorded none, so a whole-word search found lines no symbol owned).
+`ns::tf_0` / `ns::Tmpl_1::m_0`, with no edges. Those are the only refs a template symbol has, so a whole-word
+search finds no line that no symbol owns.
 
 **RTA.** A class is live when a static object, or a body reachable on the precise graph, constructs it as a
 complete object; the member objects of a live class, including those its base classes declare, are live too.
@@ -277,53 +279,7 @@ liveness and `rta` from the emitted program) and by clang compiling the program.
 
 `mutate` refuses a v2 manifest (it edits C corpora only) with exit 2, before touching anything.
 
-**Golden vector** (`digest-selftest`, fifth line, cross-checked by an independent Python implementation of the
-D7 text): `cppTruthSha = 28b4e1de981d282a6918de91846e990955f5b8220c88efc993d2a984c0bfed08` over the symbol set
-in `CppDigestTests.GoldenSyms` with `staticInitRoots = ["ns::A::A", "ns::A::~A"]`.
-
-## Consumer answers so far
-
-**CodeCompass (2026-10-14):** indexes C++ today via tree-sitter, but C/C++ `find_references` is a whole-word
-simple-name search, and its tables key on the simple name; it does not consume a C++ corpus yet (adoption is
-its user's call). It asked for a key → simple-name mapping and a way to see which declarations share a simple
-name (now `simpleName`, D2), and records only definitions with a body (now the D2 `def` rule). D1 is right for
-it: its verify adapter hard-asserts `manifestVersion == 1`, so a v2 manifest is refused, not misread.
-Its user has decided to ADOPT the C++ corpus: CodeCompass will add a v2 path to its verify adapter and keep
-the hard v1 assert for C.
-
-CodeCompass, second round (2026-10-14): needs none of "Out" in the first cut. If they are added later, the
-order that helps it most is (1) overloading on argument types (every overload of `m_2` comes back as one
-simpleName group), then (2) operator overloading (`a + b` has no name token: a good expected-miss case). It
-needs none of the rest. `implicitEdges` and `memberPtrEdges` both suit its v2 path: implicit calls are
-reachability-only, with no ref and no callee; explicit `Cls_4 x(…)`, `new Cls_4` and `~Cls_4()` are ordinary
-ref sites (D4); the `&Cls::m` line is a ref of `m` (D10).
-
-**CodeCarver (2026-10-14):** binds C++ calls by SIMPLE name, with no hierarchy and no overload resolution,
-and carves per function and per file; a template is one source definition to it.
-- Q1: CHA is the sound set; its oracle asserts kept ⊇ cha. Keep the deliberate `simpleName` reuse across
-  UNRELATED classes (D2): that over-keep is what it wants measured against cha and rta. `rta` = true RTA
-  (constructed somewhere reachable); the "constructed anywhere" variant is not needed.
-- Q2: grades per template, but wants the instances listed (D5) to derive "template reachable iff any instance
-  is". An unused template is droppable.
-- Q3: implicit ctor/dtor/base/member edges always in the sound truth, in a separate `implicitEdges` list that
-  is part of both sets (D4). No off switch.
-- Q5: D1 is right.
-- Q6: member-function pointers in the first cut, with a `dispatched` flag like v1 (now D10). Lambdas and
-  `std::function` can wait.
-
-## Consumer questions (all answered)
-
-All answered (2026-10-14): Q1–3, Q5, Q6 by CodeCarver; Q4–6 and the `implicitEdges` / `memberPtrEdges` fit by
-CodeCompass. The questions are kept below for the record.
-
-1. **CodeCarver:** is CHA the right sound set for you, or do you carve with a different hierarchy
-   analysis? Is RTA the right precise set, or should `rta` be "constructed anywhere in the corpus"
-   instead of "constructed somewhere reachable"?
-2. **CodeCarver:** do you need template-instance granularity (D5), or is per-template enough?
-3. **CodeCarver:** should implicit ctor/dtor edges (D4) be in `edges`, or a separate list you can turn off?
-4. **CodeCompass:** do you index C++ at all today, and would you consume a C++ corpus? If yes, does a
-   qualified-name key (D2) match what your symbol table uses, and what `def` line do you expect for an
-   out-of-class method definition (`void Cls::m() {...}`) versus its in-class declaration?
-5. **Both:** is "C stays v1, only C++ is v2" (D1) right, or would you rather every manifest move to v2
-   together?
-6. **Both:** anything in "Out" that you need in the first cut?
+**Golden vector** (`digest-selftest`, fifth line): `cppTruthSha =
+28b4e1de981d282a6918de91846e990955f5b8220c88efc993d2a984c0bfed08` over the symbol set in
+`CppDigestTests.GoldenSyms` with `staticInitRoots = ["ns::A::A", "ns::A::~A"]`. Reproduce this before trusting
+your implementation.

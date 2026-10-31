@@ -1,9 +1,9 @@
-# Include web — design
+# Include web
 
 `gen --web-units N` adds an **include web**: a deep, overlapping graph of headers that a set of `.c` units
-include, with the closure of every unit recorded in the manifest. It was asked for by CodeCarver, which slices a
-translation unit's include closure, and it is shaped by their answers (2026-10-15/16). The web is off by default,
-and a corpus without it is byte-identical to one made by 1.2.3.
+include, with the closure of every unit recorded in the manifest. It is built for a carver that slices a
+translation unit's include closure (CodeCarver, for example). The web is off by default, and a corpus without it
+is byte-identical to one generated without the web knobs.
 
 `--preset huge` carries the web at full size. `--preset huge-lite` carries all of huge's shapes in about 0.5 GB:
 `--scale 0.05` (1/20 of huge's source counts) with 3 giants of 32 MB, 1 big and 12 medium headers, and the web at
@@ -88,8 +88,8 @@ cleanly with `clang -fsyntax-only` and the web's `-I` order.
 
 These are the definitions, used by both the generator and verify:
 
-- **`files` / `bytes`** — the distinct files the unit enters, the unit itself included. CodeCarver divides by
-  `bytes`.
+- **`files` / `bytes`** — the distinct files the unit enters, the unit itself included. A carver measuring
+  reduction divides by `bytes`.
 - **`reads` / `readBytes`** — every counted entry, the unit included: an unguarded template counts each time it
   is entered.
   - Not counted: a guard-skipped re-include. That includes a cycle back into a header still open; clang opens such a
@@ -104,9 +104,7 @@ The generator computes all of these from its model of the files, not from the te
 them from the text with its own preprocessor and compares all seven numbers. When clang is installed,
 `scripts\bench.ps1` checks verify's preprocessor against a real compiler: for all 40 units of a small web, the headers
 clang `-H` opens give the same files, bytes, reads, readBytes and depth as the closure, once cycle re-entries are
-dropped (bytes and readBytes are the sizes of the files it lists). At 1.3.2 the same check passed by hand on a web
-with huge's web knobs (2000-line headers, 48 MB tails): its first 20 units, its deepest (72) and its largest read
-(889 MB). Neither verify nor the tests run clang.
+dropped (bytes and readBytes are the sizes of the files it lists). Neither verify nor the tests run clang.
 
 Every closure is at most 190 deep (gen refuses a web whose closures would go deeper), under the 200 nested includes
 gcc and clang allow. `--web-depth` is capped at 150 for that reason; a deep site's chain and the aggregators add
@@ -119,7 +117,7 @@ Each instance is a symbol named after its template's primary head, for example `
 - `def` — the unit's `#include` line that led to it;
 - `templateHead` — `inc/tmpl_16.h:<line>` of the primary head;
 - `includedVia` — the template header, `inc/tmpl_16.h`;
-- `defNotLiteral: true` (since 1.3.2) — the def is not the name's text, but the refs are real call sites an indexer
+- `defNotLiteral: true` — the def is not the name's text, but the refs are real call sites an indexer
   should resolve. Unlike `expectedMiss`, it is not part of `truthSha`;
 - `refs` — call sites: the unit's own call, and calls from later units through prototypes.
 
@@ -157,9 +155,8 @@ At huge's settings the web is 1.65 GB of headers, with closures of about 350 MB 
 All of them are never scaled, and refused unless `--web-units` is given. `--lang cpp` and `--manifest false` are
 refused with the web, and so is a template knob with `--web-templates 0` or `--web-tail-mb` without `--web-tail`.
 
-`gen --from-profile ... --with-oracle` takes them too (since 1.3.1): the web is written at the root beside the
-profile's `d*` tree, which stays byte-identical, and its truth is added to the oracle manifest. This is how the
-real-shape huge keeper carries the web. A `--preset` cannot be combined with `--from-profile`, so the knobs are spelled
+`gen --from-profile ... --with-oracle` takes them too: the web is written at the root beside the
+profile's `d*` tree, which stays byte-identical, and its truth is added to the oracle manifest. A `--preset` cannot be combined with `--from-profile`, so the knobs are spelled
 out; `huge`'s are `--web-units 3000 --web-headers 3000 --web-depth 15 --web-window 18-28 --web-aggregators 40
 --web-templates 60 --web-template-sites 4 --web-tail 24 --web-header-lines 2000 --web-tail-mb 48`.
 
@@ -183,6 +180,6 @@ out; `huge`'s are `--web-units 3000 --web-headers 3000 --web-depth 15 --web-wind
 | `--web-crlf-frac` / `--web-mixed-eol-frac` | 0.05 / 0.02 | Line ends of register maps, templates and units. Their sum must be ≤ 1. |
 
 `mutate` never edits the web's directories, because the closure truth names their bytes. `--three-way` rewrites
-each variant's `compile_commands.json` to the variant's own paths (since 1.3.2) and lists it under the deltas'
+each variant's `compile_commands.json` to the variant's own paths and lists it under the deltas'
 `_meta.bookkeeping`. `verify` checks the db: every unit listed with the web's `-I` order, and a variant whose db
 still names its base is a FAIL. A db naming any other tree (a corpus moved or reached by another path) is a note.
