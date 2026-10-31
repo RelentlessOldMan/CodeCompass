@@ -8,7 +8,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Field report v4: `symbols Manager` on a ~20-project solution returned 20 identical-looking `ResourceManager` hits -
+// From a user report: `symbols Manager` on a ~20-project solution returned 20 identical-looking `ResourceManager` hits -
 // one per project's generated Resources.Designer.cs - crowding the hand-written matches. They're real symbols, so they
 // stay, but tool-generated files rank AFTER hand-written ones, and the demotion happens before the result cap.
 public class GeneratedCodeRankingTests

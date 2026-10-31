@@ -8,7 +8,7 @@ using Xunit;
 namespace CodeCompass.Core.Tests;
 
 // SearchLimits.UnreadablePaths lists candidate files a search could not read, so a reference answer never reads as
-// complete when it isn't (review finding 6). Review round 2: large files took a path that swallowed the failure, deleted
+// complete when it isn't. Earlier bugs pinned here: large files took a path that swallowed the failure, deleted
 // files were reported as "unreadable, rerun", and a network search reported files it read past the point it stopped.
 [Collection("compaction-env")] // sets the process-wide CODECOMPASS_FORCE_NETWORK
 public class ScanDisclosureTests

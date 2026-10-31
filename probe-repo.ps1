@@ -1,15 +1,14 @@
 <#
 .SYNOPSIS
   Run CodeCompass against ANY repo, hit the areas of concern (memory / correctness / perf),
-  and emit an ANONYMIZED, Discord-sized report plus a rich local JSON for analysis.
+  and emit a compact, ANONYMIZED report to share (e.g. in an issue) plus a rich local JSON for analysis.
 
 .WHY
-  The load has to run where the big real repo lives (e.g. a 90 GB tree on another machine);
-  the ANALYSIS is better done by the agent from a compact bundle. This decouples the two:
-  the script produces raw observations, you paste the fenced report into Discord, the agent
-  reads the curve. The report is data-rich (peak RSS + plateau-vs-climb per query), NOT a
-  pass/fail verdict - the signal we need (174 climbed linearly; 175 is flat) only lives in
-  the shape, so we keep it.
+  The load has to run on the machine that has the repo; the ANALYSIS is easier from a compact
+  bundle. This decouples the two: the script produces raw observations, you share the fenced
+  report, and whoever analyzes it reads the curve. The report is data-rich (peak RSS +
+  plateau-vs-climb per query), NOT a pass/fail verdict - the signal we need (a memory
+  regression climbs linearly; healthy code is flat) only lives in the shape, so we keep it.
 
   Every query process is sampled for peak working set and KILLED if it crosses -CeilMB, so a
   runaway can never take the machine down (belt-and-suspenders on top of the in-app budget).
@@ -236,11 +235,6 @@ $rows = foreach ($sym in $symbolSet) {
         $cs = [int]$Matches[1]; $cpp = [int]$Matches[2]; $lex = [int]$Matches[3]
     }
     $refTotal = $cs + $cpp + $lex
-    # coverage disclosure (stdout): "X/Y candidate C/C++ file(s) parsed" => incomplete pass
-    $parsed = $null; $cand = $null; $incomplete = $false
-    if ($refs.Stdout -match '(\d+)/(\d+)\s+candidate C/C\+\+ file\(s\) parsed') {
-        $parsed = [int]$Matches[1]; $cand = [int]$Matches[2]; $incomplete = ($parsed -lt $cand)
-    }
 
     # determinism: a second refs run should return the same total.
     $refs2 = Invoke-Sampled @('refs', $Repo, $sym)
@@ -257,7 +251,6 @@ $rows = foreach ($sym in $symbolSet) {
     [pscustomobject]@{
         Id = $id; Sym = $sym
         RefCs = $cs; RefCpp = $cpp; RefLex = $lex; RefTotal = $refTotal
-        Parsed = $parsed; Candidates = $cand; Incomplete = $incomplete
         RefMs = $refs.Ms; RefPeakMB = $refs.PeakMB; RefBaseMB = $refs.BaseMB
         RefTailMBs = $refs.TailSlopeMBs; RefKilled = $refs.Killed
         RefCurve = $refs.Curve
@@ -268,7 +261,7 @@ $rows = foreach ($sym in $symbolSet) {
     Write-Host ("  {0}  refs={1,-5} {2,6}ms  peak={3,7:N0}MB  {4}" -f $id, $refTotal, $refs.Ms, $refs.PeakMB, $flag)
 }
 
-# --- assemble the anonymized, Discord-sized report -------------------------
+# --- assemble the compact, anonymized report -------------------------------
 
 $version = (& $Exe version) 2>$null
 $maxPeak = ($rows | Measure-Object -Property RefPeakMB -Maximum).Maximum
@@ -286,11 +279,10 @@ if ($sidecarLine) { [void]$sb.AppendLine($sidecarLine) }
 [void]$sb.AppendLine("ceiling: ${CeilMB}MB (kill if exceeded)")
 [void]$sb.AppendLine('')
 [void]$sb.AppendLine("battery ($($symbolSet.Count) symbols)")
-[void]$sb.AppendLine(" id   refs   ms    peakMB tail  cov")
+[void]$sb.AppendLine(" id   refs   ms    peakMB tail")
 foreach ($r in $rows) {
     $flag = Get-RefFlag $r.RefKilled $r.RefMs $r.RefTailMBs
-    $cov = if ($null -ne $r.Candidates) { "$($r.Parsed)/$($r.Candidates)" } else { '-' }
-    [void]$sb.AppendLine(("{0} {1,5} {2,6} {3,7:N0} {4,-4} {5}" -f $r.Id, $r.RefTotal, $r.RefMs, $r.RefPeakMB, $flag, $cov))
+    [void]$sb.AppendLine(("{0} {1,5} {2,6} {3,7:N0} {4}" -f $r.Id, $r.RefTotal, $r.RefMs, $r.RefPeakMB, $flag))
     if ($flag -in @('CLMB', 'KILL')) {
         $pts = ($r.RefCurve | ForEach-Object { $_.mb }) -join ' '
         [void]$sb.AppendLine((" !{0} tail={1}MB/s curve(MB): {2}" -f $r.Id, $r.RefTailMBs, $pts))
@@ -321,8 +313,8 @@ $bundle | ConvertTo-Json -Depth 8 | Out-File -FilePath $jsonPath -Encoding utf8
 $report | Out-File -FilePath $reportPath -Encoding utf8
 
 Write-Host ""
-Write-Host "=== paste this into Discord ===" -ForegroundColor Green
+Write-Host "=== report ===" -ForegroundColor Green
 Write-Host $report
 Write-Host "report: $reportPath" -ForegroundColor DarkGray
 Write-Host "json:   $jsonPath (rich, local, non-anonymized$(if(-not $KeepNames){' names hashed in report only'}))" -ForegroundColor DarkGray
-Write-Host ("report chars: {0} (Discord msg limit 2000)" -f $report.Length) -ForegroundColor DarkGray
+Write-Host ("report chars: {0} (aim for under ~2000 to fit one chat or issue comment)" -f $report.Length) -ForegroundColor DarkGray

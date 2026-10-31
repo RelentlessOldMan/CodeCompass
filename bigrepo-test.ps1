@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  ON-DEMAND big-repo simulation: fabricate a work-scale firmware tree (~50k files, ~90 GB, with
-  10+ headers OVER 1 GB - the real repo's headline pathology), optionally stage it on a remote SMB share,
+  ON-DEMAND big-repo simulation: fabricate a large firmware-shaped tree (~50k files, ~90 GB, 10+ headers
+  over 1 GB), optionally stage it on a remote SMB share,
   then index + search it end to end while measuring time, throughput, and peak memory.
 
 .DESCRIPTION
@@ -22,7 +22,7 @@
                        the SMB share dir to copy into (e.g. \\yourserver\share\scratch) - generation is local.
 .PARAMETER Network     Generate locally, copy to $Dest (a share), and index over SMB.
 .PARAMETER TargetGB    Approx total size (default 90). Big-header count is scaled to approach this.
-.PARAMETER GiantHeaders    Count of OVER-1GB headers (default 12 -> the real repo's "10+ >1 GB").
+.PARAMETER GiantHeaders    Count of OVER-1GB headers (default 12).
 .PARAMETER GiantHeaderGB   Size of each giant header in GB (default 1.2). Must stay < 2 (streaming ceiling).
 .PARAMETER Scale       Count multiplier for the rest of the tree (default 1.0 ~= 50k files).
 .PARAMETER GenerateOnly  Fabricate (+ stage) only; skip the index/search test.
@@ -36,7 +36,7 @@
 
 .EXAMPLE
   # Quick local proof that a >1 GB header indexes at all (a few GB, minutes):
-  pwsh ./bigrepo-test.ps1 -Dest .corpus/_bigrepo_probe -TargetGB 3 -GiantHeaders 1 -Scale 0.05 -Keep
+  pwsh ./bigrepo-test.ps1 -Dest .corpus/_bigrepo_probe -TargetGB 3 -GiantHeaders 1 -Scale 0.05
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Dest,
@@ -67,7 +67,7 @@ $remainGB = [Math]::Max(0, $TargetGB - $giantGB)
 $bigHeaders = [int][Math]::Max(1, [Math]::Round($remainGB / 0.055))
 $giantMB = [int]([Math]::Round($GiantHeaderGB * 1024))
 
-Say "== fabricating work-shape tree (~$TargetGB GB target): $GiantHeaders giants @ ${giantMB}MB (>1GB), ~$bigHeaders big headers, scale $Scale =="
+Say "== fabricating firmware-shape tree (~$TargetGB GB target): $GiantHeaders giants @ ${giantMB}MB (>1GB), ~$bigHeaders big headers, scale $Scale =="
 # Vendored CodeSpawner (native AOT, ~40x faster than the old PowerShell generator, and it drops a
 # sibling ground-truth manifest). Same knob semantics; giant headers are still named regmap_block*.h,
 # so the marker-plant glob below is unchanged.

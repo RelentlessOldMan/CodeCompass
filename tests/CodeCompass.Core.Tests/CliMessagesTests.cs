@@ -4,7 +4,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// CLI messages that field reports asked for and nothing else pins: the core/MCP guards are tested elsewhere,
+// CLI messages that user reports asked for and nothing else pins: the core/MCP guards are tested elsewhere,
 // these check what a terminal user actually sees.
 [Collection("compaction-env")] // one test sets the process-wide CODECOMPASS_FORCE_NETWORK (inherited by the child)
 public class CliMessagesTests

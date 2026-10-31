@@ -6,7 +6,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Field report (generated-header rounds): two builds of the SAME tree reported different trigram-postings totals - the
+// From a user report: two builds of the SAME tree reported different trigram-postings totals - the
 // count depended on how files were spread across worker threads. A build's output must depend only on the tree: same
 // stats and same answers whatever the parallelism. Includes a file past the large-file threshold so the block-indexed
 // path (counted separately) is covered too.

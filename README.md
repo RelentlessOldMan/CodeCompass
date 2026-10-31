@@ -369,7 +369,8 @@ index`/`update` can all work on the same repo safely:
   and that the session will pick up the result when it finishes.
 
 Other local tools may **read** CodeCompass's per-file hash ledger (size, modified time, content hash) to avoid
-re-hashing files it already hashed; CodeDiffer does. The format and the rules for reading it safely are in
+re-hashing files it already hashed; [CodeDiffer](https://github.com/RelentlessOldMan/CodeDiffer), a separate
+diff tool, does. The format and the rules for reading it safely are in
 [docs/hash-ledger-format.md](docs/hash-ledger-format.md). Only CodeCompass writes it.
 
 ## Linked roots (federating external directories)
@@ -539,21 +540,16 @@ median and the max; **refs 1st-call** is the one-time analyzer build paid on the
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | requests | Python | 118 | 4.9 MB | 1.4 s | 204 / 3 | 204 / 1 | 205 / 1 | 619 / 2 | 632 / 27 | 0.3 s |
 | fmt | C++ | 207 | 3.2 MB | 1.5 s | 204 / 3 | 205 / 1 | 205 / 2 | 615 / 11 | 634 / 257 | 0.4 s |
-| EF Core ¹ ² | C# | 5,002 | 82 MB | 3.9 s | 209 / 8 | 205 / 2 | 218 / 16 | 15561 / 206 | 42744 / 33562 | 17.4 s |
+| EF Core ¹ | C# | 5,002 | 82 MB | 3.9 s | 209 / 8 | 205 / 2 | 218 / 16 | 15561 / 206 | 42744 / 33562 | 17.4 s |
 | TypeScript | TS | 72,171 | 349 MB | 23.4 s | 204 / 25 | 205 / 2 | 206 / 13 | 1023 / 251 | 1043 / 4192 | 2.4 s |
 | Godot | C++ | 9,937 | 196 MB | 10.1 s | 215 / 8 | 205 / 2 | 205 / 19 | 1845 / 127 | 1883 / 254 | 4.5 s |
-| Roslyn ¹ ² | C# | 19,980 | 372 MB | 12.1 s | 220 / 25 | 204 / 2 | 220 / 39 | 54381 / 746 | 103341 / 1457 | 87.4 s |
+| Roslyn ¹ | C# | 19,980 | 372 MB | 12.1 s | 220 / 25 | 204 / 2 | 220 / 39 | 54381 / 746 | 103341 / 1457 | 87.4 s |
 | LLVM | C/C++ | 132,213 | 1.5 GB | 52.2 s | 204 / 34 | 205 / 1 | 410 / 73 | 1435 / 17 | 1447 / 58 | 1.1 s |
 | generated C/C++ — **local** | C/C++ | 66,337 | 88 GB | 16m 59s | 410 / 4 | 205 / 4 | 206 / 6 | 1030 / 475 | 1043 / 524 | 1.1 s |
 | generated C/C++ — **SMB/UNC** | C/C++ | 66,337 | 88 GB | 22m 21s | 409 / 2 | 205 / 3 | 206 / 5 | 3927 / 285 | 4951 / 309 | 3.9 s |
 
 ¹ The broadest names the battery picks in EF Core and Roslyn include ones declared many times over (`Add`,
 `Contains`), so their *max* is the many-declarations case described below, not a typical lookup.
-
-² From v1.0.271 to v1.0.304, C# `find_references` *cold* calls on large solutions bound every file outside the
-ImplicitUsings projects on each cold query (to find names the injected global usings make ambiguous): Roslyn's
-cold median was 417 s. That check now binds only files that name a type two of their imports declare (728 of
-11,690 on Roslyn), with the same results.
 
 The **generated C/C++** corpus is a synthetic stress tree — **66,337 files / ~88 GB**, with single
 source files up to **1.4 GB** — indexed once on local disk and once over an SMB/UNC share, to show

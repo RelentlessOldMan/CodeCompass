@@ -125,7 +125,7 @@ public class DiskSnapshotTests
         finally { Directory.Delete(dir, true); }
     }
 
-    // CD-3: the overlay is resident for a session's life (one copy per session on the repo), and it waited for a flat
+    // The overlay is resident for a session's life (one copy per session on the repo), and it waited for a flat
     // 50,000 entries (~15 MB) before folding into the base. It now folds at a share of the base: 1/32 of it, 1,024 at
     // least, 50,000 at most.
     [Theory]

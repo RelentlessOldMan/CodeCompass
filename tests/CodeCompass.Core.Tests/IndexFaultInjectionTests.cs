@@ -9,7 +9,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Field reports these pin (via RepositoryIndexer's test seams, which hold or fail ONE file mid-build):
+// User reports these pin (via RepositoryIndexer's test seams, which hold or fail ONE file mid-build):
 //  - the stall watchdog fires and names the file wedging a worker (it once stayed silent for whole builds);
 //  - on a network share it says "likely slow transfer", not "exclude it" (wrong advice for a slow share);
 //  - a per-file OutOfMemoryException is not fatal: the build completes, the file is disclosed as NOT
@@ -160,7 +160,7 @@ public class IndexFaultInjectionTests
 
     // Parallel.ForEach retires each worker about every 100 ms and starts a fresh one, running localInit/localFinally each
     // time - and localFinally flushed the worker's segments. So a build wrote a segment per time slice, not per budget:
-    // 1,515 text segments for llvm, 10,370 for a 66k-file share, and every query then probes each one. Workers are now
+    // 1,515 text segments for llvm, over 10,000 for a large (~90 GB) network-share repo, and every query then probes each one. Workers are now
     // pooled and flushed once at the end (or at their budget): a build that fits the budget writes one per worker.
     [Fact]
     public void Build_SpanningManyTimeSlices_WritesAtMostOneSegmentPerWorker()

@@ -4,12 +4,8 @@
 tree matching the **measured structural shape** of a large proprietary firmware repository, for use as
 **reusable test/regression infrastructure**. Windows PowerShell 5.1 compatible; no external dependencies
 to generate (the optional `-Run`/`-Verify` steps additionally need the CodeCompass Release CLI).
-
-> Handoff copy. Authored for the **CodeCompass** project (a local code-search/indexing engine). Placed
-> here so another project ("Code Carver") can evaluate whether any of it — the generator, the size
-> distribution model, the block-batched large-file emitter, or especially the **correctness-oracle
-> pattern** — is reusable. Nothing proprietary is reproduced: only file counts, size distributions, and
-> line *shapes* measured from filesystem metadata.
+Nothing proprietary is reproduced: only file counts, size distributions, and line *shapes* measured from
+filesystem metadata.
 
 ---
 
@@ -40,7 +36,7 @@ bisect names the subsystem, instead of "something broke in a 90 GB blob."
 
 | Knob | Property it stresses |
 |---|---|
-| `-MacroDensity` | `#define`s per header, **independent of file size** — preprocessor/macro-table memory |
+| `-MacroDensity` | `#define`s per header, **independent of file size** — symbol-dense headers (extraction / memory) |
 | `-GiantHeaders` / `-BigHeaders` / `-MedHeaders` / `-MaxHeaderMB` | the byte pathology (giants fill to `-MaxHeaderMB`; scale reduces counts, not sizes) |
 | `-BlobFiles` | high-byte, zero-symbol data blobs — parser cost / skip heuristics |
 | `-CompileDb none\|partial\|full` | presence of build metadata (`compile_commands.json`); `none` is the firmware norm |
@@ -49,7 +45,7 @@ bisect names the subsystem, instead of "something broke in a 90 GB blob."
 | `-Dirs` / `-Depth` | wide, deep trees — path handling / long paths |
 | `-CrossRefs` (built-in) | cross-file cross-directory call edges — reference correctness |
 | `-LinkedRoots` | output split across N trees — multi-root / federation |
-| `-UnresolvedIncludes` | N TUs `#include` a vendor header absent from the tree, holding a reference gated behind a macro only that header defines — the honest **negative** case (references that *should not* resolve) |
+| `-UnresolvedIncludes` | N TUs `#include` a vendor header absent from the tree, holding a reference gated behind a macro only that header defines — uses a compiler would drop, which a name search must still list |
 | `-Scale`, `-Seed` | overall count multiplier; deterministic replay |
 
 ## The correctness oracle
@@ -60,11 +56,10 @@ to `<out>-manifest.json`. With `-Verify`, it indexes the corpus, runs `find_refe
 symbols, and asserts the tool's results match the manifest. This is the piece worth stealing for any tool
 that needs *ground-truth* correctness testing.
 
-With `-UnresolvedIncludes N`, the manifest also carries a **negative** oracle: `vendor_gated`'s references
-live behind a macro only a missing header defines, so `refs` is empty and `unreachableRefs` lists sites that
-must *not* resolve. `-Verify` then asserts (a) those sites are never returned, (b) `find_references` discloses
-the unresolved `#include`, and (c) `doctor` reports the unresolved-include scan. A tool that "resolves" a
-reference it has no way to see is failing honesty, not passing recall — this catches that.
+With `-UnresolvedIncludes N`, the manifest also carries a **gated** set: `vendor_gated`'s references live
+behind a macro only a missing header defines, so `refs` is empty and `unreachableRefs` lists those sites.
+CodeCompass's C/C++ references are a name search, so `-Verify` asserts (a) those sites ARE listed — a use of
+the name is still a use — and (b) the answer says C/C++ references are matched by name.
 
 ## Usage
 
@@ -78,14 +73,14 @@ reference it has no way to see is failing honesty, not passing recall — this c
 # Density-only stressor: 1M macros in a small file (memory without the bytes).
 ./make-firmware-corpus.ps1 -Out .corpus/_fw -GiantHeaders 1 -MacroDensity 1000000 -MaxHeaderMB 500
 
-# Suggested tiers (per the source spec):
+# Suggested tiers:
 #   CI      ~1/100 counts, keep >=1 pathology header
 #   nightly full scale
 #   matrix  vary ONE knob against a fixed baseline for attribution
 ```
 
 Generation needs only PowerShell. `-Run` (index + peak-RSS measurement) and `-Verify` (the oracle) need
-the CodeCompass Release CLI at `src/CodeCompass.Cli/bin/Release/net8.0/CodeCompass.Cli.exe`.
+the CodeCompass Release CLI at `src/CodeCompass.Cli/bin/Release/net10.0/CodeCompass.Cli.exe`.
 
 ## Performance
 
@@ -93,28 +88,12 @@ The register-header emitter writes ~5 MB batches from a `StringBuilder` in one c
 writes), so a **111 MB / ~2M-`#define` header generates in ~3 s**. A full ~90 GB nightly is on the order
 of tens of minutes, not hours.
 
-## What it has already produced (CodeCompass)
-
-- **Root-caused a memory blowup cheaply.** One `.c` including a 1M-`#define` header cost 1.6 GB / 10 s for
-  a single `find_references` — a per-translation-unit macro-table problem, confirmed in seconds without a
-  90 GB corpus.
-- **Validated the fix**: 1.6 GB → **~150–400 MB**, references still resolve.
-- **Correctness oracle: 20/20** cross-file references resolved with no compile database — proving a
-  redesign was *correct*, not merely fast.
-- **Caught a real bug on its first run**: the CLI reference search was reporting `.lst`/`.bak` build-output
-  as references (a filter the GUI path had but the CLI lacked) — fixed.
-
-## Reuse notes (for evaluation elsewhere)
+## Notes
 
 - **Self-contained**: single PowerShell 5.1 script, no modules. Generation has zero external deps.
-- **The oracle pattern generalizes**: emit-with-ground-truth-manifest + assert-tool-output-against-it works
-  for any analyzer/indexer/search tool, not just C/C++.
 - **The block-batched large-file emitter** (`New-RegHeader`) is a reusable recipe for generating multi-GB
   text files quickly from PowerShell.
-- **CodeCompass-specific bits** to swap out if reused: the `-Run`/`-Verify` steps shell out to the
-  CodeCompass CLI (`index`, `refs`); the register-map line *shapes* are C-firmware-flavored. The size
-  distribution model and knob structure are domain-agnostic.
-- **PowerShell 5.1 gotchas encountered** (baked into the working script): variable names are
+- **PowerShell 5.1 gotchas** (baked into the working script): variable names are
   case-insensitive (a `$Dirs` param collides with a `$dirs` local); an inline `if` can't be used as a
   command argument; native-exe stderr faults under `$ErrorActionPreference='Stop'` (use `Continue` and
   check `$LASTEXITCODE`).

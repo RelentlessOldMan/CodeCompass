@@ -12,8 +12,9 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Hash ledger format v2 (docs/hash-ledger-format.md), the layout CodeDiffer reads: v1's five columns plus change times,
-// file ids, hashed-at (our clock) and SHA-256 (all zero - CodeCompass doesn't compute it). CodeDiffer ignores v1 ledgers
+// Hash ledger format v2 (docs/hash-ledger-format.md), the layout other tools reading the ledger rely on: v1's five
+// columns plus change times, file ids, hashed-at (our clock) and SHA-256 (all zero - CodeCompass doesn't compute it).
+// Such a reader ignores v1 ledgers
 // because without the change time it can't rule out a same-size rewrite whose modified time was put back.
 public class LedgerV2Tests
 {
@@ -32,8 +33,8 @@ public class LedgerV2Tests
         Assert.Equal(pending, r.GetState(1));
     }
 
-    // Decoded with an independent reader that follows the spec's byte layout (the same layout CodeDiffer's
-    // LedgerFormat.ReadBase uses), so the writer can't drift from what the other tool expects.
+    // Decoded with an independent reader that follows the spec's byte layout (the same layout another tool reading the
+    // ledger uses), so the writer can't drift from what that tool expects.
     [Fact]
     public void Base_V2_MatchesTheSpecLayout()
     {
@@ -208,7 +209,7 @@ public class LedgerV2Tests
 
     // A pending entry's own recorded time is on the clock of whichever machine recorded it. With the cache dir on a share
     // (CODECOMPASS_CACHE_DIR), another machine - whose clock may be behind - may have recorded it, so the second look
-    // falls back to the caller's own-process bound instead (review of the v2 change, finding 3).
+    // falls back to the caller's own-process bound instead.
     [Fact]
     public void SecondLook_SharedCacheDir_DoesNotUseTheEntrysClock()
     {
@@ -262,7 +263,7 @@ public class LedgerV2Tests
     }
 
     // Every hashed file gets its change time, file id and hashed-at, read from the handle it was read through (Windows;
-    // other platforms record 0 = unknown, which CodeDiffer never trusts).
+    // other platforms record 0 = unknown, which a ledger reader never trusts).
     [Fact]
     public void Build_RecordsChangeTimeFileIdAndHashedAt()
     {

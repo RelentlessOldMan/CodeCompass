@@ -197,7 +197,7 @@ public static class RepositoryIndexer
         // Workers are POOLED, and flushed once after the loop (or when they reach their budget). Parallel.ForEach retires
         // each of its tasks about every 100 ms and starts a fresh one, calling localInit/localFinally every time - so when
         // localFinally flushed, a build wrote a segment per time slice instead of per budget (1,515 text segments for llvm,
-        // 10,370 for a 66k-file share; each query probes every one, and each held its own term table). A retiring task
+        // 10,370 for a ~70k-file network-share repo; each query probes every one, and each held its own term table). A retiring task
         // hands its worker back, and the next one picks it up with its buffers (and its tree-sitter parser) intact.
         var workers = new ConcurrentBag<BuildWorker>();     // every worker created (flushed and merged after the loop)
         var idleWorkers = new ConcurrentBag<BuildWorker>(); // handed back by a retired task, for the next one
@@ -209,7 +209,7 @@ public static class RepositoryIndexer
         // per-item sync cost is negligible next to read+parse. NOTE: this is NOT a fix for a build that
         // crawls because many individually-slow files are being parsed in parallel (e.g. big numeric
         // data-blob sources at ~1s/MB) - that is bounded by the symbol-size cap, not by scheduling
-        // (confirmed on a real 90GB repo: NoBuffering made no difference to that case).
+        // (confirmed on a large (~90 GB) real repo: NoBuffering made no difference to that case).
         try
         {
         Parallel.ForEach(
@@ -659,8 +659,8 @@ public static class RepositoryIndexer
         public TreeSitterSymbolExtractor Extractor { get; } = new();
         public readonly TrigramSet TrigramScratch = new(); // reused per file (this worker's thread only) to avoid a per-file set alloc
         // The file's bytes and its decoded text, kept for the next file up to 1 MB of file (3 MB of native memory: a char is
-        // two bytes) and freed right after a bigger one: fresh arrays per file were large-object garbage, and the 88 GB
-        // share's index peaked at 6-7 GB waiting for it. With TrigramScratch's drain buffer, ~5 MB a worker outside the budget.
+        // two bytes) and freed right after a bigger one: fresh arrays per file were large-object garbage, and indexing a large
+        // (~90 GB, ~70k-file) network-share repo peaked at 6-7 GB waiting for it. With TrigramScratch's drain buffer, ~5 MB a worker outside the budget.
         public readonly NativeBuffer<byte> FileBytes = new(KeepFileBytes);
         public readonly NativeBuffer<char> FileText = new(KeepFileBytes);
         private const int KeepFileBytes = 1 << 20;

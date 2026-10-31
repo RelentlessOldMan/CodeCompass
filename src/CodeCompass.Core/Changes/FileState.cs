@@ -6,7 +6,7 @@ namespace CodeCompass.Core.Changes;
 /// touched-but-identical files. MTimeTicks: positive = trusted, negative = pending (the observed time, negated), 0 =
 /// unknown (see <see cref="LedgerTrust"/>). ChangeTicks / FileId come from the read handle (0 = unknown) and
 /// HashedAtTicks is our clock (just before the read when trusted, when it was recorded when pending) - ledger v2, for
-/// readers like CodeDiffer (docs/hash-ledger-format.md).
+/// another tool reading the ledger (see docs/hash-ledger-format.md).
 /// </summary>
 public readonly record struct FileState(long Size, long MTimeTicks, string ContentHash,
                                         long ChangeTicks = 0, long FileId = 0, long HashedAtTicks = 0)

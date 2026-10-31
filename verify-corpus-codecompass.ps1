@@ -1,20 +1,21 @@
 <#
 .SYNOPSIS
   CodeCompass-side verify adapter for a CodeSpawner v1 corpus. Indexes the corpus and asserts
-  find_references matches the ground-truth manifest (positive + negative + disclosure + doctor).
+  find_references matches the ground-truth manifest (positive + gated + expected-miss + dup-content).
 
 .DESCRIPTION
   The synthetic generator lives in its own project now (CodeSpawner). This adapter is the CodeCompass
   half of the split: the generator emits corpus + manifest; THIS drives CodeCompass's own verification.
-  It consumes the versioned v1 manifest (docs/manifest-schema.md): `_meta` + `symbols` with repo-relative
-  paths, `edges`, and the negative `unreachableRefs` set. It asserts `_meta.manifestVersion == 1` up front
-  so a schema change is a one-line failure, not a mysterious miss.
+  It consumes the versioned v1 manifest (tools/codespawner/manifest-schema.md): `_meta` + `symbols` with
+  repo-relative paths, `edges`, and the gated `unreachableRefs` set. It asserts `_meta.manifestVersion == 1`
+  up front so a schema change is a one-line failure, not a mysterious miss.
 
   Checks:
    1. POSITIVE: for a sample of symbols, find_references returns each expected ref site (basename + :line:).
-   2. NEGATIVE: for gated symbols (unreachableRefs), those sites are NOT resolved.
-   3. DISCLOSURE: find_references prints the unresolved-include caveat on STDOUT.
-   4. DOCTOR: reports the unresolved-include scan.
+   2. GATED: for symbols with unreachableRefs (uses behind a missing header or an inactive #ifdef), those
+      sites ARE listed (C/C++ references are a name search) and the answer says C/C++ is matched by name.
+   3. EXPECTED-MISS: token-paste (##) names that never appear literally must NOT resolve to a location.
+   4. DUP-CONTENT: every byte-identical copy in a dupGroup stays independently searchable.
 
 .PARAMETER Corpus    The generated corpus dir.
 .PARAMETER Manifest  Manifest path (default: <corpus>-manifest.json sibling).
@@ -83,7 +84,7 @@ foreach ($prop in $positive) {
 $col = if ($fail -eq 0) { 'Green' } else { 'Red' }
 Write-Host ("POSITIVE: {0}/{1} symbols resolved their expected cross-file reference." -f $pass, ($pass + $fail)) -ForegroundColor $col
 
-# --- NEGATIVE + DISCLOSURE oracle ---
+# --- GATED-REFS oracle ---
 # NB: a PSCustomObject returns $null for an ABSENT property, and @($null).Count is 1 (not 0) - so we must
 # check the property actually exists before counting, or every symbol looks "gated".
 $gated = @($syms.PSObject.Properties | Where-Object {
@@ -91,8 +92,7 @@ $gated = @($syms.PSObject.Properties | Where-Object {
 })
 if ($gated.Count -gt 0) {
     # C/C++ references are a NAME search (no compiler): a use behind a missing header or an inactive #ifdef is still a
-    # use of the name, so it IS listed, and the answer says C/C++ is matched by name. (The clang-era oracle asserted the
-    # opposite: gated refs unresolved + an "unresolved #include" disclosure + a doctor include scan, all removed in v1.0.239.)
+    # use of the name, so it IS listed, and the answer says C/C++ is matched by name.
     Write-Host "--- gated-refs oracle: uses behind missing headers / #ifdef are found by name + the by-name note fires ---"
     foreach ($prop in $gated) {
         $sym = $prop.Name; $unrefs = @($prop.Value.unreachableRefs)

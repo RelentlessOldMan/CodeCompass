@@ -11,8 +11,8 @@ namespace CodeCompass.Core.Tests;
 // code in inactive #if/#elif branches is disabled text - invisible to semantic find_references / find_callees.
 // A Login method that calls GetAllGroups() only inside `#if NET6_0_OR_GREATER` reported ZERO such refs/callees,
 // silently. The honest fix: when a candidate .cs uses conditional compilation, treat the C# pass as incomplete
-// -> refs backfills lexical (so the guarded use is still found) AND discloses; callees discloses. (Field
-// report, independently reproduced, 2026-09-29.)
+// -> refs backfills lexical (so the guarded use is still found) AND discloses; callees discloses. (From a user
+// report, independently reproduced.)
 public class CSharpConditionalRefsTests
 {
     [Theory]
@@ -62,7 +62,7 @@ public class CSharpConditionalRefsTests
 
         Assert.Contains("caller.cs", stdout);                      // the #if-guarded use is recovered
         Assert.Contains("C# coverage INCOMPLETE", stdout);         // ...and disclosed WITH the answer (stdout), so
-                                                                   // `refs ... > out.txt` keeps it (field report)
+                                                                   // `refs ... > out.txt` keeps it
         var m = System.Text.RegularExpressions.Regex.Match(all, @"(\d+)\s+name-matched reference");
         Assert.True(m.Success && int.Parse(m.Groups[1].Value) > 0, $"expected a lexical backfill for the guarded ref:\n{all}");
     }
@@ -107,12 +107,12 @@ public class CSharpConditionalRefsTests
         Assert.Equal(0, int.Parse(m.Groups[2].Value));             // no lexical backfill on a clean C# repo
     }
 
-    // v1.0.212 regression (field report v3): the lexical backfill is NOT comment/string-aware, so once the C#
-    // pass is flagged incomplete (any candidate .cs uses #if), refs re-admits XML-doc <see cref="X"/> mentions -
-    // the exact noise v1.0.100's marquee fix removed and the tool's own description promises to ignore. The fix
+    // Regression: the lexical backfill is NOT comment/string-aware, so once the C#
+    // pass is flagged incomplete (any candidate .cs uses #if), refs re-admitted XML-doc <see cref="X"/> mentions -
+    // the exact noise the semantic pass excludes and the tool's own description promises to ignore. The fix
     // must keep the #if recall win (the guarded call site IS found) while dropping the doc-comment hit. The #if
     // and the doc comment live in the SAME file so the file is a trigram candidate (which is what trips the
-    // incompleteness flag - the minimal repros in the report missed this by putting #if in an unrelated file).
+    // incompleteness flag - a minimal repro that puts the #if in an unrelated file misses this).
     [Fact]
     public void Cli_Refs_DocCommentHit_NotReturned_EvenWhenIncomplete()
     {
@@ -141,8 +141,8 @@ public class CSharpConditionalRefsTests
     }
 
     // The honest-disclosure fix: the #if warning must NAME the file(s) that actually use conditional compilation,
-    // so a user who greps the result files and finds no #if can see where it really is (report v3 finding: the
-    // warning fired on a query whose result files contained zero #if, because a different candidate file had it).
+    // so a user who greps the result files and finds no #if can see where it really is (the
+    // warning used to fire on a query whose result files contained zero #if, because a different candidate file had it).
     [Fact]
     public void Cli_Refs_IfDisclosure_NamesTheConditionalFile()
     {
@@ -166,7 +166,7 @@ public class CSharpConditionalRefsTests
         Assert.Contains("guarded.cs", disclosure);                          // the disclosure names the real #if file
     }
 
-    // #3 (field report v3): find_callees missed calls inside inactive #if branches (the forward/reverse
+    // find_callees used to miss calls inside inactive #if branches (the forward/reverse
     // asymmetry - refs found the edge, callees didn't). Now those calls are recovered by re-lexing the disabled
     // region and resolving each name in-repo, shown in a segregated "by name" section, and the disclosure names
     // the conditional file. The ONLY call to Lib.Helper() lives inside #if DEBUG (inactive under Roslyn's empty
@@ -213,7 +213,7 @@ public class CSharpConditionalRefsTests
         Assert.DoesNotContain("resolved by NAME", all);
     }
 
-    // Field report v4: once #if makes the C# pass "incomplete", the lexical backfill re-admitted the symbol's own
+    // Once #if makes the C# pass "incomplete", the lexical backfill re-admitted the symbol's own
     // DECLARATION lines (`public class X`, its ctor) as references - the semantic pass never counts declarations, so
     // the backfill must not either. The #if-guarded real use must still be recovered.
     private const string DeclRepoKernel = "namespace N {\n public class KernelZq {\n  public KernelZq() { }\n }\n}\n";

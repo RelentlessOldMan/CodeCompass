@@ -9,7 +9,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// #4 (field report carried item): a version-mismatched index was served SILENTLY - provenance showed only in
+// A version-mismatched index used to be served SILENTLY - provenance showed only in
 // doctor/link list, never checked at query time. Now the ACTIONABLE staleness (the index's OUTPUT logic is
 // behind the running binary, judged on CONTENT version not the git-derived product version) is disclosed by the
 // query tools themselves. Keying on content version keeps it silent across ordinary upgrades (no cry-wolf).
@@ -34,7 +34,7 @@ public class IndexStalenessTests
     }
 
     // End-to-end: a query over an index whose meta says it was built by an older indexer must DISCLOSE it - on
-    // STDOUT, with the answer, so a `def ... > out.txt` keeps it (the co-worker's v2/v3 finding: on stderr, a redirected
+    // STDOUT, with the answer, so a `def ... > out.txt` keeps it (on stderr, a redirected
     // answer lost the warning). Builds the index, then rewrites meta.json's content version to a stale value (the public
     // Write API always stamps the current one, so we edit the record directly) and runs `def`.
     [Fact]
@@ -58,7 +58,7 @@ public class IndexStalenessTests
     }
 
     // CLI queries search the project root only; the MCP server federates linked roots. A CLI zero must say the linked
-    // roots weren't searched (field report: a confident empty answer read as "not found anywhere") - on STDOUT, so a
+    // roots weren't searched (a confident empty answer read as "not found anywhere") - on STDOUT, so a
     // redirected answer keeps it.
     [Fact]
     public void Cli_Query_WithLinkedRoots_SaysTheyWereNotSearched()
@@ -96,8 +96,7 @@ public class IndexStalenessTests
         Assert.DoesNotContain("older indexer", all);                // a current index must stay silent
     }
 
-    // The MCP twin (field report v4 left this "untested": its probe touched a file's mtime, which is not what this
-    // feature detects). An index built by an older INDEXER must be disclosed on the tool result itself.
+    // The MCP twin (touching a file's mtime doesn't exercise this: that is not what this feature detects). An index built by an older INDEXER must be disclosed on the tool result itself.
     [Fact]
     public void Mcp_Query_StaleIndexerVersion_DisclosesRebuildNeeded()
     {

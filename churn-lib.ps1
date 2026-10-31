@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-  CodeCompass-side churn helpers for the (upcoming) CodeSpawner `mutate` feature: the `base ⊕ delta`
-  symbol-overlay composer and the canonical `prevTruthSha` digest. These implement the contract LOCKED with
-  the CodeSpawner session (2026-09-27, docs/mutate-design.md) so our composed truth is byte-for-byte
-  identical to the generator's. The verify adapter will dot-source this and drive the churn loop once
-  `mutate` ships; until then, `-SelfTest` proves our digest reproduces the agreed golden vector.
+  CodeCompass-side churn helpers for the CodeSpawner `mutate` feature: the `base ⊕ delta`
+  symbol-overlay composer and the canonical `prevTruthSha` digest. These implement the contract in
+  tools/codespawner/mutate-design.md so our composed truth is byte-for-byte identical to the generator's.
+  verify-churn-codecompass.ps1 dot-sources this to drive the churn loop; `-SelfTest` proves our digest
+  reproduces the golden vector without a mutate binary or corpus.
 
   Canonical digest (must match CodeSpawner exactly): sha256 over UTF-8 of, per symbol in ORDINAL name order:
     name 0x1F def 0x1F (refs ordinal-sorted, ","-joined) 0x1F (edges ordinal-sorted, ","-joined) 0x1F

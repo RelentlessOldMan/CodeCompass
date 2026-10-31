@@ -6,7 +6,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Field report (co-worker v2/v3): `cache clear` under a live server deleted file by file and stopped at the first one the
+// From a user report: `cache clear` under a live server deleted file by file and stopped at the first one the
 // server held open - a half-deleted index the server kept serving, and `clear-all` swallowed the error. Clearing a cache
 // is all or nothing: refused (and left intact) while anything holds it open, removed whole otherwise.
 public class CacheClearTests

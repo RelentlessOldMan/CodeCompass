@@ -2,12 +2,12 @@
 .SYNOPSIS
   One command to verify CodeCompass. Fast unit tests by default; add -Big to also run the heavy
   large-file / generated-corpus scenarios (with pass/fail assertions), and -Fetch to also pull the
-  pinned real repos and run the correctness bench. Intended as the "before I push from this machine"
-  gate, and as the "grab the code and reproduce everything" entry point.
+  pinned real repos and run the correctness bench. Intended as a pre-push gate, and as the
+  "grab the code and reproduce everything" entry point.
 
 .DESCRIPTION
   Tiers (each includes the ones above it):
-    (default)  dotnet test        - the xUnit suite (~170 tests, ~10s). Fast; run this constantly.
+    (default)  dotnet test        - the xUnit suite.
     -Big       + large-file cases - generates synthetic corpora (gitignored) and asserts:
                  * a ~SizeGB register-map header indexes (streaming) and a marker near EOF is found
                    at the right line via the positional index; a broad query reports truncation.
@@ -251,10 +251,9 @@ if ($Big -and (Test-Path $cli)) {
     # A broad C/C++ find_references once took a machine to 9-11 GB and OOM. The name search has to stay bounded:
     # a CodeSpawner broad-token corpus (~1 GB: 200 files of 2-8 MB, one hot name in every one) is the worst shape
     # for it. Checks the answer against the manifest's ground truth, the process's peak memory, and that the
-    # comment/string filter re-reads no hit file (a field build once made refs 2.5x slower that way with every other
-    # check passing). Measured 2026-10-07 on 12 threads: index 5.7 s 608 MB; refs 14 s 250 MB before the read-once
-    # fix, 4.6-6.3 s 350 MB after (0.8-1.1x). The time ratio is printed, not gated (2026-10-15): shared CI runners
-    # failed it at random.
+    # comment/string filter re-reads no hit file (re-reading once made refs 2.5x slower with every other check
+    # passing). Reads are counted, not timed: the refs/index time ratio is printed, not gated, because shared CI
+    # runners are too noisy to gate on it.
     Section "broad C/C++ find_references: right answer, bounded memory, no latency regression"
     $spawner = Join-Path $root "tools/codespawner/codespawner.exe"
     $broad = Join-Path $root ".corpus/_broadcheck"

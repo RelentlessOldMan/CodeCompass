@@ -52,7 +52,7 @@ public sealed class IgnoreRules
 
     /// <summary>
     /// Build ignore rules. When <paramref name="maxFileSizeBytes"/> is null the cap comes from
-    /// CODECOMPASS_MAX_FILE_MB (default 5 MB); CODECOMPASS_IGNORE (comma/semicolon-separated
+    /// CODECOMPASS_MAX_FILE_MB (default 2000 MB); CODECOMPASS_IGNORE (comma/semicolon-separated
     /// directory names) always adds to the skipped-directory set. These env knobs let an operator
     /// exclude a pathological generated tree (e.g. dense register-map headers) or lower the cap
     /// without editing source.

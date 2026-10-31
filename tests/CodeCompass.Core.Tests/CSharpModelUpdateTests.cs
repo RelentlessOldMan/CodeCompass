@@ -7,7 +7,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// MCP-C1: one edited .cs file used to throw the whole C# model away, and the next find_references re-read and re-parsed
+// One edited .cs file used to throw the whole C# model away, and the next find_references re-read and re-parsed
 // the whole solution (Roslyn: ~20k files). A plain .cs edit, add or delete now updates the model in place; anything that
 // can change more than the files named (a project file, a folder, the config) still rebuilds it.
 public class CSharpModelUpdateTests

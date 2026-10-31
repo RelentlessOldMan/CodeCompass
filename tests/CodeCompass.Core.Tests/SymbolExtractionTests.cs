@@ -196,7 +196,7 @@ public class SymbolExtractionTests
         Assert.Contains(syms, s => s.Item1 == "bits");
     }
 
-    // Review round 2, finding 1: requiring a return type (to reject macro-call-plus-block) also rejected constructors
+    // Requiring a return type (to reject macro-call-plus-block) also rejected constructors
     // defined in the class body, which have none - so find_definition missed them and refs listed them as uses.
     // Destructors and operators were never captured.
     [Fact]
@@ -237,7 +237,7 @@ public class SymbolExtractionTests
         Assert.Contains(("f", SymbolKind.Function), syms);
     }
 
-    // Finding 2: typedef'd pointer and function-pointer types, functions that return a function pointer, and types
+    // Typedef'd pointer and function-pointer types, functions that return a function pointer, and types
     // marked with an export macro (`class LIB_API Klass {...}` - which the grammar reads as a function named Klass).
     [Theory]
     [InlineData("a.c")]
@@ -287,7 +287,7 @@ public class SymbolExtractionTests
         Assert.Contains(("omega_fn", SymbolKind.Function), syms);
     }
 
-    // v1.0.242 regression: each extractor compiled its own query, and the C++ definition query takes ~0.9 s to compile.
+    // Regression: each extractor compiled its own query, and the C++ definition query takes ~0.9 s to compile.
     // The parallel build makes a fresh extractor for every loop replica (many per second), so llvm's build went from ~47 s
     // to ~285 s. Queries are compiled once per process now: ten new extractors cost one compile, not ten (~9 s).
     [Fact]

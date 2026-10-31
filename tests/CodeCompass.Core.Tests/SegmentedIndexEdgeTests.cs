@@ -34,7 +34,7 @@ public class SegmentedIndexEdgeTests
     // for paths the current walker would skip (a rival tool's .claude/ cache dump, a node_modules artifact).
     // AddDocumentText plants them directly, exactly as such an index would. Search must NOT return them - the
     // fix drops now-ignored paths at query time, so "ignored at index time" also means "excluded at query
-    // time" without a rebuild. (Field report: search leaked .claude/index/tags.json from an old-version index.)
+    // time" without a rebuild. (A user report: search leaked .claude/index/tags.json from an old-version index.)
     [Fact]
     public void Search_ExcludesStaleIndexPathsUnderNowIgnoredDirs()
     {
@@ -129,7 +129,7 @@ public class SegmentedIndexEdgeTests
         finally { Directory.Delete(dir, true); }
     }
 
-    // Regression for the UNC find_references count gap (the "744f" field report): a common macro-like
+    // Regression for the UNC find_references count gap (from a user report): a common macro-like
     // name appears in a handful of GIANT files (build-log / disassembly echoes) hundreds of times each,
     // plus a few real references in ordinary source files. The lexical backfill searched with a single
     // GLOBAL result cap applied in candidate order, so the noisy files consumed the whole budget and the

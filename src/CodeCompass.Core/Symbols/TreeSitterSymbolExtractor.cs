@@ -14,7 +14,7 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
     // Compiled grammars + queries are shared by every extractor in the process, compiled once per language. Compiling is
     // not cheap (the C++ definition query takes ~0.9 s), and extractors are short-lived: the parallel build gets a fresh
     // worker - and extractor - every time Parallel.ForEach retires a loop replica (many per second), and every watch batch
-    // makes one. A per-instance cache recompiled the query each time: llvm's build went from ~47 s to ~285 s (v1.0.242).
+    // makes one. A per-instance cache recompiled the query each time: llvm's build went from ~47 s to ~285 s.
     // Sharing is safe: a TSLanguage and a TSQuery are read-only once built, and each Execute uses its own cursor.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lazy<(Language Language, Query Query)?>> Shared = new();
     private readonly int _maxChars = CodeCompassConfig.MaxSymbolChars();
@@ -36,7 +36,7 @@ public sealed class TreeSitterSymbolExtractor : IDisposable
         // Data-blob guard (fixed 1 MB floor, NOT user-adjustable): only engages above 1 MB, i.e. only
         // when the size cap above has been raised past its default. Large machine-generated numeric/
         // hex data arrays (test vectors, data buffers) parse ~25x slower than code yet contain 0
-        // symbols - measured on a real 90 GB repo as the sole cause of the "cap-raised" parse crawl.
+        // symbols - measured on a large (~90 GB) real repo as the sole cause of the "cap-raised" parse crawl.
         // Skipping them by content lets the cap be raised for large *real* code without reintroducing
         // the crawl. Below 1 MB (where essentially all real symbols live) this never runs.
         if (text.Length > DataBlobCheckMinChars && IsLikelyNumericData(text)) return Array.Empty<Symbol>();

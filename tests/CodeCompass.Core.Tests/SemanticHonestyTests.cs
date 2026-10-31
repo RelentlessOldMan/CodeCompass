@@ -10,7 +10,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Review WP-C (C/C++ honesty + determinism) and WP-D (focus correctness + federation honesty). Each test pins a case
+// C/C++ honesty + determinism, and focus correctness + federation honesty. Each test pins a case
 // where the tool used to return a confident-but-wrong answer: a silently "complete" pass that skipped files, a result
 // set that varied between identical runs, or a focus/federation note that misdescribed what was searched.
 public class SemanticHonestyTests
@@ -24,7 +24,7 @@ public class SemanticHonestyTests
         return sb.ToString();
     }
 
-    // P0-4 (originally a clang size-cap bug: an oversize .cpp's references vanished silently). C/C++ references are a
+    // Originally a clang size-cap bug: an oversize .cpp's references vanished silently. C/C++ references are a
     // name search now, so a file of any size is searched like any other - and the answer says what C/C++ matches are.
     [Fact]
     public void OversizeCppFile_ReferencesStillFound()
@@ -45,7 +45,7 @@ public class SemanticHonestyTests
         finally { ServerContext.Init(repo.Root); }
     }
 
-    // P1-10: Roslyn's reference enumeration order isn't contractual; the answer is now canonical before the cap.
+    // Roslyn's reference enumeration order isn't contractual; the answer is now canonical before the cap.
     [Fact]
     public void CSharpReferences_AreCanonicallyOrdered()
     {
@@ -59,7 +59,7 @@ public class SemanticHonestyTests
         Assert.Equal(keys.OrderBy(k => k.RelativePath, StringComparer.Ordinal).ThenBy(k => k.Line).ThenBy(k => k.Column), keys);
     }
 
-    // P2-3: a .cs file the semantic model couldn't read (an editor's exclusive lock) was silently absent: zero refs
+    // A .cs file the semantic model couldn't read (an editor's exclusive lock) was silently absent: zero refs
     // from it, no backfill, no disclosure.
     [Fact]
     public void UnreadableCSharpFile_IsDisclosed_NotSilentlyCovered()
@@ -170,7 +170,7 @@ public class SemanticHonestyTests
         finally { ServerContext.Init(project.Root); }
     }
 
-    // P0-5: the "files over the size cap" honesty note read only the PRIMARY root's meta - blind to a linked root's
+    // The "files over the size cap" honesty note read only the PRIMARY root's meta - blind to a linked root's
     // gaps, and (under focus) reporting an excluded root's gaps instead.
     [Fact]
     public void CoverageCaveat_CountsTheRootsActuallySearched()
@@ -228,7 +228,7 @@ public class SemanticHonestyTests
         }
     }
 
-    // P2-28: index staleness was disclosed only on ZERO results; a stale index under-reporting a NON-empty answer
+    // Index staleness was disclosed only on ZERO results; a stale index under-reporting a NON-empty answer
     // was silent in MCP (the CLI already warned on every query).
     [Fact]
     public void StaleIndex_IsDisclosedOnNonEmptyResultsToo()
@@ -249,7 +249,7 @@ public class SemanticHonestyTests
         finally { ServerContext.Init(repo.Root); }
     }
 
-    // Review P1-7: the MCP request's own token reaches the semantic passes - an abandoned/cancelled call stops instead
+    // The MCP request's own token reaches the semantic passes - an abandoned/cancelled call stops instead
     // of burning a full Roslyn build or clang parse under the read lock, and says what happened.
     [Fact]
     public void CancelledRequest_StopsTheSemanticPass_AndSaysSo()

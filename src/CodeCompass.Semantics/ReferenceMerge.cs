@@ -23,7 +23,7 @@ public static class ReferenceMerge
 
     /// <summary>Dedup keys (<c>display:line:col</c>) for the DEFINITIONS of the queried name, from the symbol index, in
     /// every language it covers. Callers seed their already-seen set with these so a name match never lists where a
-    /// symbol is defined as a use of it (Roslyn never reports a declaration as a reference either - field report v4).
+    /// symbol is defined as a use of it (Roslyn never reports a declaration as a reference either).
     /// Exact name-token position, so a real use that merely shares the definition's line is still counted. This relies
     /// on the symbol queries capturing definitions ONLY (see LanguageRegistry) - a captured use would be dropped.</summary>
     public static IEnumerable<string> DefinitionKeys(IEnumerable<CodeCompass.Core.Symbols.Symbol> definitions, Func<string, string> display) =>

@@ -32,7 +32,7 @@ jobs:
         with:
           global-json-file: global.json
 
-      # Windows PowerShell 5.1, like the machine these scripts were written on. HEAD is already origin/main, so
+      # Windows PowerShell 5.1: the scripts target it. HEAD is already origin/main, so
       # make-release's "push main first" step is a no-op here; it never pushes from CI.
       - name: Test gate + build + publish
         shell: powershell

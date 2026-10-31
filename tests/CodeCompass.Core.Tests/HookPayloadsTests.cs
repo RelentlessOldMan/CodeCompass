@@ -29,7 +29,7 @@ public class HookPayloadsTests
         Assert.Contains("CodeCompass", output.GetProperty("additionalContext").GetString());
     }
 
-    // Review P1-19: CodeCompass has no file-NAME search, so denying Glob was a dead end the agent escaped through a
+    // CodeCompass has no file-NAME search, so denying Glob was a dead end the agent escaped through a
     // shell command. Only Grep (content search) is redirected, and the denial says what to use for each need.
     [Fact]
     public void Hook_RedirectsGrepOnly_AndPointsGlobAtFileNames()

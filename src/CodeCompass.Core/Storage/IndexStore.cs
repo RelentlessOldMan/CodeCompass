@@ -56,7 +56,7 @@ public static class IndexStore
     public static bool IsClearingLeftover(string dir) => Path.GetFileName(dir).Contains(ClearingMarker, StringComparison.Ordinal);
 
     /// <summary>Delete one repo's cache directory ALL OR NOTHING. A file-by-file delete under a running server stopped at
-    /// the first file the server held open and left a half-deleted index it kept serving (field report). So the directory
+    /// the first file the server held open and left a half-deleted index it kept serving. So the directory
     /// is first moved aside in one step - Windows refuses to rename a directory while a file in it is open without delete
     /// sharing, which is how every index file is opened - and only then deleted. If the move is refused, nothing was
     /// touched: false, with <paramref name="error"/> saying the cache is in use. Once moved, the cache is gone from every

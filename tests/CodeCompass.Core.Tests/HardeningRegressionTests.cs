@@ -11,9 +11,9 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Regressions from the CodeReview.md hardening pass. Each pins a specific fix so the class of bug can't
-// silently return.
-public class HardeningReviewTests
+// Regressions from a hardening pass over the indexer and its on-disk segments (incremental updates, corrupt or
+// missing manifests, cancellation). Each pins a specific fix so the class of bug can't silently return.
+public class HardeningRegressionTests
 {
     private static string NewTempDir()
     {
@@ -240,7 +240,7 @@ public class HardeningReviewTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
-    // Query-time ignore consistency (v1.0.198), SYMBOL side: a stale index holding symbols for a now-ignored
+    // Query-time ignore consistency, SYMBOL side: a stale index holding symbols for a now-ignored
     // path (a rival tool's .claude dump) must not surface them via find_definition/search_symbols.
     [Fact]
     public void SymbolIndex_QueryTime_ExcludesNowIgnoredPaths()
@@ -380,7 +380,7 @@ public class HardeningReviewTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
-    // End-to-end regression for the field report (v1.0.207): the exact real-world SMB scenario - a non-atomic
+    // End-to-end regression for a user report: the exact real-world SMB scenario - a non-atomic
     // replace loses BOTH segments.manifest and symbols.manifest while every seg-*.ccseg / sym-*.ccsym survives -
     // must recover through the caller path (RepositoryIndexer.TryLoad), not present as total index loss. This is
     // the gap the Open()/Load() tests missed: recovery worked, but TryLoad's Exists() gate short-circuited before

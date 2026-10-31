@@ -14,7 +14,8 @@
       CODECOMPASS_MAX_SYMBOL_MB, default 1 MB - the file is still trigram-indexed and text-searchable.)
     * High-entropy random tokens (the old "hang" shape) actually parse FAST (~7 MB/s) on the current
       grammar - kept below only for contrast, no longer the pathology.
-    * Files just under the 5 MB size cap ARE indexed; files over it are skipped.
+    * Files over the per-file size cap (CODECOMPASS_MAX_FILE_MB, default 2000 MB) are skipped with a log
+      line; everything under it is indexed (large files by streaming).
 
   This script writes synthetic files with those shapes into a gitignored dir (.corpus/ by default),
   so the repo never carries the bulk. Content is generated - it is NOT real code.
@@ -27,12 +28,13 @@
     high_entropy/           N x ~SizeMB .h files of high-vocabulary random tokens. Historically blamed,
                             but measured fast (~7 MB/s) on the current grammar - kept for contrast.
     dense_defines/          N valid `#define REG_...` headers (~SizeMB). Benign - index fast even as .h.
-    over_cap/               One file just OVER MaxFileMb, to exercise the size-skip + its log line.
+    over_cap/               One ~MaxFileMb file, to exercise the size-skip + its log line. It is only over
+                            the cap if you lower it, e.g. CODECOMPASS_MAX_FILE_MB=5 (see the hints printed).
 
 .PARAMETER OutDir   Output dir (default .corpus/_pathological). Kept under .corpus/ so it's gitignored.
 .PARAMETER Count    Number of files per category (default 20).
-.PARAMETER SizeMB   Approx size of each generated file in MB (default 4; keep < 5 to stay under the cap).
-.PARAMETER MaxFileMb  Size of the single over-cap file (default 6).
+.PARAMETER SizeMB   Approx size of each generated file in MB (default 4; keep below a lowered cap, e.g. 5).
+.PARAMETER MaxFileMb  Size of the single over-cap file (default 6; pair with CODECOMPASS_MAX_FILE_MB=5).
 .PARAMETER Run      Also index slow_nested_templates twice - once with the symbol cap disabled
                     (reproduces the slow parse) and once at the default cap (handled) - and report
                     timing. Requires the CLI to be built (plugin/bin or src/.../bin/Release).
@@ -109,7 +111,7 @@ Write-Host "Generating $Count x ~$SizeMB MB high-entropy .h files (fast on curre
 for ($s = 0; $s -lt $Count; $s++) { New-HighEntropyFile (Join-Path $hi ("chipreg_{0:D3}.h" -f $s)) $s $sizeBytes }
 Write-Host "Generating $Count x ~$SizeMB MB valid dense #define headers (benign contrast)..."
 for ($s = 0; $s -lt $Count; $s++) { New-DenseDefineFile (Join-Path $df ("regs_{0:D3}.h" -f $s)) $s $sizeBytes }
-Write-Host "Generating one ~$MaxFileMb MB file just over the size cap..."
+Write-Host "Generating one ~$MaxFileMb MB file for the size-cap check..."
 New-NestedTemplateFile (Join-Path $oc "huge_generated.h") ([long]($MaxFileMb * 1MB))
 
 $total = [math]::Round(((Get-ChildItem $OutDir -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 0)
@@ -121,6 +123,8 @@ Write-Host "  # Slow parse (disable the symbol cap so tree-sitter parses the nes
 Write-Host "  `$env:CODECOMPASS_MAX_SYMBOL_MB=999; codecompass index `"$nt`"    # tens of seconds per MB"
 Write-Host "  # Handled (default cap skips symbol extraction; still trigram-indexed):"
 Write-Host "  Remove-Item Env:\CODECOMPASS_MAX_SYMBOL_MB; codecompass index `"$nt`"   # completes fast"
+Write-Host "  # Size-skip (lower the file cap below the over-cap file; the index logs the skip):"
+Write-Host "  `$env:CODECOMPASS_MAX_FILE_MB=5; codecompass index `"$oc`"; Remove-Item Env:\CODECOMPASS_MAX_FILE_MB"
 Write-Host "  # Characterize the parse-cost curve directly:  codecompass parsebench .h"
 
 if (-not $Run) { exit 0 }

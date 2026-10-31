@@ -9,8 +9,8 @@ namespace CodeCompass.Core.Tests;
 
 // The build read each file into a fresh byte[] and decoded it into a fresh string: ~3x the file's size in new arrays per
 // file, all over the 85 KB large-object threshold. They die as soon as the file is done, but only a gen2 GC frees large
-// objects, and between full GCs they piled up - the 88 GB share's index peaked at 6-7 GB while its read budget allowed
-// about 2. The workers now read and decode into buffers they keep, so a file allocates next to nothing for its text.
+// objects, and between full GCs they piled up - a large (~90 GB) network-share repo's index peaked at 6-7 GB while its
+// read budget allowed about 2. The workers now read and decode into buffers they keep, so a file allocates next to nothing for its text.
 // Measured per file on the worker's own thread (GetAllocatedBytesForCurrentThread), so other tests can't add noise.
 [Collection("compaction-env")] // the static test seams
 public class IndexAllocationTests

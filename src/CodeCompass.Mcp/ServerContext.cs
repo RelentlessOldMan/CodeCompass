@@ -214,7 +214,7 @@ public static class ServerContext
 
     public static string Root { get; private set; } = "";
 
-    // Test seams (HardeningReviewTests): drive the re-point epoch guard deterministically without racing threads.
+    // Test seams (HardeningRegressionTests): drive the re-point epoch guard deterministically without racing threads.
     internal static int EpochForTest => Volatile.Read(ref _epoch);
     internal static bool IsServingForTest
     {
@@ -2223,7 +2223,7 @@ public static class ServerContext
     // The model ApplyIncremental updated in place for this batch (see AdoptSourcesToken), or null.
     private static RoslynCSharpAnalyzer? _csharpUpdatedInPlace;
 
-    // Apply this batch's C# edits to the resident model in place (MCP-C1), rather than dropping it and re-parsing the whole
+    // Apply this batch's C# edits to the resident model in place, rather than dropping it and re-parsing the whole
     // solution on the next C# query. Only when every C# file the index changed is one the batch names - a folder created,
     // renamed or deleted can hold files the index and the model see differently, so it rebuilds - and the index applied the
     // batch cleanly (none of it unanswered, every C# file's text taken). A named file is "present" when the index holds it after the batch: the

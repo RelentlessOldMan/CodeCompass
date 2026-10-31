@@ -10,12 +10,12 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Review WP-F: crash-consistency and load-failure handling of the on-disk index.
+// Crash-consistency and load-failure handling of the on-disk index.
 public class DurabilityTests
 {
     private static string CacheDir(TempRepo r) => IndexStore.GetCacheDir(r.Root);
 
-    // P1-14: manifest and tombstones were two separate atomic replaces; a crash between them reloaded the new segment
+    // Manifest and tombstones were two separate atomic replaces; a crash between them reloaded the new segment
     // list WITHOUT that batch's deletions (edited files matched old+new content, deleted files came back). The manifest
     // now carries the tombstones, so losing the separate file can't resurrect anything.
     [Fact]
@@ -44,7 +44,7 @@ public class DurabilityTests
         }
     }
 
-    // P1-13: a manifest-named segment that's missing used to be SKIPPED - the index loaded and served without that
+    // A manifest-named segment that's missing used to be SKIPPED - the index loaded and served without that
     // segment's documents, silently. A persistent gap is now corruption (rebuild), never a partial "success".
     [Fact]
     public void ManifestNamingAMissingSegment_IsCorrupt_NotSilentlyPartial()
@@ -59,7 +59,7 @@ public class DurabilityTests
         Assert.Equal(IndexLoadFailure.Corrupt, why);
     }
 
-    // P1-13: a transient read failure (a lock held a moment by AV/backup/another process) must not make the update
+    // A transient read failure (a lock held a moment by AV/backup/another process) must not make the update
     // path throw away a perfectly good index and rebuild the whole repo.
     [Fact]
     public void TransientlyUnreadableIndex_IsReported_NotRebuilt()
@@ -82,7 +82,7 @@ public class DurabilityTests
         t.Dispose(); s.Dispose();
     }
 
-    // P2-18: an index from a NEWER CodeCompass (another install updated first) was treated as corrupt and rebuilt -
+    // An index from a NEWER CodeCompass (another install updated first) was treated as corrupt and rebuilt -
     // so two installs sharing a cache would rebuild each other's index forever. Recognize it and refuse.
     [Fact]
     public void IndexFromANewerFormat_IsRecognized_AndNotRebuiltOver()
@@ -109,7 +109,7 @@ public class DurabilityTests
         finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
     }
 
-    // P2-16: Load only recomputed the next segment number when it fell below the loaded COUNT. A segment written by a
+    // Load only recomputed the next segment number when it fell below the loaded COUNT. A segment written by a
     // flush that crashed before the manifest recorded it then got its number reused (FileMode.Create over a file a
     // reader may have mapped).
     [Fact]
@@ -131,7 +131,7 @@ public class DurabilityTests
         Assert.True(File.Exists(Path.Combine(dir, SegmentedIndex.SegmentFileName(51))));
     }
 
-    // P2-17: a torn snapshot-base header (section offsets zeroed, count intact) passed the ordering checks and GetState
+    // A torn snapshot-base header (section offsets zeroed, count intact) passed the ordering checks and GetState
     // read in-bounds garbage - changed files looked unchanged. It must fail at open instead.
     [Fact]
     public void SnapshotBase_WithSectionsTooSmallForItsCount_IsRejectedAtOpen()
@@ -155,7 +155,7 @@ public class DurabilityTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
-    // P3-13: a corrupt 5th varint byte's high bits were silently shifted out, decoding to a plausible wrong value.
+    // A corrupt 5th varint byte's high bits were silently shifted out, decoding to a plausible wrong value.
     [Fact]
     public void Varint_RejectsOverflowingFifthByte()
     {

@@ -71,9 +71,8 @@ if ($Publish) {
         if ($LASTEXITCODE -ne 0) { throw "check.ps1 -Big failed - release aborted." }
     }
 
-    # b) The source that built this release must be on origin/main, or a work checkout sees stale source
-    #    and the tag drifts. Require a clean tree + clean fast-forward, then push HEAD -> main. (This bit
-    #    us once; never again.)
+    # b) The source that built this release must be on origin/main, or other checkouts see stale source
+    #    and the tag drifts. Require a clean tree + clean fast-forward, then push HEAD -> main.
     $sha = (git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0) { throw "could not resolve HEAD" }
 
@@ -132,7 +131,7 @@ if ($LASTEXITCODE -ne 0) { Write-Warning "could not restore packages.lock.json a
 $ErrorActionPreference = $prevEap
 
 # 1a) Smoke the PUBLISHED MCP server exe: do a real MCP stdio handshake and require it to list its tools.
-# This is the gap that let a broken self-contained server ship (1.0.140-1.0.145 crashed on startup because a
+# This is the gap that once let a broken self-contained server ship (it crashed on startup because a
 # net8 build couldn't carry the MCP SDK's .NET 10 base libraries) - the -Big gate only exercises the CLI and
 # in-process tests, never the shipped server binary. Abort the release if the server can't start and answer.
 Write-Host "Smoke-testing the published MCP server (initialize + tools/list) ..."
@@ -188,7 +187,7 @@ $cliVerRaw = (& $cliExe version)
 if ($LASTEXITCODE -ne 0) { throw "could not run $cliExe to confirm the version" }
 $cliVer = ($cliVerRaw -replace '^CodeCompass\s+', '') -replace '\+.*$', ''
 if ($cliVer -ne $version) { throw "version mismatch: manifest '$version' vs binary '$cliVer' - build is inconsistent, aborting." }
-# The Codex manifest is stamped separately; a Codex install of a mislabeled zip reports the wrong version (field report).
+# The Codex manifest is stamped separately; a Codex install of a mislabeled zip reports the wrong version.
 $codexVersion = (Get-Content (Join-Path $root "plugin/plugin.json") -Raw | ConvertFrom-Json).version
 if ($codexVersion -ne $version) { throw "version mismatch: Codex manifest '$codexVersion' vs Claude manifest '$version' - aborting." }
 

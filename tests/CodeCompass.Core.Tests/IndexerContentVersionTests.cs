@@ -25,7 +25,7 @@ public class IndexerContentVersionTests
     // An incremental update re-extracts only CHANGED files, so it must not stamp the index as current: the index is still
     // only as new as its oldest content. Stamping it erased the "rebuild needed" note on the first update (which the MCP
     // server runs automatically at startup), leaving old-indexer output - e.g. C++ member definitions listed as uses -
-    // with nothing telling the user to rebuild (review finding 7). Only a full build stamps the current version.
+    // with nothing telling the user to rebuild. Only a full build stamps the current version.
     [Fact]
     public void IncrementalUpdate_KeepsAnOlderContentVersion_FullBuildStampsCurrent()
     {
@@ -48,7 +48,7 @@ public class IndexerContentVersionTests
     }
 
     // A pre-stamp meta (ContentVersion 0) IS behind (IndexerBehind says so), so an update must carry the 0 too - stamping
-    // the current version cleared the note on an index older than v1 (review round 2, finding 6). No meta at all is still
+    // the current version cleared the note on an index older than v1. No meta at all is still
     // unknown provenance, and gets the current stamp.
     [Fact]
     public void CarriedContentVersion_KeepsAPreStampZero_NullMetaIsCurrent()

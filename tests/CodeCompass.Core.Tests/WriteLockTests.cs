@@ -11,7 +11,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Cross-process write safety (review P0-1). Before: only LINKED roots had any write guard, so two sessions on one
+// Cross-process write safety. Before: only LINKED roots had any write guard, so two sessions on one
 // repo (or a session + a terminal `codecompass index`) were unmediated writers to one cache dir - colliding segment
 // numbers, last-writer-wins manifests, each side's orphan cleanup deleting the other's live segments. Now every
 // mutation holds IndexWriteLock, and a process holding the index in memory reloads when another commits.
@@ -1008,7 +1008,7 @@ public class WriteLockTests
         }
     }
 
-    // Review P1-6: a watcher overflow on a network/huge root used to start an UNGATED in-session full rebuild (hours
+    // A watcher overflow on a network/huge root used to start an UNGATED in-session full rebuild (hours
     // over SMB). Now it keeps serving, discloses possible staleness on every query, and clears once a fresh update
     // (here another process's) is installed.
     [Fact]
@@ -1040,7 +1040,7 @@ public class WriteLockTests
         }
     }
 
-    // Review P2-30: the live-watch role across REAL processes - a running `codecompass watch` holds it (so a session
+    // The live-watch role across REAL processes - a running `codecompass watch` holds it (so a session
     // here can't start a second watcher), and killing that process releases it with no stale lock left behind.
     [Fact]
     public async Task LiveWatchRole_HeldByAnotherProcess_ThenFreedWhenItIsKilled()

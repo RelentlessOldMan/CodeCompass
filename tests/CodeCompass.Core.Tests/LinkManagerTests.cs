@@ -41,7 +41,7 @@ public class LinkManagerTests
         Assert.Equal(LinkManager.RemoveStatus.NotLinked, LinkManager.Remove(project.Root, lib.Root, _ => true).Status);
     }
 
-    // Field reports: linking a root that already has an index must REUSE it - re-indexing a 90 GB linked tree on every link
+    // Linking a root that already has an index must REUSE it - re-indexing a 90 GB linked tree on every link
     // was the reported cost (the round trip above accepts either outcome, so a silent re-index would pass it). And
     // `link list` must say how current that index is: "as of <now>; built by <version> at <time>".
     [Fact]

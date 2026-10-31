@@ -7,7 +7,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// SEM-C2: a reference search covers only the documents whose text could hold a reference to the name, not the whole
+// A reference search covers only the documents whose text could hold a reference to the name, not the whole
 // solution. The compiler also calls members without the text spelling them (foreach, await, deconstruction, collection
 // initializers), `[Foo]` names FooAttribute, `new()` names no type, an escape hides a name and a global alias renames a
 // type in every file; each must still be found, so the scoped answer has to equal the whole-solution one.

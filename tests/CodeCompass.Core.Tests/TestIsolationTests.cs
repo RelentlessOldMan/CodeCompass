@@ -19,7 +19,7 @@ public class TestIsolationTests
         Assert.True(behavior!.DisableTestParallelization);
     }
 
-    // Field report: the suite used to leave thousands of index caches and repo-*.log files in the real
+    // The suite used to leave thousands of index caches and repo-*.log files in the real
     // %LOCALAPPDATA%\CodeCompass. TestEnvironment redirects both with CODECOMPASS_CACHE_DIR / CODECOMPASS_LOG_DIR - which
     // only works while the product honours them. If it stopped, every other test would still pass and the leak would
     // quietly return.

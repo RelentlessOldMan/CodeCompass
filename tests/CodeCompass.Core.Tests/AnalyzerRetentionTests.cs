@@ -238,7 +238,7 @@ public class AnalyzerRetentionTests
             var model = ServerContext.ResidentCSharpForTest;
             repo.Write("a.cs", "class A { void M() { } void N() { M(); M(); } }\n");
             ServerContext.OnChangesForTest(new ChangeBatch(new[] { repo.FullPath("a.cs") }, FullReconcile: false));
-            Assert.Same(model, ServerContext.ResidentCSharpForTest); // updated, not thrown away (MCP-C1)
+            Assert.Same(model, ServerContext.ResidentCSharpForTest); // updated, not thrown away
             Assert.Contains("a.cs:1:40", CodeCompassTools.FindReferences("M")); // the new call is found
             Assert.Equal(1, model!.Builds);
         }

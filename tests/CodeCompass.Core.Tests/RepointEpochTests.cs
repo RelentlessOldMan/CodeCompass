@@ -6,7 +6,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Re-point epoch guard (deferred hardening #1): a background build/reconcile that started for the PREVIOUS
+// Re-point epoch guard: a background build/reconcile that started for the PREVIOUS
 // workspace must never install its result after Init() re-pointed the server - that would silently serve the
 // wrong repository. Shares the compaction-env collection so it runs serially against the other tests that
 // drive ServerContext's static state.

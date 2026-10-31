@@ -102,7 +102,7 @@ public class SourcesGenerationTests
         finally { ServerContext.Init(repo.Root); }
     }
 
-    // CHG-C3: a full update (a startup reconcile, a CLI `update`) that found nothing still saved the ledger and committed a
+    // A full update (a startup reconcile, a CLI `update`) that found nothing still saved the ledger and committed a
     // new generation, so every other session serving the root reloaded an unchanged index. Now it writes no ledger and
     // keeps the generation; a change still does both.
     [Fact]

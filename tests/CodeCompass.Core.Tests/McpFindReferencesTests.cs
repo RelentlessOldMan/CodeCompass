@@ -75,7 +75,7 @@ public class McpFindReferencesTests
         }
     }
 
-    // Field report: the tester found orphaned CodeCompass.Mcp.exe processes still running (and holding their index open)
+    // A user found orphaned CodeCompass.Mcp.exe processes still running (and holding their index open)
     // after the host session ended. The host ends a stdio server by closing its stdin; the server must exit on its own.
     [Fact]
     public void Mcp_Server_ExitsWhenStdinCloses()

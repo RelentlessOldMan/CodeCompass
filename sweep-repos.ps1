@@ -4,13 +4,15 @@
   stand - index success/time/peak-RSS, doctor health, and a sanity query battery per repo. One
   consolidated table + a rich local JSON. Read-only w.r.t. the repos (index caches live under LOCALAPPDATA).
 
+.EXAMPLE
+  .\sweep-repos.ps1 -Repos D:\src\alpha,D:\src\beta
+
 .NOTES
   Machine-saturating (indexes many repos). Run it when the machine is otherwise idle.
 #>
 [CmdletBinding()]
 param(
-    [string[]]$Repos,                          # repo paths; default = git repos next to this one
-    [string[]]$Exclude = @(),                  # folder names to leave out of the default list
+    [Parameter(Mandatory = $true)] [string[]]$Repos,   # repo paths to sweep
     [string]$Exe,                              # CodeCompass.Cli.exe; default: plugin\bin next to this script
     [int]$CeilMB = 0,                          # kill a step above this RSS (0 => 60% physical RAM)
     [int]$IntervalMs = 200,
@@ -24,11 +26,7 @@ if (-not $OutDir) { $OutDir = $scriptDir }
 if (-not (Test-Path $Exe)) { throw "CLI exe not found: $Exe" }
 if ($CeilMB -le 0) { $CeilMB = [int]([math]::Floor(((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB) * 0.60)) }
 
-if (-not $Repos -or $Repos.Count -eq 0) {
-    $Repos = @(Get-ChildItem -Path (Split-Path $scriptDir -Parent) -Directory |
-        Where-Object { (Test-Path (Join-Path $_.FullName '.git')) -and $Exclude -notcontains $_.Name } |
-        ForEach-Object { $_.FullName })
-}
+$Repos = @($Repos | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 Write-Host "sweep: $($Repos.Count) repo(s)  ceil=${CeilMB}MB" -ForegroundColor Cyan
 
 function Invoke-Sampled([string[]]$CliArgs) {
@@ -82,12 +80,11 @@ $rows = foreach ($repo in $Repos) {
     $sidecar = Grab 'sidecar cache:'
 
     $sym = Pick-Symbol $repo
-    $refCs = $null; $refCpp = $null; $refLex = $null; $refMs = $null; $refPeak = $null; $refKilled = $false; $parsed = $null; $cand = $null
+    $refCs = $null; $refLex = $null; $refMs = $null; $refPeak = $null; $refKilled = $false
     $searchMs = $null
     if ($sym) {
         $refs = Invoke-Sampled @('refs', $repo, $sym)
-        if ($refs.Stderr -match '(\d+)\s+C# semantic\s+\+\s+()(\d+)\s+name-matched') { $refCs = [int]$Matches[1]; $refCpp = [int]$Matches[2]; $refLex = [int]$Matches[3] }
-        if ($refs.Stdout -match '(\d+)/(\d+)\s+candidate C/C\+\+ file\(s\) parsed') { $parsed = [int]$Matches[1]; $cand = [int]$Matches[2] }
+        if ($refs.Stderr -match '(\d+)\s+C# semantic\s+\+\s+(\d+)\s+name-matched') { $refCs = [int]$Matches[1]; $refLex = [int]$Matches[2] }
         $refMs = $refs.Ms; $refPeak = $refs.PeakMB; $refKilled = $refs.Killed
         $sr = Invoke-Sampled @('search', $repo, $sym); $searchMs = $sr.Ms
     }
@@ -96,7 +93,7 @@ $rows = foreach ($repo in $Repos) {
     [pscustomobject]@{
         Repo = $name; Files = $files; IdxMs = $idxMs; IdxPeakMB = $idxPeak; IdxKilled = $idxKilled; IdxErr = $idxErr
         Warns = $warns; Sidecar = $sidecar; Sym = $sym
-        RefCs = $refCs; RefCpp = $refCpp; RefLex = $refLex; Parsed = $parsed; Candidates = $cand
+        RefCs = $refCs; RefLex = $refLex
         RefMs = $refMs; RefPeakMB = $refPeak; RefKilled = $refKilled; SearchMs = $searchMs
     }
 }
@@ -107,14 +104,14 @@ $fmt = "{0,-20} {1,8} {2,8} {3,9} {4,6} {5,10} {6,8} {7,9}"
 Write-Host ($fmt -f 'repo', 'files', 'idx ms', 'idxPeak', 'warns', 'refs', 'refs ms', 'refPeak')
 Write-Host ('-' * 88)
 foreach ($r in $rows) {
-    $refTot = if ($null -ne $r.RefCs) { "$($r.RefCs)/$($r.RefCpp)/$($r.RefLex)" } else { '-' }
+    $refTot = if ($null -ne $r.RefCs) { "$($r.RefCs)/$($r.RefLex)" } else { '-' }
     $flag = ''
     if ($r.IdxKilled -or $r.RefKilled) { $flag = ' !KILLED' }
     elseif ($r.IdxErr) { $flag = " !$($r.IdxErr)" }
     Write-Host (($fmt -f $r.Repo, $r.Files, [int]$r.IdxMs, "$([int]$r.IdxPeakMB)MB", $r.Warns, $refTot, [int]$r.RefMs, "$([int]$r.RefPeakMB)MB") + $flag)
 }
 Write-Host ""
-Write-Host "refs column = C# semantic / 0 / name-matched reference counts for an auto-picked symbol per repo (C/C++ is a name search since v1.0.239)." -ForegroundColor DarkGray
+Write-Host "refs column = C# semantic / name-matched reference counts for an auto-picked symbol per repo." -ForegroundColor DarkGray
 $maxIdxPeak = ($rows | Measure-Object -Property IdxPeakMB -Maximum).Maximum
 $maxRefPeak = ($rows | Where-Object { $null -ne $_.RefPeakMB } | Measure-Object -Property RefPeakMB -Maximum).Maximum
 $killed = @($rows | Where-Object { $_.IdxKilled -or $_.RefKilled }).Count

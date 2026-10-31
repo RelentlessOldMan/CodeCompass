@@ -6,8 +6,8 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Unit coverage for the comment/string classifier behind the find_references lexical backfill (the v1.0.212
-// precision fix). A whole-word hit that lands inside a comment or string/char literal is NOT a reference; one in
+// Unit coverage for the comment/string classifier behind the find_references lexical backfill (what
+// keeps it precise). A whole-word hit that lands inside a comment or string/char literal is NOT a reference; one in
 // real code (including inside an interpolation hole) IS. C# is classified by Roslyn's lexer, C/C++ by a
 // conservative C-family scanner. The bias everywhere is: when in doubt, DON'T suppress (never drop a real ref).
 public class LexicalSpanFilterTests
@@ -15,7 +15,7 @@ public class LexicalSpanFilterTests
     private static int Col(string line, string needle) => line.IndexOf(needle, System.StringComparison.Ordinal) + 1; // 1-based
 
     // Paths that differ only in case are different files on a case-sensitive tree (Reg.h / reg.h), so the span cache must
-    // key them apart (review finding 13). This checks the key itself on ANY filesystem: on a case-insensitive one both
+    // key them apart. This checks the key itself on ANY filesystem: on a case-insensitive one both
     // spellings open the same file, so after the content changes, a lookup under the other spelling must re-read it - an
     // ignore-case cache would serve the first spelling's spans. (The end-to-end test in CppNameRefsTests needs a
     // case-sensitive folder, which not every machine can make.)
@@ -85,7 +85,7 @@ public class LexicalSpanFilterTests
         Assert.False(f.IsInCommentOrString(path, 7, Col(lines[6], "widget"))); // real function definition
     }
 
-    // Regression (review finding): a C++ digit separator (10'000, 0x1'0000, 1'000'000) must NOT be read as a
+    // Regression: a C++ digit separator (10'000, 0x1'0000, 1'000'000) must NOT be read as a
     // char-literal opener. If it were, an odd number of apostrophes opens a literal that swallows the rest of the
     // line and DROPS a real reference after it - the catastrophic false-negative the invariant forbids.
     [Theory]
@@ -102,7 +102,7 @@ public class LexicalSpanFilterTests
         Assert.False(f.IsInCommentOrString(path, 1, Col(line, "Widget")));   // real ref must survive
     }
 
-    // Regression (review finding): an identifier ending in 'R' abutting a string ('FOOR"..."') must NOT be read as
+    // Regression: an identifier ending in 'R' abutting a string ('FOOR"..."') must NOT be read as
     // a C++ raw string - a bogus raw delimiter never closes and swallows real code to EOL. A genuine raw string
     // (bare R"(...)" or an encoding-prefixed u8R"(...)") still is.
     [Fact]
@@ -150,7 +150,7 @@ public class LexicalSpanFilterTests
         Assert.False(f.IsInCommentOrString(path, 1, Col(line, "Widget")));   // real ref must survive
     }
 
-    // Review 2026-10-05: C/C++ references are a name search now, so this scanner alone decides code vs comment/string for
+    // C/C++ references are a name search now, so this scanner alone decides code vs comment/string for
     // every C/C++ hit. Four shapes it misread, each silently dropping a real reference:
 
     // (1) a backslash line-continuation inside a string, in a CRLF file (only backslash+LF was recognized).
@@ -282,7 +282,7 @@ public class LexicalSpanFilterTests
         Assert.True(filter.IsInCommentOrString(System.IO.Path.Combine(repo.Root, "f0.c"), 1, 4)); // revisited: re-read, same answer
     }
 
-    // SEM-C8: C# hits are classified by asking the tree about each point, not by building all the file's comment/string
+    // C# hits are classified by asking the tree about each point, not by building all the file's comment/string
     // spans. The answer must match the span builder it replaced (frozen below) at EVERY position of the text.
     private static readonly string[] CsPieces =
     {
@@ -338,7 +338,7 @@ public class LexicalSpanFilterTests
         Assert.Equal(0, f.FilesReadFromDisk);
     }
 
-    // The span builder exactly as it was before SEM-C8 (frozen copy): the oracle for the point lookup.
+    // The span builder exactly as it was before the point lookup replaced it (frozen copy): the oracle for the point lookup.
     private static class CSharpSpanBuilder
     {
         public static (int, int, int, int)[] Spans(string text)

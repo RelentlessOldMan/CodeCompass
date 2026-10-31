@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Fabricate a synthetic firmware repo that reproduces the measured SHAPE of a large proprietary C firmware
-  tree (see codecompass-synthetic-corpus-*.txt), as REUSABLE regression infrastructure: each structural
+  tree (see docs/synthetic-corpus-generator.md), as REUSABLE regression infrastructure: each structural
   property that has ever caused a defect is an INDEPENDENT knob, and the generator emits a ground-truth
   manifest of every symbol's definition + reference sites so find_references/find_callees become pass/fail
   assertions instead of eyeballed counts.
@@ -10,10 +10,11 @@
   The one fact that matters: ~90% of bytes live in ~2% of files (giant generated register headers with ~1M
   #defines each). Scale by COUNTS, never per-file size - the high-macro-density headers ARE the pathology,
   so keep at least one at any scale. Deterministic given -Seed. No compile_commands.json by default (the
-  firmware norm and the best-effort-clang trigger); -CompileDb partial|full generates one as an A/B control.
+  firmware norm); -CompileDb partial|full writes one as an A/B control (CodeCompass does not read it, so
+  results should not change).
 
-  Knobs map 1:1 to observed failure modes (spec 3): -MacroDensity (preprocessor memory), -BlobFiles (parse
-  cost), -MaxHeaderMB (streaming), -CompileDb (disclosure/fallback), -BuildOutput (exclusion + lexical
+  Knobs map 1:1 to observed failure modes: -MacroDensity (macro-dense headers), -BlobFiles (parse
+  cost), -MaxHeaderMB (streaming), -CompileDb (A/B control), -BuildOutput (exclusion + lexical
   noise), -TinyFiles (per-file overhead / SMB stat pressure), -Dirs/-Depth (path handling), -CrossRefs
   (reference correctness), -LinkedRoots (federation). Dial one against a fixed baseline to attribute a
   regression.
@@ -21,24 +22,27 @@
 .PARAMETER Out           Output directory (created; cleared if it exists).
 .PARAMETER Scale         Multiplier on the count knobs (default 0.01). Per-file sizes are NOT scaled.
 .PARAMETER Seed          RNG seed for deterministic output (default 1337).
+  The count defaults below (and -Dirs) describe the reference shape, a ~90 GB proprietary C firmware tree,
+  and are multiplied by -Scale.
+
 .PARAMETER MacroDensity  #defines per giant register header (default 1,000,000) - the memory-bug axis.
-.PARAMETER GiantHeaders  Count of high-macro-density ~MaxHeaderMB headers (full-repo 178; kept >=1 if >0).
-.PARAMETER BigHeaders    Count of 10-100 MB headers (full-repo 655).
-.PARAMETER MedHeaders    Count of 1-10 MB headers (full-repo 1957).
-.PARAMETER OrdinaryHeaders Count of ~6.6 KB headers (full-repo 7400).
-.PARAMETER CFiles        Count of .c files (~628 lines, cross-dir call edges) (full-repo 5123).
-.PARAMETER TinyFiles     Count of ~1 KB .csv (file-COUNT pressure) (full-repo 20586).
+.PARAMETER GiantHeaders  Count of high-macro-density ~MaxHeaderMB headers (kept >=1 if >0).
+.PARAMETER BigHeaders    Count of 10-100 MB headers.
+.PARAMETER MedHeaders    Count of 1-10 MB headers.
+.PARAMETER OrdinaryHeaders Count of ~6.6 KB headers.
+.PARAMETER CFiles        Count of .c files (~628 lines, cross-dir call edges).
+.PARAMETER TinyFiles     Count of ~1 KB .csv (file-COUNT pressure).
 .PARAMETER BlobFiles     Count of high-byte zero-symbol data blobs (parse-cost axis).
 .PARAMETER MaxHeaderMB   Size of each giant header (default 110). The pathology; never scaled down.
 .PARAMETER CompileDb     none | partial | full - emit a compile_commands.json covering none/half/all .c.
 .PARAMETER BuildOutput   Emit .o/.elf/.lst/.a/.bak beside sources (default $true).
-.PARAMETER Dirs          Approximate directory count (full-repo 5700).
-.PARAMETER Depth         Approximate max path depth (full-repo 18).
+.PARAMETER Dirs          Approximate directory count.
+.PARAMETER Depth         Approximate max path depth (default 8; capped at 12).
 .PARAMETER LinkedRoots   Split the .c files across N sibling trees (federation). Default 1.
 .PARAMETER UnresolvedIncludes  Emit N .c TUs that #include a vendor header absent from the tree, each with a
-                         reference to vendor_gated() guarded by a macro that only the missing header defines
-                         (so the reference is genuinely UNREACHABLE). Exercises doctor's unresolved-include
-                         scan and find_references' per-query "includes unresolved" disclosure. Default 0 (off).
+                         reference to vendor_gated() guarded by a macro that only the missing header defines.
+                         C/C++ references are a name search, so -Verify expects those uses to be listed anyway,
+                         with the answer's matched-by-name note. Default 0 (off).
 .PARAMETER Manifest      Emit _corpus-manifest.json of ground-truth def/ref sites (default $true).
 .PARAMETER Run           Index it and measure a find_references (time + peak RSS).
 .PARAMETER Verify        Run the correctness oracle: for a sample of symbols, assert find_references matches
@@ -133,8 +137,8 @@ foreach ($rt in $rootsList) {
 function PickDir { return $dirList[$rng.Next(0, $dirList.Count)] }
 
 # Register-map header: MacroDensity object-like #defines (3 per register, ~90 chars/line), capped at
-# MaxHeaderMB. Density is INDEPENDENT of size: -MacroDensity high + -MaxHeaderMB low still stresses the
-# preprocessor macro table (the actual bug axis) without the bytes.
+# MaxHeaderMB. Density is INDEPENDENT of size: -MacroDensity high + -MaxHeaderMB low still gives a
+# symbol-dense header (the actual bug axis) without the bytes.
 function New-RegHeader([string]$path, [int]$defines, [long]$maxBytes, [int]$fam) {
     $guard = "REGMAP_" + [System.IO.Path]::GetFileNameWithoutExtension($path).ToUpper() + "_H"
     # A 1 MB StreamWriter buffer + BATCHED StringBuilder chunks (~5 MB) written in one call each. Per-line
@@ -161,7 +165,7 @@ function New-RegHeader([string]$path, [int]$defines, [long]$maxBytes, [int]$fam)
 
 # Giants fill to -MaxHeaderMB by default (byte shape drives "bigger repos"); -MacroDensity, when explicitly
 # set, caps the define count instead - the pure "many macros, few bytes" memory-axis test (pair with a small
-# -MaxHeaderMB). Either way a giant carries ~1M+ #defines, which is the preprocessor stressor.
+# -MaxHeaderMB). Either way a giant carries ~1M+ #defines, which is the stressor.
 $giantDefineCap = if ($PSBoundParameters.ContainsKey('MacroDensity')) { $MacroDensity } else { [int]::MaxValue }
 Write-Host "  register headers: $nGiant giant (<=${MaxHeaderMB}MB, densityCap $giantDefineCap) + $nBig big + $nMed medium ..."
 $giantPaths = New-Object System.Collections.Generic.List[string]
@@ -197,10 +201,9 @@ for ($i = 0; $i -lt $nBlob; $i++) {
 # another dir). Ground-truth def/ref sites are recorded as we emit, for the correctness oracle.
 #
 # GIANT-INCLUDE STRESS: the first $GiantIncluders .c files are CO-LOCATED with a giant header and #include
-# it (co-location guarantees the include resolves via -I<dir>, so clang actually ingests the ~1M macros -
-# random dirs would silently fail to resolve and test nothing). Each also calls a shared HOT SYMBOL
-# (hot_shared), so find_references(hot_shared) must parse EVERY giant-including TU in one query - the
-# aggregate-memory test: does per-TU dispose keep peak flat across N giant TUs, or does it creep?
+# it (co-location keeps the include resolvable by a plain -I<dir>, as in a real tree). Each also calls a
+# shared HOT SYMBOL (hot_shared), so find_references(hot_shared) must cover EVERY giant-including file in one
+# query - the aggregate-memory test: does peak stay flat across N files next to giant headers, or does it creep?
 $groundTruth = @{}
 $cInfo = New-Object System.Collections.Generic.List[object]
 $nGiantInc = if ($giantPaths.Count -gt 0) { [Math]::Min($GiantIncluders, $nC) } else { 0 }
@@ -254,9 +257,8 @@ Write-Host "  giant-include stress: $nGiantInc .c co-located with + including a 
 
 # UNRESOLVED-INCLUDE STRESS: N .c TUs each #include a vendor header that exists NOWHERE in the tree. Each holds
 # a reference to vendor_gated() inside #ifdef VENDOR_OK - and VENDOR_OK is defined ONLY by that missing header -
-# so the reference is preprocessed out and is genuinely UNREACHABLE without the header. This is the honest
-# negative case: doctor's unresolved-include scan must count these TUs, find_references' per-query disclosure
-# must name the missing headers, and the oracle asserts the gated refs are NOT (and should not be) resolved.
+# so a compiler would drop the reference. C/C++ references are a name search, so the oracle asserts these
+# gated uses ARE listed (a use of the name is still a use) and that the answer carries the matched-by-name note.
 $nUnres = if ($UnresolvedIncludes -gt 0) { [Math]::Min($UnresolvedIncludes, [Math]::Max(1, $nC)) } else { 0 }
 if ($nUnres -gt 0) {
     $vgPath = Join-Path (PickDir) "vendor_gated.c"
@@ -275,9 +277,9 @@ if ($nUnres -gt 0) {
         $ul.Add("#endif")
         Set-Content $up ($ul -join "`n") -Encoding utf8
     }
-    # vendor_gated: defined once; every listed ref is expected UNREACHABLE (empty reachable set).
+    # vendor_gated: defined once; every gated ref goes in unreachableRefs (the -Verify gated-refs check).
     $groundTruth["vendor_gated"] = @{ def = "${vgPath}:1"; refs = @(); unreachableRefs = @($unreach) }
-    Write-Host "  unresolved-include stress: $nUnres .c #include a missing vendor header; $($unreach.Count) UNREACHABLE ref(s) to vendor_gated()"
+    Write-Host "  unresolved-include stress: $nUnres .c #include a missing vendor header; $($unreach.Count) gated ref(s) to vendor_gated()"
 }
 
 Write-Host "  $nCsv csv (tiny-file pressure) ..."
@@ -288,6 +290,7 @@ for ($i = 0; $i -lt $nCsv; $i++) {
 }
 
 # compile_commands.json (A/B control). none = the firmware default; partial = half the .c; full = all.
+# The command string is plain data in the usual compile_commands shape; nothing here runs it.
 if ($CompileDb -ne 'none' -and $cInfo.Count -gt 0) {
     $take = if ($CompileDb -eq 'full') { $cInfo.Count } else { [int]($cInfo.Count / 2) }
     $entries = for ($k = 0; $k -lt $take; $k++) {
@@ -350,8 +353,8 @@ if ($Verify) {
     $color = if ($fail -eq 0) { 'Green' } else { 'Red' }
     Write-Host ("Oracle: {0}/{1} symbols resolved their expected cross-file reference." -f $pass, ($pass + $fail)) -ForegroundColor $color
 
-    # Negative + disclosure oracle: symbols whose refs are all UNREACHABLE (behind a macro only a missing
-    # header defines). find_references must NOT resolve them, and must DISCLOSE the unresolved include.
+    # Gated-refs oracle: symbols whose uses sit behind a macro only a missing header defines. find_references
+    # must still list them (name search) and say the C/C++ answer is matched by name.
     $gated = @($groundTruth.Keys | Where-Object { $groundTruth[$_].unreachableRefs -and $groundTruth[$_].unreachableRefs.Count -gt 0 })
     if ($gated.Count -gt 0) {
         Write-Host "--- gated-refs oracle: uses behind a missing header are found by name + the by-name note fires ---"
@@ -361,8 +364,8 @@ if ($Verify) {
             $p = Start-Process $exe -ArgumentList @("refs", $outFull, $sym) -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
             $null = $p.WaitForExit(60000)
             $out = Get-Content $o -Raw; $err = Get-Content $e -Raw
-            # C/C++ references are a NAME search (no compiler since v1.0.239): a use behind a missing header is still a
-            # use of the name, so it IS listed, and the answer (on STDOUT, so `refs > out.txt` keeps it) says so.
+            # C/C++ references are a NAME search: a use behind a missing header is still a use of the name, so it
+            # IS listed, and the answer (on STDOUT, so `refs > out.txt` keeps it) says so.
             $missing = 0
             foreach ($u in $unrefs) {
                 $parts = $u -split ':'; $line = $parts[-1]; $file = [System.IO.Path]::GetFileName(($parts[0..($parts.Count-2)] -join ':'))

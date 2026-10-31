@@ -9,10 +9,10 @@ using Xunit;
 namespace CodeCompass.Core.Tests;
 
 // The repo being indexed is UNTRUSTED input (a fresh clone can carry hostile links, build metadata and content), and
-// whatever lands in the index is quoted back into an LLM's context. These pin the review's WP-B fixes.
+// whatever lands in the index is quoted back into an LLM's context. These pin the fixes that keep it contained.
 public class HostileRepoTests
 {
-    // Review P0-2: a file symlink in a clone pointing OUTSIDE the repo (e.g. at ~/.ssh/id_rsa) was followed - the
+    // A file symlink in a clone pointing OUTSIDE the repo (e.g. at ~/.ssh/id_rsa) was followed - the
     // walker only skipped DIRECTORY reparse points - so the target's content was indexed and served by search_code.
     [Fact]
     public void FileSymlink_IsNeverFollowed_ByTheWalk_TheBuild_OrATargetedUpdate()
@@ -53,7 +53,7 @@ public class HostileRepoTests
         Assert.True(FileWalker.IsLink(new DirectoryInfo(junction)));
     }
 
-    // Review P1-17: one hostile/minified single-line file made every hit copy the WHOLE line (a 100 MB line x the
+    // One hostile/minified single-line file made every hit copy the WHOLE line (a 100 MB line x the
     // result cap = multi-GB) and flooded the agent's context with attacker-chosen text.
     [Fact]
     public void HugeSingleLine_HitsCarryABoundedWindow_ThatStillContainsTheMatch()
@@ -123,7 +123,7 @@ public class HostileRepoTests
         Assert.False(Ref(results[1]));  // " Foobar" - a substring, even though it was windowed
     }
 
-    // Review P2-22: control characters in a matched line could render as a forged extra result/disclosure line.
+    // Control characters in a matched line could render as a forged extra result/disclosure line.
     [Fact]
     public void LineText_IsScrubbedOfForgeryCharacters_WithoutShiftingColumns()
     {
@@ -155,7 +155,7 @@ public class HostileRepoTests
         finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
     }
 
-    // Review P2-19: the repo's own .codecompass.json is untrusted - it can't order absurd parallelism or a silent
+    // The repo's own .codecompass.json is untrusted - it can't order absurd parallelism or a silent
     // in-session index of a huge tree. The operator's environment variables still win unclamped.
     [Fact]
     public void RepoConfigFile_ResourceKnobsAreClamped_EnvIsNot()
@@ -175,7 +175,7 @@ public class HostileRepoTests
         finally { Environment.SetEnvironmentVariable("CODECOMPASS_THREADS", old); }
     }
 
-    // Review P2-20: a (possibly prompt-injected) agent must not be able to link a credential directory, a whole drive,
+    // A (possibly prompt-injected) agent must not be able to link a credential directory, a whole drive,
     // or the user profile and then read it back through search_code.
     [Fact]
     public void LinkAdd_RefusesCredentialDirsDriveRootsAndTheProfile()

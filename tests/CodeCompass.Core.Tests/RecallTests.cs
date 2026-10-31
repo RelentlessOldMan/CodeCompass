@@ -13,7 +13,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// Review WP-G: deterministic false negatives ("lexical is the floor" broken) and silently-incomplete answers.
+// Deterministic false negatives ("lexical is the floor" broken) and silently-incomplete answers.
 public class RecallTests
 {
     private static void BuildIndex(TempRepo repo)
@@ -22,7 +22,7 @@ public class RecallTests
         t.Dispose(); s.Dispose();
     }
 
-    // P1-15: a single line over 16 MB is cut mid-line; a token straddling that cut had trigrams on both sides, so
+    // A single line over 16 MB is cut mid-line; a token straddling that cut had trigrams on both sides, so
     // neither block's Bloom admitted it, the block scan couldn't span the cut, and the file reported "handled" - a
     // deterministic zero for text that is right there.
     [Fact]
@@ -40,7 +40,7 @@ public class RecallTests
         using (t) using (s) Assert.Single(t.Search("NeedleSpan"));
     }
 
-    // The non-ASCII twin of the test above (field report): the forced cut must land on a codepoint boundary, or the split
+    // The non-ASCII twin of the test above: the forced cut must land on a codepoint boundary, or the split
     // character mis-decodes on both sides and the text next to it can't be found. A 4-byte emoji is placed so the cut falls
     // 1, 2 and 3 bytes into it; the token glued to it - and the pair - must still be found, exactly once.
     [Theory]
@@ -68,7 +68,7 @@ public class RecallTests
         }
     }
 
-    // P2-8: newlines INSIDE a multi-line match weren't counted, so each later match reported a line too small.
+    // Newlines INSIDE a multi-line match weren't counted, so each later match reported a line too small.
     [Fact]
     public void MultiLineQuery_LaterMatchesReportTheRightLine()
     {
@@ -77,7 +77,7 @@ public class RecallTests
         Assert.Equal(new[] { 1, 3 }, results.Select(r => r.Line));
     }
 
-    // P2-5: line-aligned blocks put every block-crossing trigram (it contains '\n') in neither Bloom, so a multi-line
+    // Line-aligned blocks put every block-crossing trigram (it contains '\n') in neither Bloom, so a multi-line
     // query whose match crosses a block boundary was a silent miss in any block-indexed (>= 8 MB) file.
     [Fact]
     public void MultiLineQuery_AcrossABlockBoundary_IsFound()
@@ -98,7 +98,7 @@ public class RecallTests
         }
     }
 
-    // P2-11: a short read in the block scan (the file changed since indexing) returned "handled" with no hits, so the
+    // A short read in the block scan (the file changed since indexing) returned "handled" with no hits, so the
     // caller never fell back to a whole-file scan.
     [Fact]
     public void BlockScanReadFailure_FallsBackToAWholeFileScan()
@@ -116,7 +116,7 @@ public class RecallTests
         using (t) using (s) Assert.Single(t.Search("LastBlockToken"));
     }
 
-    // P2-9: a binary-sniffed file got no ledger entry, so every update re-read it in full just to re-discover it.
+    // A binary-sniffed file got no ledger entry, so every update re-read it in full just to re-discover it.
     [Fact]
     public void BinaryFile_IsRecordedInTheLedger()
     {
@@ -133,7 +133,7 @@ public class RecallTests
         Assert.Equal(0, u.Stats.Added + u.Stats.Modified + u.Stats.Removed); // unchanged binary: not a phantom add
     }
 
-    // P2-12: same-size edit within the same timestamp tick right after the ledger was written: size+mtime matched and the
+    // Same-size edit within the same timestamp tick right after the ledger was written: size+mtime matched and the
     // prefilter skipped the file forever ("racily clean").
     [Fact]
     public void RacilyCleanEdit_IsPickedUpByUpdate()
@@ -152,7 +152,7 @@ public class RecallTests
         }
     }
 
-    // P2-14: case-insensitive candidate selection expanded each char to {lower, upper} only, but the verify step uses
+    // Case-insensitive candidate selection expanded each char to {lower, upper} only, but the verify step uses
     // OrdinalIgnoreCase - so the micro sign never admitted a file written with Greek mu (both uppercase to U+039C).
     [Fact]
     public void CaseInsensitiveSearch_UsesTheSameFoldingAsTheVerify()
@@ -165,7 +165,7 @@ public class RecallTests
         using (t) using (s) Assert.Single(t.Search(micro + "sec", caseSensitive: false));
     }
 
-    // P1-16: default "build output" names matched at any depth, so a monorepo's packages/ sources were invisible -
+    // Default "build output" names matched at any depth, so a monorepo's packages/ sources were invisible -
     // with no disclosure and no way back in.
     [Fact]
     public void PackagesDir_IsDisclosedOnAZero_AndKeepDirsIndexesIt()
@@ -193,7 +193,7 @@ public class RecallTests
         }
     }
 
-    // P1-18: find_definition had no cap - a common name across a federated workspace dumped every definition.
+    // find_definition had no cap - a common name across a federated workspace dumped every definition.
     [Fact]
     public void FindDefinition_IsCapped_WithAMoreExistFooter()
     {
@@ -210,7 +210,7 @@ public class RecallTests
         finally { ServerContext.Init(repo.Root); }
     }
 
-    // P2-2: the reference backfill's raw-hit budget could run out on non-references before reaching a real one, and the
+    // The reference backfill's raw-hit budget could run out on non-references before reaching a real one, and the
     // answer came back as a confident "No references found". Non-references (a longer identifier containing the name) no
     // longer count toward the budget at all, so the real use is found.
     [Fact]
@@ -267,7 +267,7 @@ public class RecallTests
         finally { ServerContext.Init(repo.Root); }
     }
 
-    // P2-6: the comment/string filter judged the INDEX's coordinates against the CURRENT file. After an edit those
+    // The comment/string filter judged the INDEX's coordinates against the CURRENT file. After an edit those
     // coordinates can land inside a comment that wasn't there - dropping a real reference. Fail open when the token is
     // no longer at that position.
     [Fact]
@@ -281,7 +281,7 @@ public class RecallTests
         Assert.False(f.IsInCommentOrString(path, 1, 10));  // a stale position inside the comment: keep the hit
     }
 
-    // P2-10: a request for (nearly) the whole budget waited for a full drain while small requests kept winning.
+    // A request for (nearly) the whole budget waited for a full drain while small requests kept winning.
     [Fact]
     public async Task ByteBudget_ServesRequestsInArrivalOrder()
     {

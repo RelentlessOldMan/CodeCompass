@@ -6,7 +6,7 @@ namespace CodeCompass.Core.Tests;
 
 // Auto-reconcile "suspenders": RepositoryIndexer.PruneIgnored physically drops paths the CURRENT ignore rules
 // exclude but a STALE index (built by an older/looser version) still holds - a rival tool's .claude/ cache
-// dump, a dir since added to CODECOMPASS_IGNORE. The query-time filter (v1.0.198) already HIDES them; this
+// dump, a dir since added to CODECOMPASS_IGNORE. The query-time filter already HIDES them; this
 // shrinks the on-disk index so it stays clean, with no stat-walk and no source reads. The MCP server runs it
 // on startup for the network/huge case where the full reconcile is gated off.
 public class StaleIndexPruneTests

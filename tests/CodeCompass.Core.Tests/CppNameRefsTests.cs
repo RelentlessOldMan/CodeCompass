@@ -113,7 +113,7 @@ public class CppNameRefsTests
         Assert.DoesNotContain("reached its budget", all);
     }
 
-    // Qualifiers on the answer go to STDOUT with the hits (field report: on stderr, `refs ... > out.txt` silently dropped
+    // Qualifiers on the answer go to STDOUT with the hits (on stderr, `refs ... > out.txt` silently dropped
     // the C/C++ coverage note). A file past the per-file cap must also say so there - a cut-off list must never read as
     // complete. Checked on the two streams separately; the other CLI tests merge them.
     [Fact]
@@ -133,7 +133,7 @@ public class CppNameRefsTests
         Assert.Equal(ReferenceMerge.MaxLexicalHitsPerFile, Lines(stdout).Count(l => l.StartsWith("busy.c:")));
     }
 
-    // The CLI twin of the MCP check: in a mixed repo, a symbol only C# uses gets no C/C++ caveat (field report: the caveat
+    // The CLI twin of the MCP check: in a mixed repo, a symbol only C# uses gets no C/C++ caveat (the caveat
     // must follow the query, not the repo's languages).
     [Fact]
     public void Cli_Refs_CSharpOnlySymbol_InAMixedRepo_HasNoCppNote()
@@ -167,7 +167,7 @@ public class CppNameRefsTests
     }
 
     // No index (never indexed, or a subfolder of an indexed repo): the name search can't run, so `refs` must not print a
-    // confident "0" with exit 0 - it says nothing outside C# was searched and fails like `search`/`def` do (review finding 5).
+    // confident "0" with exit 0 - it says nothing outside C# was searched and fails like `search`/`def` do.
     [Fact]
     public void Cli_Refs_NoIndex_SaysSoAndFails()
     {
@@ -184,7 +184,7 @@ public class CppNameRefsTests
     }
 
     // A candidate file that can't be read at query time (locked by an editor, an ACL, a share error) used to contribute
-    // nothing, silently - a confident 0 if every use was in it. The answer now names it (review finding 6).
+    // nothing, silently - a confident 0 if every use was in it. The answer now names it.
     [Fact]
     public void Mcp_UnreadableCandidate_IsDisclosed()
     {
@@ -206,7 +206,7 @@ public class CppNameRefsTests
     }
 
     // A cancelled query (client gave up, session shutting down or re-pointing) must stop the name search between files
-    // instead of reading every candidate while holding the index read lock (review finding 11).
+    // instead of reading every candidate while holding the index read lock.
     [Fact]
     public void NameSearch_HonorsCancellation()
     {
@@ -225,7 +225,7 @@ public class CppNameRefsTests
     }
 
     // A qualified C++ query (Widget::spin - a natural spelling for an agent) returned only the out-of-class definition and
-    // none of the calls, which spell just `w.spin(...)`. It now searches the member name and says so (review finding 12).
+    // none of the calls, which spell just `w.spin(...)`. It now searches the member name and says so.
     [Fact]
     public void Mcp_QualifiedCppQuery_FindsTheCalls()
     {
@@ -243,7 +243,7 @@ public class CppNameRefsTests
         finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
     }
 
-    // Review round 2, finding 8: the split was at the last "::" anywhere, so a qualifier INSIDE template arguments was taken
+    // The split used to be at the last "::" anywhere, so a qualifier INSIDE template arguments was taken
     // as the member: std::vector<std::string> searched for `string>`. Template arguments are now skipped and dropped (uses
     // like `v.push_back` or `vector<int> v` don't spell them the same way, and a name search needs a plain identifier).
     [Theory]
@@ -263,7 +263,7 @@ public class CppNameRefsTests
         Assert.Contains($"\"{query}\"", note);
     }
 
-    // Review round 3: the `<` in an operator NAME is not a template bracket - `Foo::operator<<` became `operator`, which
+    // The `<` in an operator NAME is not a template bracket - `Foo::operator<<` became `operator`, which
     // matches every operator overload in the repo.
     [Theory]
     [InlineData("Foo::operator<<", "operator<<")]
@@ -281,7 +281,7 @@ public class CppNameRefsTests
     public void MemberOfQualified_LeavesOtherNamesAlone(string query) =>
         Assert.Equal((query, (string?)null), ReferenceMerge.MemberOfQualified(query));
 
-    // Review round 2, finding 4: the CLI printed the rewrite note only on its main path, so its early answers (name too
+    // The CLI used to print the rewrite note only on its main path, so its early answers (name too
     // short, no index) never said the query had been changed. The MCP tool always says so.
     [Fact]
     public void Cli_Refs_QualifiedQuery_EarlyAnswers_SayTheNameWasRewritten()
@@ -301,7 +301,7 @@ public class CppNameRefsTests
 
     // On a case-sensitive tree (Linux Samba shares, WSL, fsutil-enabled folders) Reg.h and reg.h are different files. The
     // comment/string classifier and the dedup keys compared paths ignoring case, so one file's comment spans were applied to
-    // the other and a real use was dropped (review finding 13; real netfilter pairs like xt_DSCP.c / xt_dscp.c).
+    // the other and a real use was dropped (real netfilter pairs like xt_DSCP.c / xt_dscp.c).
     [Fact]
     public void Mcp_CaseSensitiveTree_FilesDifferingOnlyInCase_AreKeptApart()
     {
@@ -329,7 +329,7 @@ public class CppNameRefsTests
         finally { CodeCompass.Mcp.ServerContext.Init(repo.Root); }
     }
 
-    // In-process (so coverage sees it): the reviewer's repro. Uses of a struct type were dropped as if they were its
+    // In-process (so coverage sees it): a repro of the bug. Uses of a struct type were dropped as if they were its
     // definition - `refs node` returned 0. Only the line with the body is the definition.
     [Fact]
     public void Mcp_StructTypeUses_AreReferences_OnlyTheBodyIsTheDefinition()
@@ -357,7 +357,7 @@ public class CppNameRefsTests
 
     // The scan budget must count REFERENCES, not raw substring hits: noisy files (longer identifiers containing the name,
     // C# files the semantic pass already answered) that sort first used to exhaust it, so the real C use later in path
-    // order was never read and the answer said "No references found" (review finding 2).
+    // order was never read and the answer said "No references found".
     [Fact]
     public void Mcp_NoisyFilesFirst_DoNotStarveTheRealReference()
     {

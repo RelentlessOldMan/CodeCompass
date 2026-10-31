@@ -9,7 +9,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// STQ-C3: search_symbols scans a segment's name bytes in chunks instead of decoding each name. It must pick exactly the
+// search_symbols scans a segment's name bytes in chunks instead of decoding each name. It must pick exactly the
 // names the old per-name test picked (decode to UTF-16, then Contains OrdinalIgnoreCase), in index order.
 public class SymbolNameScanTests
 {

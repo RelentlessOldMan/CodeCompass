@@ -60,7 +60,7 @@ public class McpToolsTests
         Assert.Contains("Helper", result);
     }
 
-    // Guardrail (v1.0.201): a whitespace-only query has no trigrams and would fall to a full-corpus scan
+    // Guardrail: a whitespace-only query has no trigrams and would fall to a full-corpus scan
     // returning noise; it must be rejected like an empty one.
     [Fact]
     public void SearchCode_WhitespaceOnly_IsRejected()
@@ -69,7 +69,7 @@ public class McpToolsTests
         Assert.Contains("non-empty", CodeCompassTools.SearchCode("   "));
     }
 
-    // Guardrail (v1.0.201): a relative link path would resolve against the server's launch dir, not the
+    // Guardrail: a relative link path would resolve against the server's launch dir, not the
     // workspace - reject it so the linked root is deterministic.
     [Fact]
     public void ManageLinks_Add_RelativePath_IsRejected()
@@ -89,7 +89,7 @@ public class McpToolsTests
         Assert.Contains("ABSOLUTE", msg);
     }
 
-    // Review finding: `remove purge=true` on a linked root this session has searched was always refused - the server itself
+    // `remove purge=true` on a linked root this session has searched used to be always refused - the server itself
     // held the index open, so the all-or-nothing clear said "in use, close it and retry", which the agent can't do from
     // inside its own session. The server lets go of the unlinked root first, so the purge deletes it.
     [Fact]
@@ -123,7 +123,7 @@ public class McpToolsTests
         }
     }
 
-    // Release-gate failure (2026-10-14): taking on a linked root starts a background reconcile of its index, and unlinking
+    // Taking on a linked root starts a background reconcile of its index, and unlinking
     // neither cancelled nor waited for it. A purge right after the root loaded met that reconcile holding the index's write
     // lock and kept the index ("index kept: in use"); a reconcile that lost the race could then write the deleted index back.
     // Parks the startup reconcile inside the write lock, then unlinks with purge: the unlink must stop it and delete the index.
@@ -183,7 +183,7 @@ public class McpToolsTests
         Assert.Contains("bogus", msg);
     }
 
-    // Guardrail (v1.0.201): reindex must not run a synchronous rebuild of an over-limit workspace (it would
+    // Guardrail: reindex must not run a synchronous rebuild of an over-limit workspace (it would
     // block/timeout the MCP call and orphan the build) - it returns the CLI guidance instead.
     [Fact]
     public void Reindex_OverAutoLimit_ReturnsCliGuidance()
@@ -208,7 +208,7 @@ public class McpToolsTests
     [Fact]
     public void FindReferences_ExcludesDataAndDocFileMatches()
     {
-        // Regression for the QSPR benchmark: a symbol name appearing in a CSV export or a tool's JSON
+        // Regression from a real repo's benchmark: a symbol name appearing in a CSV export or a tool's JSON
         // tag dump was reported as a "reference", drowning the real hits. Those data files are not code.
         using var repo = new TempRepo();
         repo.Write("src/Widget.cs", "namespace App { public class Widget { public void Run() { } } }");
@@ -368,7 +368,7 @@ public class McpToolsTests
     }
 
     // The host's defaults root it at the cwd (the repo) and load appsettings*.json from there with reload-on-change: a
-    // recursive watcher over the whole tree in every session, for config the server doesn't have (MCP-C2). Rooted at the
+    // recursive watcher over the whole tree in every session, for config the server doesn't have. Rooted at the
     // install dir, with nothing reloading.
     [Fact]
     public void McpHost_WatchesNoConfigFile_AndIsRootedAtTheInstallDir()
@@ -383,7 +383,7 @@ public class McpToolsTests
     }
 
     // A tree with no C# builds an empty model: nothing to hand back, but dropping it made the next C/C++ refs call walk the
-    // whole tree again to find no C# (MCP-C6; 9.6 s on a share). It stays - and a .cs added later still reaches it.
+    // whole tree again to find no C# (9.6 s on a share). It stays - and a .cs added later still reaches it.
     [Fact]
     public void IdleRelease_KeepsAnEmptyModel_AndAnAddedCsFileStillReachesIt()
     {
@@ -431,7 +431,7 @@ public class McpToolsTests
             Assert.DoesNotContain("MORE EXIST", full); // all 10 fit -> exact count, no truncation
             Assert.Contains("(10 matches)", full);
 
-            // The boundary the field review flagged: a cap EXACTLY equal to the count is complete, not truncated.
+            // The boundary case: a cap EXACTLY equal to the count is complete, not truncated.
             var exact = CodeCompassTools.SearchCode("FOObar", maxResults: 10);
             Assert.Equal(10, System.Text.RegularExpressions.Regex.Matches(exact, "regs.cs:").Count);
             Assert.DoesNotContain("MORE EXIST", exact);
@@ -440,7 +440,7 @@ public class McpToolsTests
         finally { ServerContext.Init(repo.Root); } // reset shared static state
     }
 
-    // QSPR field report: a JIRA CSV row was counted as a reference, so find_references now reads code files only. That
+    // A row of an issue-tracker CSV export was counted as a reference, so find_references now reads code files only. That
     // exclusion must not leak into search_code - literal search is exactly how you find a name in a CSV, JSON or log.
     [Fact]
     public void SearchCode_StillFindsDataFiles_ThatFindReferencesSkips()
@@ -683,7 +683,7 @@ public class McpToolsTests
         finally { ServerContext.Init(project.Root); }
     }
 
-    // CPU review MCP-C4: a later root is asked only for the rows still needed, not the whole limit again, so it doesn't
+    // A later root is asked only for the rows still needed, not the whole limit again, so it doesn't
     // read files whose hits would be thrown away. The shown rows are the same either way.
     [Fact]
     public void Federation_SearchCode_AsksALaterRootOnlyForTheRemainder()
@@ -720,7 +720,7 @@ public class McpToolsTests
         }
     }
 
-    // MCP-C4 for find_references: semantic C# hits already fill part of the cap, so the name search is asked only for
+    // The same for find_references: semantic C# hits already fill part of the cap, so the name search is asked only for
     // the rest. Here 3 semantic hits + a cap of 4 leave 2 name rows to find (1 shown + 1 to detect truncation).
     [Fact]
     public void FindReferences_NameSearch_AsksOnlyForTheRowsSemanticHitsLeft()
@@ -986,7 +986,7 @@ public class McpToolsTests
         finally { ServerContext.Init(repo.Root); }
     }
 
-    // Field report (1.0.189, two linked repos): a C#-only symbol's answer carried the C/C++ caveat from the OTHER root - the
+    // With two linked repos, a C#-only symbol's answer carried the C/C++ caveat from the OTHER root - the
     // caveat was scoped to the project, not the query. It must appear only when C/C++ files are part of THIS answer.
     [Fact]
     public void FindReferences_CSharpOnlySymbol_CarriesNoCppNote_EvenWithACppLinkedRoot()
@@ -1312,7 +1312,7 @@ public class McpToolsTests
         Assert.Contains("Widget", CodeCompassTools.FindDefinition("Widget"));
     }
 
-    // #75: session focus. A wrapper project links several big repos but the user wants to search only one at
+    // Session focus: a wrapper project links several big repos but the user wants to search only one at
     // a time. manage_links action=focus scopes every subsequent search to the chosen root(s); the excluded
     // roots' hits disappear and the result discloses the scoping so a narrowed search isn't read as "absent".
     [Fact]

@@ -13,7 +13,7 @@ namespace CodeCompass.Core.Changes.Segments;
 /// (sorted), sizes (int64), mtimes (int64), and raw 16-byte XxHash128 content hashes. Fixed-width
 /// columns make every field directly indexable by record number. Version 2 (written since v1.0.243) appends
 /// change times, file ids and hashed-at (int64 each) and a 32-byte SHA-256 column, which CodeCompass leaves
-/// zero - the layout another tool (CodeDiffer) reads; see docs/hash-ledger-format.md. Version 1 still reads.
+/// zero - the layout another tool reading the ledger expects; see docs/hash-ledger-format.md. Version 1 still reads.
 /// </summary>
 public static class SnapshotBaseFile
 {

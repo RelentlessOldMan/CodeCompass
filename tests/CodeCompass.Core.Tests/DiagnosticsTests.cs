@@ -9,7 +9,7 @@ namespace CodeCompass.Core.Tests;
 
 public class DiagnosticsTests
 {
-    // Field report: repeat broad queries over a share weren't getting faster because the block-index (sidecar) set was
+    // Repeat broad queries over a share weren't getting faster because the block-index (sidecar) set was
     // bigger than the in-process cache - invisible until doctor started comparing the two. It must say whether the set
     // fits, and when it doesn't, name the setting and the size that would.
     [Fact]
@@ -38,8 +38,8 @@ public class DiagnosticsTests
         finally { SidecarCache.ResetForTest(256L * 1024 * 1024); }
     }
 
-    // Field reports (UNC rounds): "why did this query read N GB?" was answered with CODECOMPASS_SEARCH_TRACE - per-candidate
-    // bytes split into block reads, whole-file reads and sidecar overhead. It's the tool the field uses to localize I/O,
+    // "Why did this query over a share read N GB?" is answered with CODECOMPASS_SEARCH_TRACE - per-candidate
+    // bytes split into block reads, whole-file reads and sidecar overhead. It's the tool users rely on to localize I/O,
     // so its output must keep working: a candidate total, the breakdown, and each file marked sidecar yes/no.
     [Fact]
     public void Cli_SearchTrace_BreaksDownWhereTheBytesWent()

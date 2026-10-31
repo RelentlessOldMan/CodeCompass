@@ -64,7 +64,7 @@ public class NetworkPathTests
     }
 
     // Linux/macOS: an NFS/CIFS/SMB mount is a path like any other, so it was treated as local and got the 3 s ledger margin
-    // against the SERVER's clock (review finding 5). The deepest mount containing the path decides.
+    // against the SERVER's clock. The deepest mount containing the path decides.
     private static readonly string[] MountRoots = { "/", "/mnt/nas", "/mnt/nas/scratch", "/Volumes/Team Share", "/net/hung" };
     private static readonly string[] NetworkRoots = { "/mnt/nas", "/Volumes/Team Share", "/net/hung" };
 
@@ -78,7 +78,7 @@ public class NetworkPathTests
     public void UnixMountTable_DeepestMountDecides(string path, bool network) =>
         Assert.Equal(network, NetworkPath.OnNetworkMount(path, MountRoots, r => NetworkRoots.Contains(r)));
 
-    // Review round 3: asking a mount for its type is a statfs, which blocks on a hung hard-mounted NFS export (or wakes an
+    // Asking a mount for its type is a statfs, which blocks on a hung hard-mounted NFS export (or wakes an
     // automount). Only the ONE mount that contains the path may be asked - never an unrelated one.
     [Fact]
     public void UnixMountTable_AsksOnlyTheContainingMount()

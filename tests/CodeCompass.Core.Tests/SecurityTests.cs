@@ -7,7 +7,7 @@ using Xunit;
 namespace CodeCompass.Core.Tests;
 
 // Hardening against a corrupt or tampered on-disk cache (the shared-machine / disk-corruption
-// threat from the security review): never read/return files outside the repo, never open files
+// threat): never read/return files outside the repo, never open files
 // outside the cache dir, and degrade to a rebuild rather than crash on structural corruption.
 public class SecurityTests
 {

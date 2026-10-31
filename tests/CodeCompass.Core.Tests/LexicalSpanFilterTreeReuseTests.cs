@@ -4,7 +4,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// MCP-C3: the C# name backfill classified each hit file by parsing it again, although the resident model had just parsed
+// The C# name backfill used to classify each hit file by parsing it again, although the resident model had just parsed
 // it. The span filter now borrows the model's tree - but only for the very text it was handed, so an edit since the model
 // was built is still judged on the new text.
 public class LexicalSpanFilterTreeReuseTests

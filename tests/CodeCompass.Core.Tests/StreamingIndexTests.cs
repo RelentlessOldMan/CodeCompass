@@ -152,7 +152,7 @@ public class StreamingIndexTests
             Assert.Equal(1, hit.Column);
 
             // Case-INSENSITIVE for the marker in the opposite case must ALSO resolve via the block index
-            // (this is the 1.0.135 defect: -i used to skip the sidecar and read the whole file).
+            // (a past defect: -i used to skip the sidecar and read the whole file).
             var ci = text.Search(marker.ToLowerInvariant(), 200, caseSensitive: false);
             var ciHit = Assert.Single(ci);
             Assert.Equal("huge.h", ciHit.Path);

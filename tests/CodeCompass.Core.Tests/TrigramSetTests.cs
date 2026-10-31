@@ -6,7 +6,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// IDX-C1: the bitset-backed TrigramSet must give exactly the distinct set the old per-char HashSet<long> gave, for every
+// The bitset-backed TrigramSet must give exactly the distinct set the old per-char HashSet<long> gave, for every
 // kind of text, and a reused set must not leak one file's trigrams into the next.
 public class TrigramSetTests
 {

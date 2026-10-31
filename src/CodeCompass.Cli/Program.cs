@@ -193,7 +193,7 @@ static int CmdSurvey(string[] args)
     }
 
     // Why this count won't equal `index` / `link list` - stated up front so a mismatch reads as by-design,
-    // not a bug (a real field-report question: one tool, several file counts).
+    // not a bug (a real user question: one tool, several file counts).
     Console.WriteLine();
     Console.WriteLine("Note: 'Indexed' is a pre-index ESTIMATE from directory metadata, not a count of a built index.");
     Console.WriteLine("  It is an upper bound and is expected to differ from 'codecompass index' / 'link list':");
@@ -1165,7 +1165,7 @@ static void NoteLinkedRootsNotSearched(string root)
 // Actionable staleness, disclosed at QUERY time (not only via doctor): the loaded index's OUTPUT logic is behind
 // this binary, so a rebuild would change results. This is exactly what a benchmarker running an old-built index
 // under a new binary needs to see. Content-version keyed, so a mere product-version difference stays silent. On
-// STDOUT with the answer (field report: on stderr, a redirected answer silently lost it).
+// STDOUT with the answer (on stderr, a redirected answer silently lost it).
 static void WarnIfIndexerBehind(string root)
 {
     var note = IndexMetaFile.BehindNote(IndexMetaFile.Read(root), root);

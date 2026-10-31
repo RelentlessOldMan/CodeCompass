@@ -59,7 +59,7 @@ public class WatcherTests
         Assert.Equal(0, Volatile.Read(ref fires)); // the pending flush must not run after Dispose
     }
 
-    // Review P1-5: a FATAL watcher error (share hiccup, invalidated handle) left it dead - no further events, ever,
+    // A FATAL watcher error (share hiccup, invalidated handle) left it dead - no further events, ever,
     // while it still looked enabled - so the index silently drifted. It is now replaced, and the lost window is
     // covered by a full-reconcile request.
     [Fact]
@@ -98,7 +98,7 @@ public class WatcherTests
         Assert.Equal(0, watcher.Restarts); // an overflowed watcher keeps running
     }
 
-    // Review P2-13: the pending set was case-INsensitive, so a case-only rename delivered only the old spelling and the
+    // The pending set was case-INsensitive, so a case-only rename delivered only the old spelling and the
     // index kept the stale casing.
     [Fact]
     public void Watcher_CaseOnlyRename_DeliversBothSpellings()

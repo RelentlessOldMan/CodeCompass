@@ -780,9 +780,10 @@ the features:
 Open questions and risks
 ------------------------
 
-- Real indexing throughput on a genuine dozens-of-GB polyglot repo on Windows
-  hardware is unmeasured. This is the number that validates the whole premise
-  and should be measured early, in phase 1.
+- Real indexing throughput on a genuine dozens-of-GB repo on Windows hardware
+  was the number that validates the whole premise. It is now measured (resolved):
+  see "Memory is bounded regardless of repo size" above, and the README's
+  performance tables.
 
 - The hard-block enforcement hook must be careful not to strand the agent when
   CodeCompass legitimately has no answer; the fallback path has to be reliable.

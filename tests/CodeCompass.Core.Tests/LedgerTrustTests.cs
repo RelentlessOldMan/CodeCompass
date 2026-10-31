@@ -10,7 +10,7 @@ namespace CodeCompass.Core.Tests;
 
 // The change ledger skips a file whose size + modified time match what was hashed. A same-size edit in the same timestamp
 // tick as the read ("racily clean") keeps both - and timestamps tick coarsely everywhere: FAT/exFAT 2 s, some NAS 1 s, and
-// even NTFS only advances on a ~1-16 ms timer, so back-to-back rewrites keep one sub-second stamp (measured in review).
+// even NTFS only advances on a ~1-16 ms timer, so back-to-back rewrites keep one sub-second stamp (measured).
 //
 // Rule (LedgerTrust): an entry is trusted only if the file was last modified safely BEFORE we started reading it - by a
 // margin that covers the coarsest tick locally, and an hour on a network share, whose clock we can't read. Otherwise its
@@ -208,7 +208,7 @@ public class LedgerTrustTests
     public void Decision_UnknownListedTime_StaysUnknown() =>
         Assert.Equal(0, LedgerTrust.RecordedMTime(0, ReadStart, network: false));
 
-    // ---- the second look: clock-independent trust for files the margin can't vouch for (review finding 3) ----
+    // ---- the second look: clock-independent trust for files the margin can't vouch for ----
     // A file whose stamp is in the future (a share whose clock runs ahead, a NAS without time sync, a future-dated file)
     // never passes the margin, so the old rule re-read it on every update forever - the whole tree on a share an hour
     // ahead. The stamp was already on the file when we first listed it, so its tick had started by then, and ends within
@@ -313,7 +313,7 @@ public class LedgerTrustTests
         Assert.Equal(-stamp, RecordedTicks(repo.Root, "a.txt"));
     }
 
-    // Review round 3: the bound comes from the ledger files' write times, which are on OUR clock only when the cache dir is
+    // The bound comes from the ledger files' write times, which are on OUR clock only when the cache dir is
     // local. CODECOMPASS_CACHE_DIR may point at a share whose clock is behind, making the bound too early and trusting a
     // racy entry. A network cache dir gives no file-time bound: only this process's own upserts count.
     [Fact]

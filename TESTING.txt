@@ -202,7 +202,7 @@ Testing is built alongside the engine, not bolted on:
   benchmark. Measuring throughput here is what validates the whole premise.
 - Phase 2 (tree-sitter symbols): add per-language fixture correctness.
 - Phase 3 (MCP): add end-to-end MCP tests and the token-savings guard.
-- Phase 4 (Roslyn, clang): add the semantic oracle and semantic fixtures.
+- Phase 4 (Roslyn, clang; clang later replaced by a name search): add the semantic oracle and semantic fixtures.
 - Phase 5 (watcher/incremental): expand debounce, change-detection, and
   branch-switch tests.
 - Phase 6 (plugin): add the enforcement-hook and fallback tests.

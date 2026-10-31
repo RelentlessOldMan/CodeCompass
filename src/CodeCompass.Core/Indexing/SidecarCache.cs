@@ -25,13 +25,13 @@ internal sealed class ParsedSidecar
 /// <summary>
 /// A bounded, process-wide cache of parsed positional sidecars, keyed by sidecar path and validated by
 /// (length, mtime). The long-lived MCP server otherwise re-reads and re-parses the ENTIRE Bloom payload of
-/// every large-file candidate on every query - the field report measured ~695 MB of local sidecar reads
+/// every large-file candidate on every query - on a large real repo that was ~695 MB of local sidecar reads
 /// per broad query, 65% of all bytes. Caching turns that into read-once.
 ///
 /// <para><b>Admission is scan-resistant (skip-when-full), NOT LRU-evict.</b> A single broad query's Bloom
 /// working set can exceed the budget; a plain LRU filled by a scan bigger than its budget evicts every
-/// entry before it is reused, so a repeated query hits NOTHING (the 1.0.169 default-budget bug: 256 MB
-/// budget vs ~690 MB working set = 0 hits). Instead, once the cache is full we KEEP what is resident and
+/// entry before it is reused, so a repeated query hits NOTHING (e.g. a 256 MB
+/// budget vs a ~690 MB working set = 0 hits). Instead, once the cache is full we KEEP what is resident and
 /// simply skip caching the overflow: a repeated oversized scan then hits whatever fit (stable resident set)
 /// rather than thrashing to zero. Entries are only dropped when their file's (length,mtime) changes.</para>
 ///
@@ -57,7 +57,7 @@ internal static class SidecarCache
         try { total = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; } catch { total = 8L * 1024 * 1024 * 1024; }
         if (total <= 0) total = 8L * 1024 * 1024 * 1024;
         // RAM/16, floor 256 MB, cap 2 GB. On a 32 GB box -> 2 GB, which holds a typical repo's whole sidecar
-        // set (the field-report tree was ~1.4 GB) so repeat broad queries fully hit; small boxes stay modest.
+        // set (a large real repo's was ~1.4 GB) so repeat broad queries fully hit; small boxes stay modest.
         return Math.Clamp(total / 16, 256L * 1024 * 1024, 2L * 1024 * 1024 * 1024);
     }
 

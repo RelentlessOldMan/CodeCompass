@@ -205,7 +205,7 @@ public class RoslynSemanticTests
         Assert.Empty(analyzer.FindReferences("Nonexistent"));
     }
 
-    // #3 (v1.0.216): callees hidden in inactive #if/#elif branches. Roslyn parses them as disabled text, so the
+    // Callees hidden in inactive #if/#elif branches. Roslyn parses them as disabled text, so the
     // semantic FindCallees never sees them; FindCalleesInInactiveBranches re-lexes the disabled region and
     // resolves each discovered NAME in-repo. In-process coverage of the recovery arms (simple invocation,
     // member-access, object-creation with identifier/generic/qualified type names) and the max cap - the Cli_*
@@ -352,7 +352,7 @@ public class RoslynSemanticTests
         Assert.Equal(0, analyzer.LastPinnedModels);
     }
 
-    // SEM-C3: the model references every assembly on the TPA list (here the test host's, Roslyn included), so a repo that
+    // The model references every assembly on the TPA list (here the test host's, Roslyn included), so a repo that
     // declares one of those types in source - Roslyn's own repo declares SyntaxNode - has a metadata twin of it. Source
     // wins binding, so searching the twin found nothing yet cost a whole-solution search and pinned every model.
     [Fact]

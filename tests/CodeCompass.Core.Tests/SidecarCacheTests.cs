@@ -7,7 +7,7 @@ using Xunit;
 namespace CodeCompass.Core.Tests;
 
 // The parsed positional sidecar (block table + per-block Blooms) is cached in-process, so the long-lived
-// server reads the whole Bloom payload of a large file ONCE, not on every query. The field report measured
+// server reads the whole Bloom payload of a large file ONCE, not on every query. A user report measured
 // ~695 MB of local sidecar re-reads per broad query (65% of all bytes); caching turns that into read-once.
 // The search trace reports the TRUE sidecar bytes read per call (0 on a cache hit) so the win is observable.
 [Collection("compaction-env")] // serialize the CODECOMPASS_FORCE_NETWORK env mutation
@@ -81,7 +81,7 @@ public class SidecarCacheTests
             Assert.True(PositionalSidecar.HasSidecar(dir, "reg/b.h"));
 
             // Budget holds exactly ONE of the two sidecars (sized off the real sidecar length so it's robust
-            // to block count). This is the field-report pathology in miniature: a working set bigger than the
+            // to block count). This is the reported pathology in miniature: a working set bigger than the
             // budget. A plain LRU would evict A to admit B, then thrash to 0 hits on the repeat; skip-when-full
             // keeps A resident so it still hits.
             long scLen = PositionalSidecar.SidecarLength(dir, "reg/a.h");

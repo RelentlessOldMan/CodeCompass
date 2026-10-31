@@ -4,7 +4,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// In-process unit coverage for the find_references / find_callees DISCLOSURE wording (the v1.0.215/216 #if work).
+// In-process unit coverage for the find_references / find_callees DISCLOSURE wording for #if-guarded code.
 // The wording is exercised end-to-end by the Cli_* subprocess tests, but coverlet instruments only the test host
 // - a child CodeCompass.Cli.exe process is invisible to it - so these pure string builders showed 0% covered and,
 // more importantly, the FileList ">5 -> +N more" truncation (which the single-file CLI tests never reach) went

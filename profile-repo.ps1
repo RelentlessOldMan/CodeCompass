@@ -110,7 +110,7 @@ if (-not $Json) {
     "bytes in largest  5% of files: {0,5:N1}%" -f (100*$top5)
     ""
     "== sidecar decision (current cutoff 8 MB) =="
-    "mid-size tail  1-8 MB (NO sidecar today, read whole on broad queries): {0:N0} files, {1:N2} GB ({2:N1}% of bytes)" -f $midCount, ($midBytes/1GB), (100*$midBytes/$total)
+    "mid-size tail  1-8 MB (NO sidecar, read whole on broad queries): {0:N0} files, {1:N2} GB ({2:N1}% of bytes)" -f $midCount, ($midBytes/1GB), (100*$midBytes/$total)
     "already sidecar'd  >= 8 MB:                                            {0:N0} files, {1:N2} GB" -f $scCount, ($scBytes/1GB)
     ""
     "== top $Top extensions by bytes =="

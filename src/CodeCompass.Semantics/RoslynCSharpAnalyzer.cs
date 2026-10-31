@@ -566,7 +566,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
         "IntPtr", "UIntPtr", "Single", "Double", "Decimal", "Void", "Nullable", "ValueTuple", "Index", "Range",
     };
 
-    // The documents a reference to `name` can be in (CPU review SEM-C2): left unscoped, every search ran Roslyn's document
+    // The documents a reference to `name` can be in: left unscoped, every search ran Roslyn's document
     // selection over the whole solution. A reference spells the name, except where the compiler calls a member by pattern
     // (those names search everything), a `[Foo]` attribute (searched as Foo), a target-typed `new()` or a `base()` call of a
     // type, a global alias (any one searches everything) or an identifier spelled with a \u escape or a format character. Judged on the model's text only, so the answer
@@ -699,7 +699,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     // declares each such type twice: in source and in metadata. Source wins binding over a same-named referenced type, so
     // the metadata twin's whole-solution search finds next to nothing, yet it paid a full search and pinned every model.
     // Dropped only on an exact top-level-type full-name match; an expression typed by ANOTHER referenced assembly could
-    // still reach the metadata member, which is rare and accepted (CPU review SEM-C3).
+    // still reach the metadata member, which is rare and accepted.
     private static List<ISymbol> WithoutShadowedMetadata(Project project, List<ISymbol> declarations, System.Threading.CancellationToken ct)
     {
         static bool InSource(ISymbol s) => s.Locations.Any(l => l.IsInSource);
@@ -952,7 +952,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     private Dictionary<string, bool> _projectDirHasUsings = new(StringComparer.OrdinalIgnoreCase);
     private List<string> _propsDirsWithUsings = new();
 
-    /// <summary>Bring a built model up to date with edits to these .cs files in place (MCP-C1): the rest of the solution keeps
+    /// <summary>Bring a built model up to date with edits to these .cs files in place: the rest of the solution keeps
     /// its parsed trees, where a rebuild re-reads and re-parses every file (Roslyn: ~20k). <c>Present</c>: the file is one the
     /// walk reads (the index holds it) - added or re-read; false: it's gone, or no longer read (ignored, over the cap) -
     /// dropped. False when it can't be done here and the caller must drop the model: a project or props file or the config

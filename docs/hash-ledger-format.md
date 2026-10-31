@@ -1,8 +1,9 @@
 # CodeCompass hash ledger: format and read-only access
 
 CodeCompass keeps a per-repo **change ledger**: for every file it indexes, the file's size, last-write time and a
-content hash. It uses the ledger to skip unchanged files on an update. Other local tools (CodeDiffer first) may
-**read** it so they don't re-hash files CodeCompass has already hashed.
+content hash. It uses the ledger to skip unchanged files on an update. Other local tools may
+**read** it so they don't re-hash files CodeCompass has already hashed; one that does is
+[CodeDiffer](https://github.com/RelentlessOldMan/CodeDiffer), a separate diff tool.
 
 This document is the contract for those readers. It describes format version **2** (written since v1.0.243), and
 version **1**, which older versions wrote and readers may still meet. Version 2 adds each file's change time, file id
@@ -133,7 +134,7 @@ repeat removalCount times:
 The journal's magic, not the base's version, says which entry layout it uses. If the magic is unknown, ignore the whole
 ledger (never guess). If the journal is truncated or otherwise unreadable, drop the journal and keep the base: a base
 entry the journal would have replaced describes an older state of the file, so it simply won't match the live file
-(rules 2-4 below) and costs a re-hash, never a wrong answer. This is what both CodeCompass and CodeDiffer do.
+(rules 2-4 below) and costs a re-hash, never a wrong answer. CodeCompass's own reader does this; other readers should too.
 
 ## Paths
 

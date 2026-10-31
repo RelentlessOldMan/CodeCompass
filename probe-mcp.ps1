@@ -7,7 +7,7 @@
   Only a persistent server reveals the dangerous shape: does baseline RSS climb query-over-query, or plateau?
 
 .WHY
-  176's bug (and 179's higher ceiling) live in the warm server a real user drives via Claude/Codex. This
+  Cross-query memory bugs live in the warm server a real user drives via Claude/Codex. This
   measures exactly that: session peak, per-query cost, and the cross-query baseline trend (the ratchet signal).
   External ceiling-kill so a runaway can never take the box down.
 
@@ -148,14 +148,11 @@ $rows = foreach ($sym in $symbolSet) {
     $after = Cur-RSS
     $txt = Refs-Text $resp
     $refCount = if ($txt) { @([regex]::Matches($txt, ':\d+:\d+:')).Count } else { 0 }
-    # Since v1.0.239 C/C++ references are a name search: there is no memory stop or parsed/candidate coverage any more
-    # (kept as columns, always false/null), and the by-name note replaces the old "lexical" caveat.
-    $memStop = $false
-    $incomplete = $null
+    # C/C++ references are a name search; the tool says so with a "matched by NAME" note.
     $lexNote = [bool]($txt -match 'matched by NAME')
     $timedOut = ($null -eq $resp)
     Write-Host ("  {0,-16} refs={1,-5} {2,6}ms  before={3,6}MB after={4,6}MB{5}" -f $(if($KeepNames){$sym}else{Get-Hash4 $sym}), $refCount, $ms, $before, $after, $(if($timedOut){' TIMEOUT'}elseif($script:killed){' KILLED'}else{''})) -ForegroundColor DarkGray
-    [pscustomobject]@{ Id = if ($KeepNames) { $sym } else { Get-Hash4 $sym }; Refs = $refCount; Ms = $ms; BeforeMB = $before; AfterMB = $after; MemStop = $memStop; Cov = $incomplete; Lexical = $lexNote; TimedOut = $timedOut }
+    [pscustomobject]@{ Id = if ($KeepNames) { $sym } else { Get-Hash4 $sym }; Refs = $refCount; Ms = $ms; BeforeMB = $before; AfterMB = $after; Lexical = $lexNote; TimedOut = $timedOut }
     $id++
     if ($script:killed) { break }
 }
@@ -197,19 +194,19 @@ $repBefore = @($repeats | ForEach-Object { $_.BeforeMB })
 $repeatClimb = if ($repBefore.Count -ge 2) { [math]::Round($repBefore[-1] - $repBefore[0], 0) } else { $null }
 $ratchet = ($null -ne $repeatClimb) -and ($repeatClimb -gt 100) # identical re-query still growing => not reclaimed
 
-# --- report (anonymized, Discord-sized) ---
+# --- report (compact, anonymized) ---
 $version = ((& (Join-Path (Split-Path $Exe) 'CodeCompass.Cli.exe') version) 2>$null)
 $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine('```')
 [void]$sb.AppendLine("CodeCompass MCP-session probe - $version   repo=$(Get-Hash4 $Repo)(hashed)")
 [void]$sb.AppendLine("one warm server, $($rows.Count) find_references calls  ceiling ${CeilMB}MB")
 [void]$sb.AppendLine('')
-[void]$sb.AppendLine(" id   refs   ms   beforeMB afterMB cov     note")
+[void]$sb.AppendLine(" id   refs   ms   beforeMB afterMB note")
 foreach ($r in $rows) {
-    $note = @(); if ($r.MemStop) { $note += 'memstop' }; if ($r.Lexical) { $note += 'lex' }; if ($r.TimedOut) { $note += 'TIMEOUT' }
-    [void]$sb.AppendLine(("{0} {1,5} {2,6} {3,8} {4,7} {5,-7} {6}" -f $r.Id, $r.Refs, $r.Ms, $r.BeforeMB, $r.AfterMB, $(if($r.Cov){$r.Cov}else{'-'}), ($note -join ',')))
+    $note = @(); if ($r.Lexical) { $note += 'lex' }; if ($r.TimedOut) { $note += 'TIMEOUT' }
+    [void]$sb.AppendLine(("{0} {1,5} {2,6} {3,8} {4,7} {5}" -f $r.Id, $r.Refs, $r.Ms, $r.BeforeMB, $r.AfterMB, ($note -join ',')))
 }
-foreach ($rp in $repeats) { [void]$sb.AppendLine(("{0} {1,5} {2,6} {3,8} {4,7} {5,-7} repeat-of-first" -f $rp.Id, $rp.Refs, $rp.Ms, $rp.BeforeMB, $rp.AfterMB, '-')) }
+foreach ($rp in $repeats) { [void]$sb.AppendLine(("{0} {1,5} {2,6} {3,8} {4,7} repeat-of-first" -f $rp.Id, $rp.Refs, $rp.Ms, $rp.BeforeMB, $rp.AfterMB)) }
 [void]$sb.AppendLine("session peak RSS: $([int]$script:peakMB)MB$(if($script:killed){' - KILLED at ceiling'})")
 $verdict = if ($script:killed) { 'KILLED - exceeded ceiling' }
     elseif ($null -eq $repeatClimb) { "inconclusive: run -RepeatFirst >= 2 to test for a leak (whole-session climb ${baseClimb}MB)" }
@@ -226,5 +223,5 @@ $rh = Get-Hash4 $Repo
     ConvertTo-Json -Depth 8 | Out-File (Join-Path $OutDir "probe-mcp-$rh-$stamp.json") -Encoding utf8
 $report | Out-File (Join-Path $OutDir "probe-mcp-$rh-$stamp.txt") -Encoding utf8
 
-Write-Host ""; Write-Host "=== paste this into Discord ===" -ForegroundColor Green; Write-Host $report
+Write-Host ""; Write-Host "=== report ===" -ForegroundColor Green; Write-Host $report
 Write-Host ("report chars: {0}" -f $report.Length) -ForegroundColor DarkGray

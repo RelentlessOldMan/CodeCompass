@@ -543,7 +543,7 @@ public sealed class SegmentedIndex : IDisposable
                 RefsDebug.Log($"scan EMPTY (network sidecar) rel='{rel}' handled={handled} srcBytes={srcBytes} scBytes={scBytesRead} query='{query}'");
             // Block bytes (or a whole-file fallback read) + the sidecar's own bytes read to pick those blocks.
             // scBytesRead is 0 when the sidecar was already parsed+cached in-process, so the trace reflects
-            // the TRUE I/O this query paid (the field report's ~695 MB residual was this re-read every call).
+            // the TRUE I/O this query paid (on a large real repo, a ~695 MB residual was this re-read every call).
             if (trace != null) AddTrace(trace, rel, true, handled ? srcBytes : TryFileLength(full),
                                         scBytesRead, results.Count);
             return (results, IsUnreadable(lineError), null);

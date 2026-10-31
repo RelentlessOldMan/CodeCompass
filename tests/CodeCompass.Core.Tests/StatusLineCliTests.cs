@@ -5,7 +5,7 @@ using Xunit;
 
 namespace CodeCompass.Core.Tests;
 
-// The status line Claude Code renders on every turn. v1.0.239-241 shipped it garbled ("Opus Â· ... CodeCompass âœ“"):
+// The status line Claude Code renders on every turn. Earlier releases shipped it garbled ("Opus Â· ... CodeCompass âœ“"):
 // an edit re-saved the CLI source with its UTF-8 glyphs double-encoded. This pins the exact characters end to end.
 public class StatusLineCliTests
 {
@@ -26,7 +26,7 @@ public class StatusLineCliTests
         Assert.DoesNotContain("â", line);
     }
 
-    // SEM-C9: Claude Code runs the status line on every render, so it must not append a log line each time (nor raise
+    // Claude Code runs the status line on every render, so it must not append a log line each time (nor raise
     // the process priority, which the CLI does for real work like index and update).
     [Fact]
     public void Statusline_WritesNoLogLine()
