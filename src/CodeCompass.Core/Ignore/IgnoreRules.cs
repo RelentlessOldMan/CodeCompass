@@ -34,8 +34,6 @@ public sealed class IgnoreRules
         ".bin", ".dat", ".db", ".sqlite", ".pack", ".idx",
     };
 
-    public const long DefaultMaxFileSizeBytes = 5 * 1024 * 1024;
-
     private readonly HashSet<string> _ignoredDirs;
     private readonly HashSet<string> _ignoredExtensions;
     // The same two sets, looked up by span: IsIgnoredPath runs per candidate file and per symbol at query time, and a
