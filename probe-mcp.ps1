@@ -50,31 +50,30 @@ if ($SymbolsFile) { $symbolSet += @(Get-Content $SymbolsFile | ForEach-Object { 
 if ($Symbols)     { $symbolSet += @($Symbols | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 $symbolSet = @($symbolSet | Select-Object -Unique)
 
+function Get-Hash4([string]$s) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    -join (($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($s)))[0..1] | ForEach-Object { $_.ToString('x2') })
+}
+
 # Auto-derive the broadest C/C++ symbols (via the CLI - cheap, no warm server needed) if none given.
 if ($symbolSet.Count -eq 0) {
     $cli = Join-Path (Split-Path $Exe) 'CodeCompass.Cli.exe'
     if (-not (Test-Path $cli)) { throw "no -Symbols given and CLI not found for auto-derive: $cli" }
     Write-Host "auto-deriving the $AutoTop broadest C/C++ symbols..." -ForegroundColor Yellow
     $names = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($c in @([char[]]'etaoinshrdlcum_')) {
-        if ($names.Count -ge $AutoPool) { break }
-        foreach ($ln in (& $cli symbols $Repo "$c" 2>$null)) {
-            if ($ln -match '\.(c|h|cc|cpp|cxx):\d+:\d+:\s+\S+\s+(\S+)\s*$') { [void]$names.Add($Matches[2]); if ($names.Count -ge $AutoPool) { break } }
-        }
+    # An even sample over the whole index: a substring query comes back in name order and stops at 200.
+    foreach ($ln in (& $cli symbols $Repo --sample ($AutoPool * 20) 2>$null)) {
+        if ($ln -match '\.(c|h|cc|cpp|cxx):\d+:\d+:\s+\S+\s+([A-Za-z_][A-Za-z0-9_]{4,39})\s*$') { [void]$names.Add($Matches[2]); if ($names.Count -ge $AutoPool) { break } }
     }
     $ranked = foreach ($nm in $names) {
         $hits = @(& $cli search $Repo $nm 2>$null | Select-String -Pattern '\.(c|h|cc|cpp|cxx):' ).Count
         [pscustomobject]@{ Name = $nm; Hits = $hits }
     }
-    $symbolSet = @($ranked | Sort-Object Hits -Descending | Select-Object -First $AutoTop -ExpandProperty Name)
+    $symbolSet = @($ranked | Sort-Object @{ Expression = 'Hits'; Descending = $true }, @{ Expression = { Get-Hash4 $_.Name } } |
+        Select-Object -First $AutoTop -ExpandProperty Name)
     Write-Host ("auto-picked: " + ($symbolSet -join ', ')) -ForegroundColor Yellow
 }
 if ($symbolSet.Count -eq 0) { throw "no symbols to probe (auto-derive found none; pass -Symbols)" }
-
-function Get-Hash4([string]$s) {
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    -join (($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($s)))[0..1] | ForEach-Object { $_.ToString('x2') })
-}
 
 Write-Host "mcp-probe: repo=$Repo  ceil=${CeilMB}MB  symbols=$($symbolSet.Count)" -ForegroundColor Cyan
 

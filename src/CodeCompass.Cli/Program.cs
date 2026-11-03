@@ -82,7 +82,7 @@ static int Usage()
     Console.Error.WriteLine("  codecompass watch   <path>               auto-reindex on file changes");
     Console.Error.WriteLine("  codecompass search  <path> <query> [-i]  literal text search (-i = case-insensitive)");
     Console.Error.WriteLine("  codecompass def     <path> <name>        exact symbol definition(s)");
-    Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search");
+    Console.Error.WriteLine("  codecompass symbols <path> <substring>   symbol name search (--sample <n>: n spread over the index)");
     Console.Error.WriteLine("  codecompass refs    <path> <name>        references (semantic C#; by name elsewhere)");
     Console.Error.WriteLine("  codecompass callees <path> <name>        in-repo methods a C# method calls (semantic; C# only)");
     Console.Error.WriteLine("  codecompass survey  <path>               report what the size caps skip + suggest config");
@@ -1265,6 +1265,17 @@ static int CmdSymbols(string[] args)
     var query = args[2];
 
     if (!RepositoryIndexer.TryLoad(root, out _, out var symbols)) return NoIndex(root);
+
+    // --sample <n>: an even stride over the whole index, for picking test names (a query comes back in name order).
+    if (query == "--sample")
+    {
+        if (args.Length < 4 || !int.TryParse(args[3], out var count) || count <= 0) return Usage();
+        var sample = symbols.Sample(count);
+        foreach (var symbol in sample)
+            Console.WriteLine($"{symbol.RelativePath}:{symbol.Line}:{symbol.Column}: {symbol.Kind} {symbol.Name}");
+        Console.Error.WriteLine($"-- {sample.Count} symbol(s)");
+        return 0;
+    }
 
     const int max = 200;
     var matches = symbols.Find(query, max + 1); // one past the cap: a cut-off list must say so, like the MCP tool

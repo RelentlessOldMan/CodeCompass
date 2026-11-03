@@ -268,7 +268,7 @@ foreach ($w in $work) {
         $symSet = @()
         $mf = Join-Path $OutDir "matrix-$($w.Id).json"
         if (Test-Path $mf) { $symSet = @((Get-Content $mf -Raw | ConvertFrom-Json).rows | ForEach-Object { $_.Sym } | Where-Object { $_ }) }
-        if ($Symbols) { $symSet = @($Symbols) }
+        if ($Symbols) { $symSet = @($Symbols | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
         if ($symSet.Count -eq 0) { Write-Warning "warm $($w.Id): no symbols to drive; skipping warm battery" }
         else {
             Write-Host "=== WARM $($w.Id) (MCP session, $($symSet.Count) symbols) ===" -ForegroundColor Cyan

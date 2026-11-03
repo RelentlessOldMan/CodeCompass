@@ -139,7 +139,7 @@ codecompass search  <path> <query> [-i]  literal text search (-i = case-insensit
 codecompass def     <path> <name>     go-to-definition (file:startLine-endLine)
 codecompass refs    <path> <name>     references (semantic C#; by name elsewhere)
 codecompass callees <path> <name>     in-repo methods a C# method calls (C# only)
-codecompass symbols <path> <substr>   symbol-name search
+codecompass symbols <path> <substr>   symbol-name search (--sample <n>: n names spread over the index)
 codecompass survey  <path>            report what the size caps skip + suggest config
 codecompass init    <path>            write a documented .codecompass.json to edit
 codecompass symstats <path>           profile symbol-file sizes + parse cost per language
@@ -534,22 +534,23 @@ Every tool, timed two ways, over seven pinned public repos plus a huge generated
 Each query cell is **cold / warm**, median milliseconds. `find_references` latency depends on the
 symbol, so the battery picks the **broadest** symbols in each repo (its worst case) and reports the
 median and the max; **refs 1st-call** is the one-time analyzer build paid on the session's first
-`find_references`.
+`find_references`. It samples names evenly across the whole symbol index, then times the six that
+match the most text; a hash of the name breaks ties, so a rerun picks the same six.
 
 | Repo | Lang | Files | Size | Build | search_code | find_definition | search_symbols | find_references (med) | find_references (max) | refs 1st-call |
 |---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| requests | Python | 118 | 4.9 MB | 1.4 s | 204 / 3 | 204 / 1 | 205 / 1 | 619 / 2 | 632 / 27 | 0.3 s |
-| fmt | C++ | 207 | 3.2 MB | 1.5 s | 204 / 3 | 205 / 1 | 205 / 2 | 615 / 11 | 634 / 257 | 0.4 s |
-| EF Core ¹ | C# | 5,002 | 82 MB | 3.9 s | 209 / 8 | 205 / 2 | 218 / 16 | 15561 / 206 | 42744 / 33562 | 17.4 s |
-| TypeScript | TS | 72,171 | 349 MB | 23.4 s | 204 / 25 | 205 / 2 | 206 / 13 | 1023 / 251 | 1043 / 4192 | 2.4 s |
-| Godot | C++ | 9,937 | 196 MB | 10.1 s | 215 / 8 | 205 / 2 | 205 / 19 | 1845 / 127 | 1883 / 254 | 4.5 s |
-| Roslyn ¹ | C# | 19,980 | 372 MB | 12.1 s | 220 / 25 | 204 / 2 | 220 / 39 | 54381 / 746 | 103341 / 1457 | 87.4 s |
-| LLVM | C/C++ | 132,213 | 1.5 GB | 52.2 s | 204 / 34 | 205 / 1 | 410 / 73 | 1435 / 17 | 1447 / 58 | 1.1 s |
-| generated C/C++ — **local** | C/C++ | 66,337 | 88 GB | 16m 59s | 410 / 4 | 205 / 4 | 206 / 6 | 1030 / 475 | 1043 / 524 | 1.1 s |
-| generated C/C++ — **SMB/UNC** | C/C++ | 66,337 | 88 GB | 22m 21s | 409 / 2 | 205 / 3 | 206 / 5 | 3927 / 285 | 4951 / 309 | 3.9 s |
+| requests | Python | 118 | 4.9 MB | 1.1 s | 205 / 7 | 206 / 1 | 206 / 1 | 628 / 3 | 811 / 4 | 0.3 s |
+| fmt | C++ | 207 | 3.2 MB | 1.4 s | 204 / 3 | 205 / 1 | 205 / 1 | 626 / 11 | 633 / 18 | 0.3 s |
+| EF Core | C# | 4,991 | 82 MB | 3.8 s | 201 / 6 | 206 / 2 | 205 / 2 | 14408 / 788 | 19786 / 6626 | 13.6 s |
+| TypeScript | TS | 72,042 | 349 MB | 19.5 s | 204 / 21 | 206 / 1 | 205 / 2 | 1229 / 17 | 1245 / 39 | 0.8 s |
+| Godot | C++ | 9,937 | 196 MB | 9.4 s | 408 / 14 | 204 / 1 | 204 / 6 | 2057 / 98 | 2254 / 205 | 1.7 s |
+| Roslyn | C# | 19,930 | 372 MB | 11.7 s | 212 / 14 | 204 / 2 | 205 / 2 | 44015 / 4170 | 82574 / 39642 | 43.3 s |
+| LLVM | C/C++ | 132,211 | 1.5 GB | 41.0 s | 202 / 29 | 205 / 2 | 204 / 2 | 1444 / 24 | 1637 / 74 | 1.1 s |
+| generated C/C++ — **local** ¹ | C/C++ | 66,337 | 88 GB | 16m 59s | 410 / 4 | 205 / 4 | 206 / 6 | 1030 / 475 | 1043 / 524 | 1.1 s |
+| generated C/C++ — **SMB/UNC** ¹ | C/C++ | 66,337 | 88 GB | 22m 21s | 409 / 2 | 205 / 3 | 206 / 5 | 3927 / 285 | 4951 / 309 | 3.9 s |
 
-¹ The broadest names the battery picks in EF Core and Roslyn include ones declared many times over (`Add`,
-`Contains`), so their *max* is the many-declarations case described below, not a typical lookup.
+¹ The generated C/C++ rows were measured in October 2026 on an earlier version of the corpus and an
+earlier CodeCompass; the other rows on v1.0.346.
 
 The **generated C/C++** corpus is a synthetic stress tree — **66,337 files / ~88 GB**, with single
 source files up to **1.4 GB** — indexed once on local disk and once over an SMB/UNC share, to show
@@ -561,9 +562,10 @@ behaviour at extreme scale and across a network.
   **~1–100 ms** on every repo (even 132 k files, even over SMB). Cold is dominated by process start +
   map-open (~0.2–2 s), which is exactly what the persistent MCP server exists to amortize away.
 - **`find_references` on C#** builds Roslyn's workspace once (the *refs 1st-call*), then keeps it
-  resident. Its cost then depends on the name: one with a single declaration answers in about a
-  second warm, while a name declared many times over (`Equals`, `GetEnumerator`) runs one
-  whole-solution search per unrelated declaration and can take tens of seconds — the *max* column.
+  resident. Its cost then depends on the name: one with a few declarations answers in under a
+  second to a few seconds warm, while a name declared many times over (`GetHashCode` in EF Core,
+  `Visit` in Roslyn) runs one whole-solution search per unrelated declaration and can take tens of
+  seconds — the *max* column.
 - **`find_references` on C/C++** (and Python, TypeScript, …) is a name search over the index (see
   *C/C++ references*), so it costs about what `search_code` does plus reading the matched files to
   skip comments and strings: well under a second warm on the public repos. On the generated corpus,

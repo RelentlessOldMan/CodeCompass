@@ -172,23 +172,15 @@ $symbolSet = @($symbolSet | Select-Object -Unique)
 if ($symbolSet.Count -eq 0) {
     Write-Host "no -Symbols given; auto-deriving the $AutoTop broadest symbols (approximate)..." -ForegroundColor Yellow
     $names = New-Object System.Collections.Generic.HashSet[string]
-    # An even share per query character: the symbols listing comes back in index storage order (name-sorted within a
-    # segment), so filling the pool from the first queries would pick only names starting with "A" - and which ones
-    # would follow the segment layout, not the code.
-    $prefixes = @([char[]]'abcdefghijklmnopqrstuvwxyz_0123456789')
-    $perPrefix = [math]::Max(1, [math]::Ceiling($AutoPool / $prefixes.Count))
-    foreach ($c in $prefixes) {
+    # The pool is an even sample over the whole index. A substring query comes back in name order and stops at 200,
+    # so a pool filled from queries holds only names starting with "A".
+    $r = Invoke-Sampled @('symbols', $Repo, '--sample', "$($AutoPool * 4)")
+    foreach ($ln in ($r.Stdout -split "`n")) {
         if ($names.Count -ge $AutoPool) { break }
-        $r = Invoke-Sampled @('symbols', $Repo, "$c")
-        $taken = 0
-        foreach ($ln in ($r.Stdout -split "`n")) {
-            if ($ln -match ':\d+:\d+:\s+\S+\s+(\S+)\s*$') {
-                if ($names.Add($Matches[1])) { $taken++ }
-                if ($taken -ge $perPrefix -or $names.Count -ge $AutoPool) { break }
-            }
-        }
+        if ($ln -match ':\d+:\d+:\s+\S+\s+([A-Za-z_][A-Za-z0-9_]{4,39})\s*$') { [void]$names.Add($Matches[1]) }
     }
-    # Rank the pool by literal-search breadth (MORE EXIST = very broad => rank first).
+    # Rank the pool by literal-search breadth (MORE EXIST = very broad => rank first). Search stops at 200 matches, so
+    # many broad names tie; a hash of the name breaks the tie, so a rerun picks the same names with no alphabet bias.
     $ranked = foreach ($nm in $names) {
         $s = Invoke-Sampled @('search', $Repo, $nm)
         $more = $s.Stderr -match 'MORE EXIST'
@@ -196,7 +188,8 @@ if ($symbolSet.Count -eq 0) {
         if ($s.Stderr -match '(\d+)\s+match') { $cnt = [int]$Matches[1] }
         [pscustomobject]@{ Name = $nm; Breadth = $(if ($more) { 100000 + $cnt } else { $cnt }) }
     }
-    $symbolSet = @($ranked | Sort-Object Breadth -Descending | Select-Object -First $AutoTop -ExpandProperty Name)
+    $symbolSet = @($ranked | Sort-Object @{ Expression = 'Breadth'; Descending = $true }, @{ Expression = { Get-Hash4 $_.Name } } |
+        Select-Object -First $AutoTop -ExpandProperty Name)
     Write-Host ("auto-picked: " + ($symbolSet -join ', ')) -ForegroundColor Yellow
 }
 if ($symbolSet.Count -eq 0) { throw "no symbols to probe (auto-derive found none; pass -Symbols)" }

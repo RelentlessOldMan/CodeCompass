@@ -104,7 +104,7 @@ codecompass search  &lt;path&gt; &lt;query&gt;     literal text search  -> file:
 codecompass def     &lt;path&gt; &lt;name&gt;      go-to-definition
 codecompass refs    &lt;path&gt; &lt;name&gt;      references (semantic C#; by name elsewhere)
 codecompass callees &lt;path&gt; &lt;name&gt;      in-repo methods a C# method calls (C# only)
-codecompass symbols &lt;path&gt; &lt;substr&gt;    symbol-name search
+codecompass symbols &lt;path&gt; &lt;substr&gt;    symbol-name search (--sample &lt;n&gt;: n names spread over the index)
 codecompass survey  &lt;path&gt;            report what the size caps skip + suggest config
 codecompass logs                      show the log folder and files
 codecompass version                   print the build version (1.0.&lt;commit-count&gt;+&lt;short-sha&gt;)
@@ -224,23 +224,24 @@ Code / Codex): the index is mapped and the semantic analyzer is resident.</li>
 </ul>
 <p>Each query cell is <b>cold / warm</b>, median milliseconds. <code>find_references</code> latency depends on the symbol, so the
 battery picks the <b>broadest</b> symbols (its worst case) and reports median and max; <b>refs 1st-call</b> is the one-time
-analyzer build paid on the session's first <code>find_references</code>.</p>
+analyzer build paid on the session's first <code>find_references</code>. It samples names evenly across the whole
+symbol index, then times the six that match the most text; a hash of the name breaks ties, so a rerun picks the same six.</p>
 <table>
 <thead><tr><th>Repo</th><th>Lang</th><th>Files</th><th>Size</th><th>Build</th><th>search_code</th><th>find_definition</th><th>search_symbols</th><th>find_references (med)</th><th>find_references (max)</th><th>refs 1st-call</th></tr></thead>
 <tbody>
-<tr><td>requests</td><td>Python</td><td class="num">118</td><td class="num">4.9 MB</td><td class="num">1.4 s</td><td class="num">204 / 3</td><td class="num">204 / 1</td><td class="num">205 / 1</td><td class="num">619 / 2</td><td class="num">632 / 27</td><td class="num">0.3 s</td></tr>
-<tr><td>fmt</td><td>C++</td><td class="num">207</td><td class="num">3.2 MB</td><td class="num">1.5 s</td><td class="num">204 / 3</td><td class="num">205 / 1</td><td class="num">205 / 2</td><td class="num">615 / 11</td><td class="num">634 / 257</td><td class="num">0.4 s</td></tr>
-<tr><td>EF Core <sup>1</sup></td><td>C#</td><td class="num">5,002</td><td class="num">82 MB</td><td class="num">3.9 s</td><td class="num">209 / 8</td><td class="num">205 / 2</td><td class="num">218 / 16</td><td class="num">15561 / 206</td><td class="num">42744 / 33562</td><td class="num">17.4 s</td></tr>
-<tr><td>TypeScript</td><td>TS</td><td class="num">72,171</td><td class="num">349 MB</td><td class="num">23.4 s</td><td class="num">204 / 25</td><td class="num">205 / 2</td><td class="num">206 / 13</td><td class="num">1023 / 251</td><td class="num">1043 / 4192</td><td class="num">2.4 s</td></tr>
-<tr><td>Godot</td><td>C++</td><td class="num">9,937</td><td class="num">196 MB</td><td class="num">10.1 s</td><td class="num">215 / 8</td><td class="num">205 / 2</td><td class="num">205 / 19</td><td class="num">1845 / 127</td><td class="num">1883 / 254</td><td class="num">4.5 s</td></tr>
-<tr><td>Roslyn <sup>1</sup></td><td>C#</td><td class="num">19,980</td><td class="num">372 MB</td><td class="num">12.1 s</td><td class="num">220 / 25</td><td class="num">204 / 2</td><td class="num">220 / 39</td><td class="num">54381 / 746</td><td class="num">103341 / 1457</td><td class="num">87.4 s</td></tr>
-<tr><td>LLVM</td><td>C/C++</td><td class="num">132,213</td><td class="num">1.5 GB</td><td class="num">52.2 s</td><td class="num">204 / 34</td><td class="num">205 / 1</td><td class="num">410 / 73</td><td class="num">1435 / 17</td><td class="num">1447 / 58</td><td class="num">1.1 s</td></tr>
-<tr><td>generated C/C++ &mdash; <b>local</b></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">16m 59s</td><td class="num">410 / 4</td><td class="num">205 / 4</td><td class="num">206 / 6</td><td class="num">1030 / 475</td><td class="num">1043 / 524</td><td class="num">1.1 s</td></tr>
-<tr><td>generated C/C++ &mdash; <b>SMB/UNC</b></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">22m 21s</td><td class="num">409 / 2</td><td class="num">205 / 3</td><td class="num">206 / 5</td><td class="num">3927 / 285</td><td class="num">4951 / 309</td><td class="num">3.9 s</td></tr>
+<tr><td>requests</td><td>Python</td><td class="num">118</td><td class="num">4.9 MB</td><td class="num">1.1 s</td><td class="num">205 / 7</td><td class="num">206 / 1</td><td class="num">206 / 1</td><td class="num">628 / 3</td><td class="num">811 / 4</td><td class="num">0.3 s</td></tr>
+<tr><td>fmt</td><td>C++</td><td class="num">207</td><td class="num">3.2 MB</td><td class="num">1.4 s</td><td class="num">204 / 3</td><td class="num">205 / 1</td><td class="num">205 / 1</td><td class="num">626 / 11</td><td class="num">633 / 18</td><td class="num">0.3 s</td></tr>
+<tr><td>EF Core</td><td>C#</td><td class="num">4,991</td><td class="num">82 MB</td><td class="num">3.8 s</td><td class="num">201 / 6</td><td class="num">206 / 2</td><td class="num">205 / 2</td><td class="num">14408 / 788</td><td class="num">19786 / 6626</td><td class="num">13.6 s</td></tr>
+<tr><td>TypeScript</td><td>TS</td><td class="num">72,042</td><td class="num">349 MB</td><td class="num">19.5 s</td><td class="num">204 / 21</td><td class="num">206 / 1</td><td class="num">205 / 2</td><td class="num">1229 / 17</td><td class="num">1245 / 39</td><td class="num">0.8 s</td></tr>
+<tr><td>Godot</td><td>C++</td><td class="num">9,937</td><td class="num">196 MB</td><td class="num">9.4 s</td><td class="num">408 / 14</td><td class="num">204 / 1</td><td class="num">204 / 6</td><td class="num">2057 / 98</td><td class="num">2254 / 205</td><td class="num">1.7 s</td></tr>
+<tr><td>Roslyn</td><td>C#</td><td class="num">19,930</td><td class="num">372 MB</td><td class="num">11.7 s</td><td class="num">212 / 14</td><td class="num">204 / 2</td><td class="num">205 / 2</td><td class="num">44015 / 4170</td><td class="num">82574 / 39642</td><td class="num">43.3 s</td></tr>
+<tr><td>LLVM</td><td>C/C++</td><td class="num">132,211</td><td class="num">1.5 GB</td><td class="num">41.0 s</td><td class="num">202 / 29</td><td class="num">205 / 2</td><td class="num">204 / 2</td><td class="num">1444 / 24</td><td class="num">1637 / 74</td><td class="num">1.1 s</td></tr>
+<tr><td>generated C/C++ &mdash; <b>local</b> <sup>1</sup></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">16m 59s</td><td class="num">410 / 4</td><td class="num">205 / 4</td><td class="num">206 / 6</td><td class="num">1030 / 475</td><td class="num">1043 / 524</td><td class="num">1.1 s</td></tr>
+<tr><td>generated C/C++ &mdash; <b>SMB/UNC</b> <sup>1</sup></td><td>C/C++</td><td class="num">66,337</td><td class="num">88 GB</td><td class="num">22m 21s</td><td class="num">409 / 2</td><td class="num">205 / 3</td><td class="num">206 / 5</td><td class="num">3927 / 285</td><td class="num">4951 / 309</td><td class="num">3.9 s</td></tr>
 </tbody>
 </table>
-<p class="muted"><sup>1</sup> The broadest names the battery picks in EF Core and Roslyn include ones declared many times over
-(<code>Add</code>, <code>Contains</code>), so their <i>max</i> is the many-declarations case described below, not a typical lookup.</p>
+<p class="muted"><sup>1</sup> The generated C/C++ rows were measured in October 2026 on an earlier version of the corpus and an
+earlier CodeCompass; the other rows on v1.0.346.</p>
 <p>The <b>generated C/C++</b> corpus is a synthetic stress tree &mdash; <b>66,337 files / ~88 GB</b>, single source files up to
 <b>1.4 GB</b> &mdash; indexed once on local disk and once over an SMB/UNC share, to show behaviour at extreme scale and across a network.</p>
 <p><b>How to read it:</b></p>
@@ -249,9 +250,9 @@ analyzer build paid on the session's first <code>find_references</code>.</p>
 <b>~1&ndash;100 ms</b> on every repo (even 132 k files, even over SMB). Cold is dominated by process start + map-open (~0.2&ndash;2 s)
 &mdash; exactly what the persistent MCP server amortizes away.</li>
 <li><code>find_references</code> on <b>C#</b> builds Roslyn's workspace once (the <i>refs 1st-call</i>), then keeps it resident.
-Its cost then depends on the name: one with a single declaration answers in about a second warm, while a name declared many
-times over (<code>Equals</code>, <code>GetEnumerator</code>) runs one whole-solution search per unrelated declaration and can
-take tens of seconds &mdash; the <i>max</i> column.</li>
+Its cost then depends on the name: one with a few declarations answers in under a second to a few seconds warm, while a name
+declared many times over (<code>GetHashCode</code> in EF Core, <code>Visit</code> in Roslyn) runs one whole-solution search per
+unrelated declaration and can take tens of seconds &mdash; the <i>max</i> column.</li>
 <li><code>find_references</code> on <b>C/C++</b> (and Python, TypeScript, &hellip;) is a name search over the index, so it costs about
 what <code>search_code</code> does plus reading the matched files to skip comments and strings: well under a second warm on the
 public repos. On the generated corpus, whose matched files run to gigabytes, that reading dominates &mdash; about half a second
