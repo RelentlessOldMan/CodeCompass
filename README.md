@@ -546,13 +546,10 @@ match the most text; a hash of the name breaks ties, so a rerun picks the same s
 | Godot | C++ | 9,937 | 196 MB | 9.4 s | 408 / 14 | 204 / 1 | 204 / 6 | 2057 / 98 | 2254 / 205 | 1.7 s |
 | Roslyn | C# | 19,930 | 372 MB | 11.7 s | 212 / 14 | 204 / 2 | 205 / 2 | 44015 / 4170 | 82574 / 39642 | 43.3 s |
 | LLVM | C/C++ | 132,211 | 1.5 GB | 41.0 s | 202 / 29 | 205 / 2 | 204 / 2 | 1444 / 24 | 1637 / 74 | 1.1 s |
-| generated C/C++ — **local** ¹ | C/C++ | 66,337 | 88 GB | 16m 59s | 410 / 4 | 205 / 4 | 206 / 6 | 1030 / 475 | 1043 / 524 | 1.1 s |
-| generated C/C++ — **SMB/UNC** ¹ | C/C++ | 66,337 | 88 GB | 22m 21s | 409 / 2 | 205 / 3 | 206 / 5 | 3927 / 285 | 4951 / 309 | 3.9 s |
+| generated C/C++ — **local** | C/C++ | 72,451 | 87 GB | 6m 46s | 409 / 3 | 204 / 3 | 205 / 2 | 1022 / 253 | 2049 / 1258 | 0.7 s |
+| generated C/C++ — **SMB/UNC** | C/C++ | 72,451 | 87 GB | 18m 05s | 411 / 7 | 220 / 4 | 220 / 2 | 5870 / 1615 | 10985 / 13199 | 5.5 s |
 
-¹ The generated C/C++ rows were measured in October 2026 on an earlier version of the corpus and an
-earlier CodeCompass; the other rows on v1.0.346.
-
-The **generated C/C++** corpus is a synthetic stress tree — **66,337 files / ~88 GB**, with single
+The **generated C/C++** corpus is a synthetic stress tree — **72,451 files / ~87 GB**, with single
 source files up to **1.4 GB** — indexed once on local disk and once over an SMB/UNC share, to show
 behaviour at extreme scale and across a network.
 
@@ -569,7 +566,7 @@ behaviour at extreme scale and across a network.
 - **`find_references` on C/C++** (and Python, TypeScript, …) is a name search over the index (see
   *C/C++ references*), so it costs about what `search_code` does plus reading the matched files to
   skip comments and strings: well under a second warm on the public repos. On the generated corpus,
-  whose matched files run to gigabytes, that reading dominates — about half a second warm on local
+  whose matched files run to gigabytes, that reading dominates — about a quarter of a second warm on local
   disk, a couple of seconds over SMB.
 
 **Scale check:** an aggregated **10.4 GB / ~1.1 million file** corpus indexed in **7m48s** (22 MB/s)
