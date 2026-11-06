@@ -13,7 +13,8 @@
 
   Questions:
     definition   "where is X defined?" - scored right when the path matches and the line is within 2 of the
-                 declaration (an attribute or doc comment above it counts)
+                 definition's first line (an attribute or doc comment above it counts); the question says a C/C++
+                 function's out-of-line body is wanted, not its declaration in the class or header
     occurrences  "every line where X appears as a whole word" - scored on recall and precision against every
                  such line in the index
 
@@ -155,7 +156,8 @@ foreach ($d in @($st.inputs.definitions) | Select-Object -First $Definitions) {
     $tasks.Add([pscustomobject]@{ id = "def$n"; kind = 'definition'; name = $d.name; symbolKind = $d.kind
         expected = [pscustomobject]@{ path = $d.path; line = [int]$d.line }
         question = "Where is ``$($d.name)`` ($($d.kind.ToLowerInvariant())) defined?`n" +
-                   "Answer JSON: {""path"": ""<path relative to the current directory, / separators>"", ""line"": <1-based line of its declaration>}" })
+                   "Answer JSON: {""path"": ""<path relative to the current directory, / separators>"", ""line"": <1-based first line of its definition>}`n" +
+                   "(The definition is where its body is; for a C/C++ function declared in a class or header and defined elsewhere, give the definition.)" })
 }
 $n = 0
 foreach ($s in @($st.inputs.searches) | Select-Object -First $Occurrences) {
