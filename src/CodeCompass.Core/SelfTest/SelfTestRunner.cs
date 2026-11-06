@@ -151,7 +151,7 @@ public static class SelfTestRunner
             r.ServerStartMb = session.Memory.LastMb;
             r.Steps.Add(new SelfTestStep("MCP server", "starts and answers initialize", StepOutcome.Pass, "", -1, r.ServerStartMb));
             var lines = new RepoLines(root);
-            var t = new Tester(session, lines, name, o, r);
+            var t = new Tester(session, lines, name, o, r, picks.TypeNames);
 
             Say("search_code...");
             foreach (var s in picks.Searches) t.SearchCode(s);
@@ -232,6 +232,7 @@ public static class SelfTestRunner
         public Dictionary<string, List<SelfTestLocation>> SearchLines { get; } = new(StringComparer.Ordinal); // per search: its whole-word lines
         public bool HasCSharp { get; private set; }
         public string Extensions { get; private set; } = "";
+        public HashSet<string> TypeNames { get; private set; } = new(StringComparer.Ordinal); // names with a C# type: see CSharpTypeNames
 
         public static Picks? From(string root, int sweepCount)
         {
@@ -282,9 +283,19 @@ public static class SelfTestRunner
                     if (p.Callers.Count >= 4) break;
                     if (IsCSharpMethod(s) && s.EndLine - s.Line >= 2 && symbols.FindByName(s.Name).Count == 1) p.Callers.Add(s);
                 }
+                p.TypeNames = CSharpTypeNames(p.Searches.Concat(p.Broad).Select(s => s.Name).Distinct(), symbols.FindByName);
                 return p;
             }
         }
+
+        /// <summary>The names with a C# type among their definitions: find_references answers for all of a name's
+        /// symbols, so a target-typed new() is a reference whichever one was picked.</summary>
+        internal static HashSet<string> CSharpTypeNames(IEnumerable<string> names, Func<string, IReadOnlyList<Symbol>> definitions) =>
+            names.Where(n => definitions(n).Any(d => IsType(d) && d.RelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)))
+                 .ToHashSet(StringComparer.Ordinal);
+
+        internal static bool IsType(Symbol s) =>
+            s.Kind is SymbolKind.Class or SymbolKind.Struct or SymbolKind.Record or SymbolKind.Interface or SymbolKind.Enum;
 
         private static bool IsCSharpMethod(Symbol s) => s.Kind == SymbolKind.Method && s.RelativePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase);
 
@@ -305,7 +316,8 @@ public static class SelfTestRunner
 
     // ---- the checks ----
 
-    private sealed class Tester(McpStdioSession session, RepoLines lines, ReportNamer name, SelfTestOptions o, SelfTestResult r)
+    private sealed class Tester(McpStdioSession session, RepoLines lines, ReportNamer name, SelfTestOptions o, SelfTestResult r,
+        HashSet<string> typeNames)
     {
         private McpCallResult Call(string tool, Dictionary<string, object?> args) => session.Call(tool, args, o.CallTimeout);
 
@@ -434,9 +446,6 @@ public static class SelfTestRunner
                 (truncated ? "" : found ? "; the expected symbol is among them" : "; the expected symbol is MISSING"), res);
         }
 
-        private static bool IsType(Symbol s) =>
-            s.Kind is SymbolKind.Class or SymbolKind.Struct or SymbolKind.Record or SymbolKind.Interface or SymbolKind.Enum;
-
         // A find_references answer, checked: rows that hold the name (or are where C# calls it unseen), the footer, and
         // the same answer when asked again. "No references found" for a name the text holds is a warning; any other
         // answer without rows - a failure message, an answer cut short - is a failure.
@@ -451,7 +460,7 @@ public static class SelfTestRunner
             if (shape == RefsAnswer.NoneFound)
                 return (same ? StepOutcome.Warn : StepOutcome.Fail,
                         $"no references found, though the name is in the text (its other uses may be in comments or strings); {again}", hits);
-            var tally = Check(hits, (line, h) => AnswerChecks.ReferenceAt(h.Path, line, h.Column, n, IsType(s)),
+            var tally = Check(hits, (line, h) => AnswerChecks.ReferenceAt(h.Path, line, h.Column, n, typeNames.Contains(n)),
                               (line, _) => AnswerChecks.ReferenceOnLine(line, n));
             var split = AnswerChecks.RefsBreakdown(a.Text)!.Value;
             bool implicitOnly = !tally.Clean && AnswerChecks.CanBeImplicit(s.RelativePath, n);

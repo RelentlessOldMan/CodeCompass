@@ -58,6 +58,11 @@ public class SelfTestTests
     [InlineData("a.cs", "    var n = new { A = 1 };", 13, "OrderService", true, false)]                          // an anonymous object
     [InlineData("a.c", "    x = new_buffer();", 9, "OrderService", true, false)]                                 // C has no target-typed new
     [InlineData("a.cs", "[Obsolete(\"x\")]", 2, "ObsoleteAttribute", true, true)]                                // an attribute's short form
+    [InlineData("a.cs", "    private bool sortIncludes = false;", 13, "Boolean", true, true)]                    // C#'s keyword for System.Boolean
+    [InlineData("a.cs", "    public string Name;", 12, "String", true, true)]
+    [InlineData("a.cs", "    int n = 0;", 5, "Int32", true, true)]
+    [InlineData("a.cs", "    bool b = false;", 5, "Int32", true, false)]                                         // another type's keyword
+    [InlineData("a.c", "    bool b = false;", 5, "Boolean", true, false)]                                        // only C# has the aliases
     [InlineData("a.cs", "    var s = OrderServices.Create();", 13, "OrderService", true, false)]
     [InlineData("a.cs", "    var s = OrderService.Create();", 12, "OrderService", true, false)]
     public void ReferenceAt_TakesWhatAReferenceCanLookLike(string path, string line, int col, string name, bool isType, bool expected) =>
@@ -74,6 +79,22 @@ public class SelfTestTests
     [InlineData("a.c", "Dispose", false)] // matched by name outside C#: the name is always spelled
     public void CanBeImplicit_NamesTheCallsCSharpMakesUnseen(string path, string name, bool expected) =>
         Assert.Equal(expected, AnswerChecks.CanBeImplicit(path, name));
+
+    // find_references answers for every symbol of the name, so a target-typed new() counts when ANY of them is a C# type -
+    // not just the one the self-test picked (godot's sweep picked a C++ constructor Vector3 next to the C# struct).
+    [Fact]
+    public void TypeNames_HoldNamesWithAnyCSharpTypeOfThatName()
+    {
+        var defs = new Dictionary<string, IReadOnlyList<CodeCompass.Core.Symbols.Symbol>>
+        {
+            ["Vector3"] = [new("Vector3", CodeCompass.Core.Symbols.SymbolKind.Function, "core/vector3.h", 189, 17),
+                           new("Vector3", CodeCompass.Core.Symbols.SymbolKind.Struct, "Core/Vector3.cs", 15, 19)],
+            ["Widget"] = [new("Widget", CodeCompass.Core.Symbols.SymbolKind.Struct, "widget.h", 3, 8)],   // a C++ type only
+            ["Compute"] = [new("Compute", CodeCompass.Core.Symbols.SymbolKind.Method, "a.cs", 9, 5)],
+        };
+        var types = SelfTestRunner.Picks.CSharpTypeNames(defs.Keys, n => defs[n]);
+        Assert.Equal(["Vector3"], types.Order());
+    }
 
     [Theory]
     [InlineData("a.cs:1:1: Foo();\n\n(1 C# semantic + 0 name-matched reference(s))", RefsAnswer.Rows)]

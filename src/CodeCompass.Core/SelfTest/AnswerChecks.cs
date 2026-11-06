@@ -90,7 +90,17 @@ public static class AnswerChecks
     public static bool ReferenceAt(string path, string line, int column, string name, bool isType) =>
         WholeWordAt(line, column, name) ||
         (ShortAttribute(name) is { } shortName && WholeWordAt(line, column, shortName)) ||
-        (isType && IsCSharp(path) && WholeWordAt(line, column, "new") && line.AsSpan(column - 1 + 3).TrimStart().StartsWith("("));
+        (isType && IsCSharp(path) && WholeWordAt(line, column, "new") && line.AsSpan(column - 1 + 3).TrimStart().StartsWith("(")) ||
+        (IsCSharp(path) && KeywordAliases.TryGetValue(name, out var keyword) && WholeWordAt(line, column, keyword));
+
+    // C#'s keywords for framework types: a reference to System.Boolean is spelled `bool` (llvm's Boolean sweep).
+    private static readonly Dictionary<string, string> KeywordAliases = new(StringComparer.Ordinal)
+    {
+        ["Boolean"] = "bool", ["Byte"] = "byte", ["SByte"] = "sbyte", ["Char"] = "char", ["Decimal"] = "decimal",
+        ["Double"] = "double", ["Single"] = "float", ["Int16"] = "short", ["UInt16"] = "ushort", ["Int32"] = "int",
+        ["UInt32"] = "uint", ["Int64"] = "long", ["UInt64"] = "ulong", ["IntPtr"] = "nint", ["UIntPtr"] = "nuint",
+        ["Object"] = "object", ["String"] = "string",
+    };
 
     // The members C# calls without naming them (a using's Dispose, a foreach's GetEnumerator, an await's GetAwaiter...):
     // the same list as RoslynCSharpAnalyzer.ImplicitlyCalled, which leaves them out of the scoped search for that reason.
