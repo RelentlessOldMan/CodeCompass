@@ -35,6 +35,10 @@
 .PARAMETER OutDir
   Where to write. Default: %LOCALAPPDATA%\CodeCompass\selftest\matrix-<yyyyMMdd-HHmmss>.
 
+.PARAMETER Resume
+  Keep the result of each repo already tested in -OutDir and only test the rest; with every repo done, this just
+  rebuilds the table. Lets each repo run on its own (e.g. -Corpora llvm -OutDir X -Resume, one at a time).
+
 .EXAMPLE
   .\scripts\selftest-matrix.ps1
   .\scripts\selftest-matrix.ps1 -Corpora requests,fmt
@@ -46,7 +50,8 @@ param(
     [string[]]$Corpora,
     [string]$Exe,
     [switch]$Anonymize,
-    [string]$OutDir
+    [string]$OutDir,
+    [switch]$Resume
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -97,10 +102,17 @@ foreach ($w in $work) {
     $stArgs = @('selftest', $w.Path, '--json', $json, '--html', $html)
     if ($Anonymize) { $stArgs += '--anonymize' }
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $ErrorActionPreference = 'Continue'   # the self-test's progress goes to stderr; PowerShell 5.1 would stop on it
-    & $Exe @stArgs 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath (Join-Path $OutDir "$safe.log") | Out-Host
-    $exit = $LASTEXITCODE
-    $ErrorActionPreference = 'Stop'
+    $exitFile = Join-Path $OutDir "$safe.exit"
+    if ($Resume -and (Test-Path $json) -and (Test-Path $exitFile)) {
+        $exit = [int](Get-Content $exitFile -Raw)
+        Write-Host "  kept the earlier result"
+    } else {
+        $ErrorActionPreference = 'Continue'   # the self-test's progress goes to stderr; PowerShell 5.1 would stop on it
+        & $Exe @stArgs 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath (Join-Path $OutDir "$safe.log") | Out-Host
+        $exit = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        Set-Content $exitFile $exit
+    }
     if (-not (Test-Path $json)) { Write-Warning "$($w.Id): no JSON written (exit $exit)"; continue }
     $j = Get-Content $json -Raw -Encoding UTF8 | ConvertFrom-Json
 
