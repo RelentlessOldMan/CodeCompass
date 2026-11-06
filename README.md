@@ -575,6 +575,26 @@ using **792 MB heap / 2.2 GB peak working set**, with queries still ~1 ms (p95 7
 bounded because the indexes are memory-mapped, not loaded into RAM. Build memory is tunable via
 `CODECOMPASS_SEGMENT_MB` / `CODECOMPASS_THREADS`.
 
+### Self-test on the benchmark repos
+
+`codecompass selftest` on each public repo above (v1.0.351, same machine): a full index, then every tool through a real
+MCP server with each answer checked against the files, then the deep sweep (`find_references` on the repo's most-used
+names, up to 1,000 references each). Result = passed / warnings / failed checks; the tool columns are the self-test's
+warm MCP calls, median / max. Reproduce with [`scripts/selftest-matrix.ps1`](scripts/selftest-matrix.ps1).
+
+| Repo | Result | Files | Index | Index peak | Server peak | search_code | find_definition | search_symbols | find_references | find_callees | Deep refs max | Total |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| requests | PASS (36/0/0) | 118 | 1.2 s | 136 MB | 187 MB | 2 / 102 ms | 1 / 6 ms | 1 / 5 ms | 1 / 443 ms | n/a | 88 ms (291 refs) | 5.1 s |
+| fmt | PASS (36/0/0) | 207 | 1.5 s | 104 MB | 146 MB | 5 / 79 ms | 1 / 7 ms | 1 / 5 ms | 2 / 260 ms | n/a | 30 ms (686 refs) | 4.8 s |
+| EF Core | PASS (40/0/0) | 4,991 | 4.1 s | 256 MB | 1.9 GB | 6 / 84 ms | 1 / 8 ms | 6 / 16 ms | 299 ms / 14.6 s | 15 / 30 ms | 14.2 s (1,000 refs) | 1m 04s |
+| TypeScript | PASS (36/0/0) | 72,042 | 19.4 s | 676 MB | 209 MB | 14 / 99 ms | 1 / 8 ms | 3 / 11 ms | 6 / 937 ms | n/a | 301 ms (1,000 refs) | 26.7 s |
+| Godot | PASS (40/0/0) | 9,937 | 9.2 s | 649 MB | 495 MB | 8 / 79 ms | 1 / 7 ms | 6 / 11 ms | 16 ms / 1.8 s | 117 / 598 ms | 860 ms (1,000 refs) | 21.7 s |
+| Roslyn | PASS (40/0/0) | 19,930 | 11.3 s | 728 MB | 3.8 GB | 61 / 96 ms | 1 / 10 ms | 15 / 17 ms | 4.5 / 33.7 s | 42 / 54 ms | 34.3 s (1,000 refs) | 2m 43s |
+| LLVM | PASS, 1 warning (36/1/0) | 132,211 | 43.4 s | 2.2 GB | 285 MB | 54 / 141 ms | 1 / 7 ms | 23 / 33 ms | 31 ms / 1.3 s | 317 / 317 ms | 608 ms (1,000 refs) | 54.4 s |
+
+LLVM's warning is a name whose only other uses are in strings (`find_references` rightly finds none). The server peak
+on the C# repos is Roslyn's model of the code, built on the first `find_references` and kept for the session.
+
 ### Token savings (the whole point)
 
 `bench eval <path>` estimates the token cost of the core task — "show me the definition of X" —
