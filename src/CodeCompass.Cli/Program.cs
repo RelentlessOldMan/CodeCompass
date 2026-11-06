@@ -91,7 +91,7 @@ static int Usage()
     Console.Error.WriteLine("  codecompass parsebench                   tree-sitter parse-time vs size sweep (synthetic)");
     Console.Error.WriteLine("  codecompass statusline [--wrap \"<cmd>\"]  Claude Code status line: shows index state (reads stdin JSON)");
     Console.Error.WriteLine("  codecompass doctor  <path>               diagnose a repo's index (health + metadata)");
-    Console.Error.WriteLine("  codecompass selftest <path> [--html <file>] [--anonymize]   index + run every tool, check each answer, HTML report");
+    Console.Error.WriteLine("  codecompass selftest <path> [--html <file>] [--json <file>] [--anonymize]   index + run every tool, check each answer, HTML (+JSON) report");
     Console.Error.WriteLine("  codecompass cache   [list|gc|clear <path>|clear-all]   inspect/manage the per-user index cache");
     Console.Error.WriteLine("  codecompass report  <path> [--no-logs]   zip diagnostics + logs for a bug report (never source)");
     Console.Error.WriteLine("  codecompass logs                         show the log folder and files");
@@ -111,13 +111,14 @@ static int CmdSelfTest(string[] args)
     if (args.Length < 2) return Usage();
     var root = Path.GetFullPath(args[1]);
     if (!Directory.Exists(root)) { Console.Error.WriteLine($"not a directory: {root}"); return 1; }
-    string? html = null, mcp = null;
+    string? html = null, json = null, mcp = null;
     bool anonymize = false;
     for (int i = 2; i < args.Length; i++)
     {
         switch (args[i].ToLowerInvariant())
         {
             case "--html" when i + 1 < args.Length: html = Path.GetFullPath(args[++i]); break;
+            case "--json" when i + 1 < args.Length: json = Path.GetFullPath(args[++i]); break;
             case "--mcp" when i + 1 < args.Length: mcp = Path.GetFullPath(args[++i]); break;
             case "--anonymize": anonymize = true; break;
             default: Console.Error.WriteLine($"unknown option: {args[i]}"); return Usage();
@@ -141,8 +142,14 @@ static int CmdSelfTest(string[] args)
     }
     Directory.CreateDirectory(Path.GetDirectoryName(html)!);
     File.WriteAllText(html, CodeCompass.Core.SelfTest.SelfTestReport.Html(result));
+    if (json is not null)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(json)!);
+        File.WriteAllText(json, CodeCompass.Core.SelfTest.SelfTestReport.Json(result));
+    }
     Console.Write(CodeCompass.Core.SelfTest.SelfTestReport.Summary(result));
     Console.WriteLine($"report: {html}");
+    if (json is not null) Console.WriteLine($"json: {json}");
     return result.Failed > 0 ? 2 : 0;
 }
 

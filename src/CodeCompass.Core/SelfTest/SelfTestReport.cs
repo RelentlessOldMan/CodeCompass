@@ -37,6 +37,41 @@ public static class SelfTestReport
         return sb.ToString();
     }
 
+    /// <summary>The whole result as JSON, for scripts that compare repos or reuse the picked inputs. Names, paths and
+    /// answers are left out when the result is anonymized, as on the HTML page.</summary>
+    public static string Json(SelfTestResult r) => System.Text.Json.JsonSerializer.Serialize(new
+    {
+        schema = 1,
+        version = r.Version,
+        repo = r.RepoLabel,
+        anonymized = r.Anonymized,
+        startedUtc = r.StartedUtc,
+        seconds = Math.Round(r.Seconds, 1),
+        verdict = Verdict(r),
+        passed = r.Passed, warned = r.Warned, failed = r.Failed,
+        features = Features.Select(f => (f.Feature, Steps: r.Steps.Where(s => s.Feature == f.Feature).ToList()))
+                           .Where(f => f.Steps.Count > 0)
+                           .Select(f => new { feature = f.Feature, outcome = FeatureOutcome(f.Steps) }),
+        facts = r.Facts.Select(f => new { label = f.Label, value = f.Value }),
+        server = new { startMb = r.ServerStartMb, peakMb = r.ServerPeakMb, endMb = r.ServerEndMb },
+        steps = r.Steps.Select(s => new
+        {
+            feature = s.Feature, what = s.What, outcome = s.Outcome.ToString(), detail = s.Detail,
+            ms = s.Ms, peakMb = s.PeakMb, answer = s.Answer,
+        }),
+        sweep = r.Sweep.Select(w => new
+        {
+            name = w.Name, shown = w.Shown, truncated = w.Truncated, semantic = w.Semantic, named = w.Named,
+            ms = w.Ms, peakMb = w.PeakMb, repeatMs = w.RepeatMs, deterministic = w.Deterministic, ok = w.Ok, detail = w.Detail,
+        }),
+        inputs = r.Inputs,
+    }, new System.Text.Json.JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    });
+
     public static string Html(SelfTestResult r)
     {
         var sb = new StringBuilder();

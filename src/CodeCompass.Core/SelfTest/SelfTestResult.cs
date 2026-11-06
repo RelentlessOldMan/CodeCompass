@@ -11,8 +11,21 @@ public sealed record SelfTestStep(string Feature, string What, StepOutcome Outco
 public sealed record RefsSweepRow(string Name, int Shown, bool Truncated, int Semantic, int Named, long Ms, double PeakMb,
                                   long RepeatMs, bool Deterministic, bool Ok, string Detail);
 
+/// <summary>A place in the repo: a relative path and a 1-based line.</summary>
+public sealed record SelfTestLocation(string Path, int Line);
+
+/// <summary>A name the self-test looked up, where it's defined, and (for the searched names) every line that holds it
+/// as a whole word - the expected answer, from the index, for a test that asks someone else the same question.</summary>
+public sealed record SelfTestInput(string Name, string Kind, string Path, int Line, IReadOnlyList<SelfTestLocation>? Lines = null);
+
+/// <summary>The inputs the self-test picked from the repo. Left out of an anonymized result.</summary>
+public sealed record SelfTestInputs(IReadOnlyList<SelfTestInput> Definitions, IReadOnlyList<SelfTestInput> Searches,
+                                    IReadOnlyList<SelfTestInput> Callers);
+
 public sealed class SelfTestResult
 {
+    public SelfTestInputs? Inputs { get; set; }
+
     public string Version { get; init; } = "";
     public string RepoLabel { get; init; } = "";
     public bool Anonymized { get; init; }

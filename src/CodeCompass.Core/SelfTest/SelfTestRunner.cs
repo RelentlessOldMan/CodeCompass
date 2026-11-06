@@ -125,6 +125,14 @@ public static class SelfTestRunner
             return;
         }
         r.Facts.Add(("Files by extension", picks.Extensions));
+        if (!o.Anonymize)
+        {
+            static SelfTestInput In(Symbol s, IReadOnlyList<SelfTestLocation>? lines = null) =>
+                new(s.Name, s.Kind.ToString(), s.RelativePath.Replace('\\', '/'), s.Line, lines);
+            r.Inputs = new SelfTestInputs(picks.Defs.Select(s => In(s)).ToList(),
+                                          picks.Searches.Select(s => In(s, picks.SearchLines.GetValueOrDefault(s.Name))).ToList(),
+                                          picks.Callers.Select(s => In(s)).ToList());
+        }
         if (picks.Defs.Count == 0)
             r.Steps.Add(new SelfTestStep("Indexing", "symbols found", StepOutcome.Warn,
                 "no symbols to test with - the repo may hold no code in a language with symbol support"));
@@ -221,6 +229,7 @@ public static class SelfTestRunner
         public List<Symbol> Searches { get; } = new();  // a few uses each: search_code (all of them shown), find_references
         public List<Symbol> Callers { get; } = new();   // C# methods with a body: find_callees
         public List<Symbol> Broad { get; } = new();     // the most used names: the deep sweep
+        public Dictionary<string, List<SelfTestLocation>> SearchLines { get; } = new(StringComparer.Ordinal); // per search: its whole-word lines
         public bool HasCSharp { get; private set; }
         public string Extensions { get; private set; } = "";
 
@@ -256,9 +265,16 @@ public static class SelfTestRunner
                 var breadth = new List<(Symbol Sym, int Hits)>();
                 foreach (var s in spread.Take(BreadthCandidates))
                 {
-                    int hits = text.Search(s.Name, 1001, caseSensitive: true).Count;
+                    var matches = text.Search(s.Name, 1001, caseSensitive: true);
+                    int hits = matches.Count;
                     breadth.Add((s, hits));
-                    if (p.Searches.Count < 4 && hits is >= 2 and <= 40 && symbols.FindByName(s.Name).Count == 1) p.Searches.Add(s);
+                    if (p.Searches.Count < 4 && hits is >= 2 and <= 40 && symbols.FindByName(s.Name).Count == 1)
+                    {
+                        p.Searches.Add(s);
+                        p.SearchLines[s.Name] = matches.Where(m => AnswerChecks.HasWholeWord(m.LineText, s.Name))
+                                                       .Select(m => new SelfTestLocation(m.Path.Replace('\\', '/'), m.Line))
+                                                       .Distinct().ToList();
+                    }
                 }
                 p.Broad.AddRange(breadth.Where(b => b.Hits > 0).OrderByDescending(b => b.Hits).Take(sweepCount).Select(b => b.Sym));
                 foreach (var s in spread)

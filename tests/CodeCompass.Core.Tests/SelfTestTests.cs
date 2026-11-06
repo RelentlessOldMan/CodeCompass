@@ -347,6 +347,79 @@ public class SelfTestTests
         Assert.Contains("repo-", stdout);
     }
 
+    // The JSON holds what the page does, plus the names picked and their expected answers - each checked here against
+    // the files, since a script that asks someone else the same questions scores the answers against them.
+    [Fact]
+    public void SelfTest_Json_HasTheResult_AndThePickedNamesWithTheirExpectedLines()
+    {
+        using var repo = new TempRepo();
+        MixedRepo(repo);
+
+        var (exit, stdout, stderr, json) = SelfTestJson(repo);
+
+        Assert.True(exit == 0, $"exit {exit}\n{stdout}\n{stderr}");
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        Assert.Equal("PASS", root.GetProperty("verdict").GetString());
+        Assert.Equal(0, root.GetProperty("failed").GetInt32());
+        Assert.Contains(root.GetProperty("features").EnumerateArray(),
+                        f => f.GetProperty("feature").GetString() == "find_definition" && f.GetProperty("outcome").GetString() == "PASS");
+        Assert.Contains(root.GetProperty("steps").EnumerateArray(), s => s.GetProperty("answer").ValueKind == System.Text.Json.JsonValueKind.String);
+        Assert.Contains(root.GetProperty("facts").EnumerateArray(), f => f.GetProperty("label").GetString() == "Files indexed");
+
+        string LineOf(string rel, int line) => File.ReadAllLines(Path.Combine(repo.Root, rel))[line - 1];
+        var inputs = root.GetProperty("inputs");
+        var defs = inputs.GetProperty("definitions").EnumerateArray().ToList();
+        Assert.NotEmpty(defs);
+        foreach (var d in defs)
+            Assert.True(AnswerChecks.HasWholeWord(LineOf(d.GetProperty("path").GetString()!, d.GetProperty("line").GetInt32()),
+                                                  d.GetProperty("name").GetString()!));
+        var searches = inputs.GetProperty("searches").EnumerateArray().ToList();
+        Assert.NotEmpty(searches);
+        foreach (var s in searches)
+        {
+            var name = s.GetProperty("name").GetString()!;
+            var lines = s.GetProperty("lines").EnumerateArray()
+                         .Select(l => (Path: l.GetProperty("path").GetString()!, Line: l.GetProperty("line").GetInt32())).ToList();
+            Assert.True(lines.Count >= 2, name);
+            Assert.Contains((s.GetProperty("path").GetString()!, s.GetProperty("line").GetInt32()), lines); // its definition's own line
+            foreach (var l in lines) Assert.True(AnswerChecks.HasWholeWord(LineOf(l.Path, l.Line), name), $"{name} at {l.Path}:{l.Line}");
+            // ...and no whole-word line of the repo is missing from them
+            int expected = Directory.EnumerateFiles(repo.Root, "*", SearchOption.AllDirectories)
+                                    .Sum(f => File.ReadLines(f).Count(t => AnswerChecks.HasWholeWord(t, name)));
+            Assert.Equal(expected, lines.Count);
+        }
+    }
+
+    [Fact]
+    public void SelfTest_Json_Anonymized_HidesNamesPathsAnswersAndInputs()
+    {
+        using var repo = new TempRepo();
+        MixedRepo(repo);
+
+        var (exit, stdout, stderr, json) = SelfTestJson(repo, "--anonymize");
+
+        Assert.True(exit == 0, $"exit {exit}\n{stdout}\n{stderr}");
+        foreach (var secret in new[] { "ComputeTotal", "SumOrderLines", "ApplyDiscount", "OrderService", "parse_header",
+                                       "checksum_block", "parser.c", Path.GetFileName(repo.Root) })
+            Assert.DoesNotContain(secret, json);
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, doc.RootElement.GetProperty("inputs").ValueKind);
+        Assert.All(doc.RootElement.GetProperty("steps").EnumerateArray(),
+                   s => Assert.Equal(System.Text.Json.JsonValueKind.Null, s.GetProperty("answer").ValueKind));
+    }
+
+    private static (int Exit, string Stdout, string Stderr, string Json) SelfTestJson(TempRepo repo, params string[] extra)
+    {
+        var json = Path.Combine(Path.GetTempPath(), "cc-selftest-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            var (exit, stdout, stderr, _) = SelfTest(repo, ["--json", json, .. extra]);
+            return (exit, stdout, stderr, File.Exists(json) ? File.ReadAllText(json) : "");
+        }
+        finally { try { File.Delete(json); } catch { } }
+    }
+
     // A server that won't start still gives a report, and an anonymized one doesn't leak the error's paths into it.
     [Fact]
     public void SelfTest_ServerWontStart_StillReports_AndAnonymizedHidesTheError()

@@ -146,7 +146,7 @@ codecompass symstats <path>           profile symbol-file sizes + parse cost per
 codecompass parsebench                tree-sitter parse-time vs size sweep (synthetic)
 codecompass statusline [--wrap "<cmd>"]  Claude Code status-line segment (index state)
 codecompass doctor  <path>            diagnose a repo's index (health + metadata)
-codecompass selftest <path> [--html <file>] [--anonymize]   the standard user test: every tool, checked, HTML report
+codecompass selftest <path> [--html <file>] [--json <file>] [--anonymize]   the standard user test: every tool, checked, HTML (+JSON) report
 codecompass cache   [list|gc|clear <path>|clear-all]   inspect/manage the per-user index cache
 codecompass report  <path> [--no-logs]  zip diagnostics + logs for a bug report (never source)
 codecompass logs                      show the log folder and files
@@ -499,8 +499,9 @@ The command is fast, never errors out loudly, and publishing is off via `statusL
   find_references (up to 1,000 each, the costliest lookups there are) for time and memory. Out comes one
   self-contained HTML page: pass/fail per feature, every check with its timing and the tool's answer, repo stats and
   the deep sweep. It never writes into the repo; the index cache is rebuilt. The page goes to
-  `%LOCALAPPDATA%\CodeCompass\selftest\` unless `--html` says where. `--anonymize` hashes names and paths and leaves
-  the answers out, for a page you can share. Exit code 0 = all passed, 2 = something failed. Allow 10-30+ minutes on
+  `%LOCALAPPDATA%\CodeCompass\selftest\` unless `--html` says where; `--json <file>` also writes the whole result as
+  JSON (with the names it picked and their expected answers), for scripts. `--anonymize` hashes names and paths and
+  leaves the answers out, for a page you can share. Exit code 0 = all passed, 2 = something failed. Allow 10-30+ minutes on
   a huge or network repo (the full index and the deep sweep dominate). An agent can run it too: "run the CodeCompass
   self-test on C:\src\foo".
 - **`codecompass cache`** — inspect/manage the per-user cache under `%LOCALAPPDATA%\CodeCompass`:
