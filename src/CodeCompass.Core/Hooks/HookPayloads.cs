@@ -29,9 +29,7 @@ public static class HookPayloads
     private const string SessionText =
         "CodeCompass is available for this workspace via MCP. For code search and navigation prefer its tools - " +
         "search_code, find_definition, find_references, find_callees, search_symbols - over Grep or reading whole " +
-        "files: precise file:line:col ranges for far fewer tokens; find_references is semantic for C#, and matches " +
-        "other languages (C/C++ included) by name, so same-named symbols are listed together. " +
-        "The index auto-updates as files change.";
+        "files: precise file:line:col ranges for far fewer tokens. The index auto-updates as files change.";
 
     /// <summary>Whether a Grep call (the PreToolUse hook's stdin JSON) should be redirected to CodeCompass: only when
     /// search_code gives the same answer - a non-empty literal pattern, over the whole indexed project, with no Grep

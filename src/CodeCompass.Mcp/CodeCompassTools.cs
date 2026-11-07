@@ -21,13 +21,11 @@ namespace CodeCompass.Mcp;
 public static class CodeCompassTools
 {
     [McpServerTool(Name = "search_code")]
-    [Description("Search the indexed codebase for a literal text/substring. Case-sensitive by default; " +
-                 "set caseSensitive=false to match any case. Returns 'file:line:col: matched line' " +
-                 "results. Prefer this over grep.")]
+    [Description("Literal substring search of the indexed code; returns 'file:line:col: line'. Prefer over grep.")]
     public static string SearchCode(
-        [Description("Literal substring to find.")] string query,
-        [Description("Maximum number of results.")] int maxResults = 50,
-        [Description("Whether the match is case-sensitive (default true). Set false to match any case.")] bool caseSensitive = true,
+        [Description("Literal substring.")] string query,
+        [Description("Max results.")] int maxResults = 50,
+        [Description("Default true.")] bool caseSensitive = true,
         CancellationToken cancellationToken = default)
         => ServerContext.QueryAll((handles, ct) =>
     {
@@ -148,11 +146,10 @@ public static class CodeCompassTools
     private const int MaxResultsCeiling = 1000;
 
     [McpServerTool(Name = "find_definition")]
-    [Description("Find where a symbol (class, method, function, type, etc.) is defined, by exact name. " +
-                 "Returns 'file:startLine-endLine: Kind Name'; for a single small definition it also " +
-                 "inlines the source so you don't need to open the file. Use this for go-to-definition.")]
+    [Description("Go-to-definition by exact symbol name; returns 'file:startLine-endLine: Kind Name' and, " +
+                 "for a single small definition, its source, so you needn't open the file.")]
     public static string FindDefinition(
-        [Description("Exact symbol name (case-sensitive).")] string name,
+        [Description("Exact name (case-sensitive).")] string name,
         CancellationToken cancellationToken = default)
         => ServerContext.QueryAll((handles, ct) =>
     {
@@ -224,13 +221,12 @@ public static class CodeCompassTools
     }
 
     [McpServerTool(Name = "find_references")]
-    [Description("Find where a symbol is used across the codebase. C# is SEMANTIC (Roslyn): it resolves the actual " +
-                 "symbol. Other languages, including C/C++, are matched by NAME: whole-word uses in code files, never " +
-                 "in comments or strings (C#, C/C++) and never the definition itself; same-named symbols are listed " +
-                 "together. Returns 'file:line:col: line'.")]
+    [Description("Uses of a symbol; returns 'file:line:col: line'. C# is SEMANTIC (Roslyn). Other languages, " +
+                 "C/C++ included, match by NAME: whole-word uses in code, not the definition, not comments or " +
+                 "strings (C#, C/C++); same-named symbols are listed together.")]
     public static string FindReferences(
-        [Description("Symbol/identifier to find references to (case-sensitive).")] string name,
-        [Description("Maximum number of results.")] int maxResults = 100,
+        [Description("Exact name (case-sensitive).")] string name,
+        [Description("Max results.")] int maxResults = 100,
         CancellationToken cancellationToken = default)
         => ServerContext.QueryAll((handles, ct) =>
     {
@@ -382,15 +378,12 @@ public static class CodeCompassTools
     }, cancellationToken);
 
     [McpServerTool(Name = "find_callees")]
-    [Description("List the in-repo methods a C# method CALLS (its callees), resolved SEMANTICALLY: " +
-                 "overloads bind to the real declaration and framework/external calls are omitted, so " +
-                 "you get the true call targets - not every same-named symbol a syntactic graph returns. " +
-                 "Each result is the callee's DEFINITION (file:line-endLine), so you can walk a call chain " +
-                 "downward one hop at a time without reading each body. C# only; other languages return " +
-                 "nothing - use find_definition then read.")]
+    [Description("C# only: the in-repo methods a method calls, resolved SEMANTICALLY (the real overload; " +
+                 "framework calls omitted). Each result is the callee's DEFINITION (file:line-endLine), so you " +
+                 "can walk a call chain without reading bodies. Other languages: use find_definition.")]
     public static string FindCallees(
         [Description("Exact C# method name (case-sensitive).")] string name,
-        [Description("Maximum number of callees.")] int maxResults = 50,
+        [Description("Max results.")] int maxResults = 50,
         CancellationToken cancellationToken = default)
         => ServerContext.QueryAll((handles, ct) =>
     {
@@ -463,11 +456,10 @@ public static class CodeCompassTools
     }, cancellationToken);
 
     [McpServerTool(Name = "search_symbols")]
-    [Description("Search symbol names by case-insensitive substring. " +
-                 "Returns 'file:line:col: Kind Name'. Use this to discover related definitions.")]
+    [Description("Symbol names containing a substring (case-insensitive); returns 'file:line:col: Kind Name'.")]
     public static string SearchSymbols(
-        [Description("Substring to match against symbol names (case-insensitive).")] string query,
-        [Description("Maximum number of results.")] int maxResults = 50,
+        [Description("Substring.")] string query,
+        [Description("Max results.")] int maxResults = 50,
         CancellationToken cancellationToken = default)
         => ServerContext.QueryAll((handles, ct) =>
     {
@@ -491,8 +483,8 @@ public static class CodeCompassTools
     }, cancellationToken);
 
     [McpServerTool(Name = "reindex")]
-    [Description("Rebuild the CodeCompass index for this workspace from scratch. Also reports index " +
-                 "status. Run this after large external changes (e.g. a source-control sync) if results seem stale.")]
+    [Description("Rebuild this workspace's index from scratch and report its status; for stale results " +
+                 "after a large external change such as a source-control sync.")]
     public static string Reindex()
     {
         // A synchronous rebuild of a large/network workspace would block this tool call for minutes - the MCP
@@ -514,17 +506,14 @@ public static class CodeCompassTools
     }
 
     [McpServerTool(Name = "manage_links")]
-    [Description("Manage LINKED ROOTS - external directories federated into this workspace's searches - and the " +
-                 "session FOCUS. action: \"list\" (default) shows linked roots, index status, and focus. " +
-                 "\"add\"/\"remove\" attach/detach an external directory ('path' = absolute; add indexes it, or " +
-                 "defers if very large; applies on the next query). \"focus\" scopes every search to matching " +
-                 "root(s): 'path' = folder name, path fragment, or absolute path, comma-separated for several; " +
-                 "omit to clear. Scoped results disclose what was excluded, so a narrowed search is never " +
-                 "mistaken for 'not found'.")]
+    [Description("LINKED ROOTS (external directories searched with this workspace) and session FOCUS. " +
+                 "list: roots, index status, focus. add/remove: an external directory (add indexes it, or " +
+                 "defers if very large). focus: scope all searches to the matching roots; scoped results " +
+                 "say what was excluded.")]
     public static string ManageLinks(
-        [Description("What to do: list | add | remove | focus (default list).")] string action = "list",
-        [Description("For add/remove: the external directory (absolute path). For focus: repo name(s)/path(s) to scope to (comma-separated); omit to clear focus.")] string? path = null,
-        [Description("On remove, also delete the linked root's index if no other workspace uses it (reclaim disk).")] bool purge = false)
+        [Description("list | add | remove | focus.")] string action = "list",
+        [Description("add/remove: absolute directory. focus: root names, path fragments or paths, comma-separated; omit to clear.")] string? path = null,
+        [Description("On remove, also delete its index if no other workspace uses it.")] bool purge = false)
     {
         var project = ServerContext.Root;
         if (string.IsNullOrWhiteSpace(project)) return "No workspace is currently being served.";
