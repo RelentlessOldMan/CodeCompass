@@ -278,7 +278,11 @@ public static class CodeCompassTools
         // its files. A clash in a declaration reaches other files (the whole C# pass is incomplete); one only in a
         // candidate's code is backfilled in that file alone.
         var csClash = csharp?.UsingsClash(csCandidates, ct) ?? ([], []);
-        var csBackfill = new System.Collections.Generic.HashSet<string>(csClash.Files, System.StringComparer.OrdinalIgnoreCase);
+        // Uses the model can't bind (a member reached through a package's type): backfilled by name in those files.
+        // A clash file is unbound too (the clash is why), and the clash note already names it.
+        IReadOnlyList<string> csUnbound = (csharp?.UnboundFiles(csCandidates, name, ct) ?? [])
+            .Except(csClash.Files, System.StringComparer.OrdinalIgnoreCase).ToList();
+        var csBackfill = new System.Collections.Generic.HashSet<string>(csClash.Files.Concat(csUnbound), System.StringComparer.OrdinalIgnoreCase);
         bool csharpIncomplete = csharp is null || csConditional.Count > 0 || csUnreadable.Count > 0 || csDroppedDirs > 0 || csClash.Declarations.Count > 0;
         // Per-query comment/string classifier for C#/C/C++ name matches; classifies each file once, from the text the name
         // search already read when it read the file whole (ReferenceTextSink), so the file isn't read twice.
@@ -349,6 +353,9 @@ public static class CodeCompassTools
             notes.Append(" (Note: " + ReferenceMerge.CSharpUsingsClashNote(csClash.Declarations.Select(Disp).ToList(),
                                                                             csClash.Files.Select(Disp).ToList()) + ")");
         }
+        if (csUnbound.Count > 0)
+            notes.Append(" (Note: " + ReferenceMerge.CSharpUnboundNote(name,
+                csUnbound.Select(f => csDisplay.TryGetValue(f, out var disp) ? disp : System.IO.Path.GetFileName(f)).ToList()) + ")");
         if (unreadable.Count > 0) notes.Append(" (Note: " + ReferenceMerge.UnreadableCandidatesNote(unreadable) + ".)");
         // The name search's raw scan budget (or a file's per-file cap) ran out before the filtered list did: the count
         // may be incomplete, so say so rather than presenting it (or a zero) as exact.
@@ -577,7 +584,13 @@ public static class CodeCompassTools
                 // the linked root is deterministic (the tool contract already says "absolute path").
                 if (!System.IO.Path.IsPathRooted(path)) return $"Provide an ABSOLUTE path (got relative '{path}'). Relative paths resolve against the server's launch directory, not this workspace.";
                 var r = LinkManager.Add(project, path);
-                var suffix = r.Status is LinkManager.AddStatus.Rejected or LinkManager.AddStatus.AlreadyLinked ? "" : " — active on the next query.";
+                // A deferred or failed build isn't searched until it's built (every answer says so meanwhile).
+                var suffix = r.Status switch
+                {
+                    LinkManager.AddStatus.ReusedIndex or LinkManager.AddStatus.Indexed => " — active on the next query.",
+                    LinkManager.AddStatus.DeferredTooBig or LinkManager.AddStatus.IndexFailed => " It is NOT searched until it is built.",
+                    _ => "",
+                };
                 return r.Message + suffix;
             }
             case "remove":

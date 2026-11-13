@@ -530,6 +530,39 @@ public class IgnoreFileTests
         }
     }
 
+    // A linked root's watcher overflowing where no in-session rebuild runs (network/huge, or autoReconcile off) lost the
+    // edits without a word: the primary root says so on every answer, the linked root said nothing.
+    [Fact]
+    public void Server_LostEventsOnALinkedRootWhereNoRebuildRuns_AnswersNameThatRootUntilItsUpdated()
+    {
+        using var project = new TempRepo();
+        using var lib = new TempRepo();
+        project.Write("p.cs", "class P { }\n");
+        lib.Write(".codecompass.json", "{ \"autoReconcile\": false }");
+        lib.Write("lib.cs", "public class LibLost { }\n");
+        var built = RepositoryIndexer.Build(lib.Root); built.Text.Dispose(); built.Symbols.Dispose();
+        LinkStore.Add(project.Root, lib.Root);
+        ServerContext.Init(project.Root);
+        try
+        {
+            CodeCompassTools.Reindex();
+            Assert.DoesNotContain("lost change events", CodeCompassTools.SearchCode("LibLost"));
+            ServerContext.OnLinkedChangesForTest(lib.Root, new ChangeBatch(Array.Empty<string>(), FullReconcile: true));
+            var during = CodeCompassTools.SearchCode("LibLost");
+            Assert.Contains("lost change events", during);
+            Assert.Contains(Path.GetFileName(lib.Root), during);
+
+            Thread.Sleep(20); // a build stamped strictly after the loss
+            var u = RepositoryIndexer.Update(lib.Root); u.Text.Dispose(); u.Symbols.Dispose();
+            Assert.DoesNotContain("lost change events", AnswerWhen(() => CodeCompassTools.SearchCode("LibLost"), a => !a.Contains("lost change events")));
+        }
+        finally
+        {
+            ServerContext.Init(project.Root);
+            LinkStore.Remove(project.Root, lib.Root);
+        }
+    }
+
     [Fact]
     public void Pattern_ALowerCaseClass_FoldsCaseWhereMatchingDoes()
     {

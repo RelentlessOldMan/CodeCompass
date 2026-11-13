@@ -959,6 +959,7 @@ public static class RepositoryIndexer
         bool touched = false; // did any path reach the index or the snapshot (see ChangeCounts.Untouched)?
         bool? rootAnswered = null;
         bool RootAnswers() => rootAnswered ??= Directory.Exists(root);
+        var caseCheck = new CaseCheck(root);
 
         foreach (var (full, rel) in inRepo)
         {
@@ -976,6 +977,9 @@ public static class RepositoryIndexer
             }
 
             var kind = Probe(full, batch.RootIsNetwork, RootAnswers);
+            // A case-only rename's OLD spelling still answers on a case-insensitive disk; the index keys paths by exact case,
+            // so kept, it sat beside the new spelling until a full update.
+            if (kind is PathKind.File or PathKind.Folder && caseCheck.SpelledOtherwise(rel)) kind = PathKind.Gone;
             if (kind != PathKind.Unknown) touched = true;
             // An ignore file whose text the index changed (added, edited, deleted) - not one saved unchanged.
             bool ignoreFile = ignore.UseIgnoreFiles && IgnoreFile.IsIgnoreFileName(Path.GetFileName(rel.AsSpan()))
@@ -1020,6 +1024,9 @@ public static class RepositoryIndexer
                             // A file replaced by a same-named folder: the walk just indexed what's in it, so drop the file alone.
                             case PathKind.Folder: RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, csharp, withChildren: false); break;
                             case PathKind.Unknown: unsure.Add(staleFull); break;
+                            // A case-only rename inside the folder: the walk indexed the new spelling, the old one still answers.
+                            case PathKind.File when caseCheck.SpelledOtherwise(stale):
+                                RemovePathAndChildren(text, symbols, snapshot, dir, stale, ref removed, csharp, withChildren: false); break;
                         }
                     }
             }
@@ -1056,6 +1063,54 @@ public static class RepositoryIndexer
     }
 
     private enum PathKind { Folder, File, Gone, Unknown }
+
+    private static readonly EnumerationOptions ListAll = new()
+    {
+        IgnoreInaccessible = true, AttributesToSkip = 0, RecurseSubdirectories = false,
+    };
+
+    // Whether a path that answered is spelled otherwise on disk in any segment below the root (Src/Widget.cs asked;
+    // src/ or widget.cs there): a case-only rename's OLD spelling still answers on a case-insensitive disk. Each parent
+    // folder is listed at most once per batch - a listing reads every entry, and a build writes thousands of paths into
+    // one folder. A listing that fails says nothing: the probe's answer stands. On a case-sensitive folder both
+    // spellings can exist; the exact one is there, so the path is not reported.
+    private sealed class CaseCheck(string root)
+    {
+        private readonly Dictionary<string, (HashSet<string> Exact, HashSet<string> AnyCase)?> _listed =
+            new(StringComparer.Ordinal);
+
+        public bool SpelledOtherwise(string rel)
+        {
+            var parent = root;
+            foreach (var name in rel.Split('/'))
+            {
+                if (name.Length == 0) return false;
+                var names = Listing(parent);
+                if (names is null) return false;
+                if (!names.Value.Exact.Contains(name)) return names.Value.AnyCase.Contains(name);
+                parent = Path.Combine(parent, name);
+            }
+            return false;
+        }
+
+        private (HashSet<string> Exact, HashSet<string> AnyCase)? Listing(string folder)
+        {
+            if (_listed.TryGetValue(folder, out var cached)) return cached;
+            (HashSet<string>, HashSet<string>)? got;
+            try
+            {
+                var exact = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var e in Directory.EnumerateFileSystemEntries(folder, "*", ListAll)) exact.Add(Path.GetFileName(e));
+                got = (exact, new HashSet<string>(exact, StringComparer.OrdinalIgnoreCase));
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                got = null;
+            }
+            _listed[folder] = got;
+            return got;
+        }
+    }
 
     /// <summary>Test seam (null in production): true makes a path's probe fail the way an unreachable share does.</summary>
     internal static Func<string, bool>? ProbeFailsForTests = UnansweredFromEnvironment();

@@ -58,6 +58,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _solution = null;
             _projectId = null;
             _clashByFile.Clear();       // per-file answers belong to this model; a rebuild recomputes them
+            _unboundByFile.Clear();
             _conditionalByFile.Clear();
             _scopeFactsByFile.Clear();
             _clashFilter = null;
@@ -394,6 +395,9 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
     // Reg.cs and reg.cs are different files.
     private readonly Dictionary<string, bool> _clashByFile = new(StringComparer.Ordinal);
     private readonly Dictionary<string, bool> _conditionalByFile = new(StringComparer.Ordinal);
+    // Whether a file has a use of a name that binds to nothing (UnboundFiles): it depends on what every file declares, so
+    // it's cleared with the clash answers.
+    private readonly Dictionary<(string Path, string Name), bool> _unboundByFile = new();
 
     /// <summary>Per-file answers cached so far (test hook).</summary>
     internal int CachedFileAnswers { get { lock (_gate) return _clashByFile.Count + _conditionalByFile.Count; } }
@@ -432,6 +436,71 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             if (conditional) hits.Add(p);
         }
         return hits;
+    }
+
+    /// <summary>Of <paramref name="candidateFullPaths"/>, the files where <paramref name="name"/> is used but binds to
+    /// nothing: no symbol and no candidates. The model compiles against the framework alone, so a type from a NuGet package,
+    /// from source-generator output or declared under an inactive #if elsewhere is an error type, and what is reached through
+    /// it (<c>JsonConvert.DeserializeObject&lt;W&gt;(s).Spin()</c>) is invisible to <see cref="FindReferences"/>. Backfill
+    /// these by name, like a clash file. Judged on the model's own trees, so the answer is deterministic.</summary>
+    public IReadOnlyList<string> UnboundFiles(IEnumerable<string> candidateFullPaths, string name,
+        System.Threading.CancellationToken ct = default)
+    {
+        if (!CanResolve(name)) return Array.Empty<string>();
+        var (solution, _) = EnsureBuilt(ct);
+        var files = new List<string>();
+        foreach (var p in candidateFullPaths.Distinct(StringComparer.Ordinal))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!SemanticCoverage.IsCSharp(p)) continue;
+            bool known;
+            lock (_gate) if (_unboundByFile.TryGetValue((p, name), out known)) { if (known) files.Add(p); continue; }
+            var id = DocumentIdFor(solution, p);
+            var doc = id is null ? null : solution.GetDocument(id);
+            if (doc is null) continue; // not in the model: the unreadable-file note covers it
+            bool unbound = HasUnboundUse(doc, name, ct);
+            lock (_gate) _unboundByFile[(p, name)] = unbound;
+            if (unbound) files.Add(p);
+        }
+        files.Sort(StringComparer.Ordinal);
+        return files;
+    }
+
+    // Binds only the occurrences the text holds (found by offset, not by walking every node), and stops at the first
+    // unbound one.
+    private static bool HasUnboundUse(Document doc, string name, System.Threading.CancellationToken ct)
+    {
+        var sourceText = doc.GetTextAsync(ct).GetAwaiter().GetResult();
+        if (!Contains(sourceText, name)) return false;
+        var root = doc.GetSyntaxRootAsync(ct).GetAwaiter().GetResult();
+        if (root is null) return false;
+        var text = sourceText.ToString();
+        SemanticModel? model = null;
+        for (int at = text.IndexOf(name, StringComparison.Ordinal); at >= 0; at = text.IndexOf(name, at + name.Length, StringComparison.Ordinal))
+        {
+            var token = root.FindToken(at);
+            if (!token.IsKind(SyntaxKind.IdentifierToken) || token.ValueText != name || token.Parent is not SimpleNameSyntax n) continue;
+            if (!IsUse(n)) continue;
+            model ??= doc.GetSemanticModelAsync(ct).GetAwaiter().GetResult();
+            if (model is null) return false;
+            var info = model.GetSymbolInfo(n, ct);
+            if (info.Symbol is null && info.CandidateSymbols.IsEmpty) return true;
+        }
+        return false;
+    }
+
+    // Not a use of a symbol: a named argument names a parameter; an anonymous member's name declares it; a using
+    // directive or a namespace declaration names a namespace (one the model lacks is a package's, not a use). A
+    // property pattern's name (`{ Spin: 1 }`) and an attribute's named argument (`[A(Spin = 1)]`) are uses.
+    private static bool IsUse(SimpleNameSyntax n)
+    {
+        if (n.Parent is NameColonSyntax { Parent: ArgumentSyntax or AttributeArgumentSyntax }) return false;
+        if (n.Parent is NameEqualsSyntax { Parent: AnonymousObjectMemberDeclaratorSyntax }) return false;
+        for (SyntaxNode? up = n.Parent; up is not null and not StatementSyntax and not MemberDeclarationSyntax; up = up.Parent)
+            if (up is UsingDirectiveSyntax) return false;
+        for (SyntaxNode? up = n.Parent; up is NameSyntax or BaseNamespaceDeclarationSyntax; up = up.Parent)
+            if (up is BaseNamespaceDeclarationSyntax) return false;
+        return true;
     }
 
     /// <summary>The tree this model already parsed for <paramref name="fullPath"/>, for the comment/string classifier
@@ -1013,6 +1082,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _declarationClash = null;
             _clashFilter = null;
             _clashByFile.Clear();
+            _unboundByFile.Clear();
             foreach (var path in docs.Keys) { _conditionalByFile.Remove(path); _scopeFactsByFile.Remove(path); }
             InPlaceUpdates++;
             RefusedBecause = null;
@@ -1119,6 +1189,7 @@ public sealed class RoslynCSharpAnalyzer : IDisposable
             _declarationClash = null;
             _clashFilter = null;
             _clashByFile.Clear();
+            _unboundByFile.Clear();
             _conditionalByFile.Clear();
             _scopeFactsByFile.Clear();
             _docByPath.Clear();

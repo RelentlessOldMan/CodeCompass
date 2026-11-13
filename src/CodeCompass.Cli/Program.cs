@@ -1364,9 +1364,13 @@ static int CmdRefs(string[] args)
     int csDroppedDirs = csAnalyzer?.DroppedDirs ?? 0;     // folders the model's walk couldn't list: which files are missing is unknown
     // Global usings injected for SDK projects can make a name ambiguous in a legacy project's file (same rule as MCP).
     var csClash = csAnalyzer?.UsingsClash(csCandidates) ?? ([], []);
+    // Uses the model can't bind (a member reached through a package's type): backfilled by name in those files (as MCP).
+    // A clash file is unbound too (the clash is why), and the clash note already names it.
+    IReadOnlyList<string> csUnbound = (csAnalyzer?.UnboundFiles(csCandidates, name) ?? [])
+        .Except(csClash.Files, StringComparer.OrdinalIgnoreCase).ToList();
     // The semantic part is done: drop the model (hundreds of MB to GBs) before the name search reads candidate files.
     csAnalyzer?.Dispose();
-    var csBackfill = new HashSet<string>(csClash.Files, StringComparer.OrdinalIgnoreCase);
+    var csBackfill = new HashSet<string>(csClash.Files.Concat(csUnbound), StringComparer.OrdinalIgnoreCase);
     bool csharpIncomplete = csAnalyzer is null || csConditional.Count > 0 || csUnreadable.Count > 0 || csDroppedDirs > 0 || csClash.Declarations.Count > 0;
     // Classifies comment/string spans in C#/C/C++ candidate files so the name search skips hits inside them.
     var spanFilter = new LexicalSpanFilter(name);
@@ -1412,6 +1416,8 @@ static int CmdRefs(string[] args)
     if (csClash.Declarations.Count > 0 || csClash.Files.Count > 0)
         Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUsingsClashNote(
             csClash.Declarations.Select(f => Path.GetRelativePath(root, f)).ToList(), csClash.Files.Select(f => Path.GetRelativePath(root, f)).ToList()));
+    if (csUnbound.Count > 0)
+        Console.Out.WriteLine("-- " + ReferenceMerge.CSharpUnboundNote(name, csUnbound.Select(f => Path.GetRelativePath(root, f)).ToList()));
     if (limits.UnreadablePaths.Count > 0)
         Console.Out.WriteLine("-- " + ReferenceMerge.UnreadableCandidatesNote(limits.UnreadablePaths) + ".");
     if (limits.HitTotalCap || limits.HitPerFileCap)

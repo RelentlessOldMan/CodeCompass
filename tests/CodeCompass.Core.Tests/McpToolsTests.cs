@@ -915,10 +915,13 @@ public class McpToolsTests
             // Build its index out-of-band (as `codecompass index "<root>"` would for a large deferred root).
             var (t, s, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
             t.Dispose(); s.Dispose();
-            // links.json didn't change, so the signature watch alone won't pick it up.
-            Assert.DoesNotContain("Gizmo.cs", CodeCompassTools.SearchCode("LateIndexedThing"));
+            // links.json didn't change, but a linked root that had no index is re-probed once its index generation
+            // moves, so the next query federates it without a restart or reindex.
+            var picked = CodeCompassTools.SearchCode("LateIndexedThing");
+            Assert.Contains("Gizmo.cs", picked);
+            Assert.Contains(external.Root, picked);
 
-            // reindex is the lever that forces a re-probe -> the now-built linked index gets federated.
+            // reindex still re-probes and keeps it federated.
             CodeCompassTools.Reindex();
             var res = CodeCompassTools.SearchCode("LateIndexedThing");
             Assert.Contains("Gizmo.cs", res);
@@ -1473,6 +1476,150 @@ public class McpToolsTests
             var res = CodeCompassTools.SearchCode("Widget");
             Assert.Contains("none of the focused root(s) are indexed", res);
             Assert.DoesNotContain("src/App.cs", res); // the project is out of scope, so its hit must not leak
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    private static void WaitReady()
+    {
+        string status = "";
+        for (int i = 0; i < 400; i++)
+        {
+            if (ServerContext.TryGet(out _, out _, out status)) return;
+            Thread.Sleep(25);
+        }
+        Assert.Fail($"index never became ready; last status: {status}");
+    }
+
+    // A linked root with no index when the session starts was dropped without a word, and stayed out of every
+    // unfocused answer even after a terminal `codecompass index` built it (links.json hadn't changed). Each answer
+    // now says it wasn't searched, and the next query after it's built searches it.
+    [Fact]
+    public void LinkedRootBuiltAfterStartup_IsPickedUp_AndSaidNotSearchedUntilThen()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class ExternalOnlyGizmo { } }");
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            WaitReady();
+            var before = CodeCompassTools.SearchCode("ExternalOnlyGizmo");
+            Assert.DoesNotContain("lib/Gizmo.cs", before);
+            Assert.Contains("NOT searched", before);
+            Assert.Contains(System.IO.Path.GetFileName(external.Root), before);
+            Assert.Contains("NOT searched", CodeCompassTools.SearchCode("Widget")); // a hit elsewhere still says so
+
+            var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root); // the terminal build
+            et.Dispose(); es.Dispose();
+
+            var after = CodeCompassTools.SearchCode("ExternalOnlyGizmo");
+            Assert.Contains("Gizmo.cs", after);
+            Assert.DoesNotContain("NOT searched", after);
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    // A link whose load keeps failing transiently waits out a growing back-off before a query retries it; reindex is the
+    // lever that retries it now.
+    [Fact]
+    public void LinkFailingTransiently_WaitsOutItsBackOff_UntilReindexRetriesIt()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class BackedOffGizmo { } }");
+        var (et, es, _) = CodeCompass.Core.Indexing.RepositoryIndexer.Build(external.Root);
+        et.Dispose(); es.Dispose();
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, external.Root);
+
+        var failing = true;
+        var baseMs = ServerContext.UnloadedTransientRetryMs;
+        ServerContext.UnloadedTransientRetryMs = 600_000; // no back-off runs out during the test
+        ServerContext.LinkLoadFailsForTests = r => failing && string.Equals(
+            System.IO.Path.GetFullPath(r).TrimEnd('\\', '/'), System.IO.Path.GetFullPath(external.Root).TrimEnd('\\', '/'),
+            System.StringComparison.OrdinalIgnoreCase);
+        ServerContext.Init(project.Root);
+        try
+        {
+            WaitReady();
+            Assert.Contains("NOT searched", CodeCompassTools.SearchCode("BackedOffGizmo"));
+
+            failing = false; // loadable now, but its back-off hasn't run out: not retried on the query path
+            var waiting = CodeCompassTools.SearchCode("BackedOffGizmo");
+            Assert.DoesNotContain("Gizmo.cs", waiting);
+            Assert.Contains("NOT searched", waiting);
+
+            CodeCompassTools.Reindex();
+            var after = CodeCompassTools.SearchCode("BackedOffGizmo");
+            Assert.Contains("Gizmo.cs", after);
+            Assert.DoesNotContain("NOT searched", after);
+        }
+        finally
+        {
+            ServerContext.LinkLoadFailsForTests = null;
+            ServerContext.UnloadedTransientRetryMs = baseMs;
+            ServerContext.Init(project.Root);
+        }
+    }
+
+    [Fact]
+    public void TransientRetryDelay_Doubles_UpToFiveMinutes()
+    {
+        Assert.Equal(5_000, ServerContext.TransientRetryDelayMs(0));
+        Assert.Equal(10_000, ServerContext.TransientRetryDelayMs(1));
+        Assert.Equal(160_000, ServerContext.TransientRetryDelayMs(5));
+        Assert.Equal(300_000, ServerContext.TransientRetryDelayMs(6));
+        Assert.Equal(300_000, ServerContext.TransientRetryDelayMs(16));
+    }
+
+    // Two unloaded links with the same folder name are told apart: each note names its full path, not "src" twice.
+    [Fact]
+    public void TwoUnloadedLinks_SameFolderName_AreToldApart()
+    {
+        using var project = new TempRepo();
+        using var one = new TempRepo();
+        using var two = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        one.Write("src/A.cs", "class A { }");
+        two.Write("src/B.cs", "class B { }");
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, one.FullPath("src"));
+        CodeCompass.Core.Storage.LinkStore.Add(project.Root, two.FullPath("src"));
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            WaitReady();
+            var r = CodeCompassTools.SearchCode("Widget");
+            Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(r, "was NOT searched").Count);
+            Assert.DoesNotContain("linked root src was", r);
+            Assert.Contains(System.IO.Path.GetFileName(one.Root), r);
+            Assert.Contains(System.IO.Path.GetFileName(two.Root), r);
+        }
+        finally { ServerContext.Init(project.Root); }
+    }
+
+    // A deferred link isn't "active on the next query": it isn't searched at all until it's built.
+    [Fact]
+    public void LinkAdd_DeferredAsTooBig_DoesNotClaimItIsActive()
+    {
+        using var project = new TempRepo();
+        using var external = new TempRepo();
+        project.Write("src/App.cs", "namespace App { public class Widget { } }");
+        external.Write("lib/Gizmo.cs", "namespace Ext { public class Gizmo { } }");
+        external.Write(".codecompass.json", "{ \"maxAutoMb\": 0 }");
+
+        ServerContext.Init(project.Root);
+        try
+        {
+            WaitReady();
+            var reply = CodeCompassTools.ManageLinks("add", external.Root);
+            Assert.Contains("auto-index limit", reply);
+            Assert.DoesNotContain("active on the next query", reply);
+            Assert.Contains("NOT searched", CodeCompassTools.SearchCode("Widget"));
         }
         finally { ServerContext.Init(project.Root); }
     }

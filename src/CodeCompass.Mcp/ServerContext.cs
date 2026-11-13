@@ -94,6 +94,9 @@ public static class ServerContext
         // When an ignore file changed here and no walk may pick up what it no longer ignores (see AfterIgnoreFilesChanged):
         // every answer says so until an index built after it loads. 0 = not.
         public long IgnoreFilesStaleSinceTicks;
+        // When its watcher lost events and no in-session rebuild may run (network/huge, see OnLinkedChanges): every answer
+        // says so until an index built after it loads, as the primary root's _eventsLost does. 0 = not.
+        public long EventsLostSinceTicks;
         // Its startup reconcile (see StartLinkedWatch), cancelled and waited for when the root is torn down: left running, it
         // held the index's write lock against a purge and could write a purged index back.
         public CancellationTokenSource? LoadCts;
@@ -500,6 +503,10 @@ public static class ServerContext
         if (ignoreStale.Count > 0)
             sb.Append($"\n(Note: an ignore file (.gitignore/.ignore) changed in linked root(s) {RootNames(ignoreStale)} and files it " +
                       "no longer ignores aren't indexed there; results may be STALE until: codecompass update <root>.)");
+        var lost = _linked.Where(EventsLostStillStale).Select(l => l.Root).ToList();
+        if (lost.Count > 0)
+            sb.Append($"\n(Note: the file watcher lost change events on linked root(s) {RootNames(lost)}, where an automatic full " +
+                      "rebuild is disabled (network/large); results from them may be STALE until: codecompass update <root>.)");
         var newer = _linked.Where(l => l.NewerFormat).Select(l => l.Root).ToList();
         if (newer.Count > 0)
             sb.Append($"\n(Note: linked root(s) {RootNames(newer)} were re-indexed by a NEWER CodeCompass, which this one can't " +
@@ -624,12 +631,17 @@ public static class ServerContext
     }
 
     // A linked root's ignore-file note holds until its index is rebuilt or updated after the change (a terminal update).
-    private static bool IgnoreFilesStillStale(LinkedRoot lr)
+    private static bool IgnoreFilesStillStale(LinkedRoot lr) => StillStale(lr.Root, ref lr.IgnoreFilesStaleSinceTicks);
+
+    // Likewise a linked root's lost watcher events (see LinkedRoot.EventsLostSinceTicks).
+    private static bool EventsLostStillStale(LinkedRoot lr) => StillStale(lr.Root, ref lr.EventsLostSinceTicks);
+
+    private static bool StillStale(string root, ref long sinceTicks)
     {
-        long since = Interlocked.Read(ref lr.IgnoreFilesStaleSinceTicks);
+        long since = Interlocked.Read(ref sinceTicks);
         if (since == 0) return false;
-        if (!BuiltSince(lr.Root, since)) return true;
-        Interlocked.CompareExchange(ref lr.IgnoreFilesStaleSinceTicks, 0, since);
+        if (!BuiltSince(root, since)) return true;
+        Interlocked.CompareExchange(ref sinceTicks, 0, since);
         return false;
     }
 
@@ -772,6 +784,31 @@ public static class ServerContext
     private static bool _linksChecked;   // have we reconciled the link set at least once this session?
     private static long _linksSig;        // last-seen links.json signature (LinkStore.Signature) - cheap change probe
 
+    // Linked roots in links.json that aren't loaded (never built, deferred as too big, or the load failed). Every unfocused
+    // answer names them (see UnloadedLinksNote), and a query loads one as soon as its index generation moves (a terminal
+    // `codecompass index`) or a transient failure's back-off runs out - links.json didn't change, so nothing else would.
+    // Replaced whole under _linkedGate and, with _linked, under Rw's write lock: a query reads the two as one pair.
+    private sealed record UnloadedLink(string Root, IndexLoadFailure Why, string? Gen, long RetryAtMs, int Attempts);
+    private static volatile IReadOnlyList<UnloadedLink> _unloaded = Array.Empty<UnloadedLink>();
+    private const int UnloadedTransientRetryMaxMs = 300_000;
+    /// <summary>The first retry's delay; doubled per failure up to 5 minutes. Settable for tests only.</summary>
+    internal static int UnloadedTransientRetryMs = 5_000;
+    /// <summary>Test seam (null in production): true makes a linked root's load fail the way a transient read does.</summary>
+    internal static Func<string, bool>? LinkLoadFailsForTests;
+
+    internal static long TransientRetryDelayMs(int attempts) =>
+        Math.Min((long)UnloadedTransientRetryMs << Math.Min(attempts, 16), Math.Max(UnloadedTransientRetryMs, UnloadedTransientRetryMaxMs));
+
+    // A transient failure that keeps recurring (an ACL, a share that stays down) is retried less and less often:
+    // 5 s, doubling, at most every 5 minutes - not a full load attempt on the query path every 5 s for the session.
+    private static UnloadedLink Unloaded(string root, IndexLoadFailure why, string? gen, IReadOnlyList<UnloadedLink> before)
+    {
+        int attempts = 0;
+        foreach (var b in before)
+            if (PathEq(b.Root, root) && b.Why == why) { attempts = Math.Min(b.Attempts + 1, 16); break; }
+        return new UnloadedLink(root, why, gen, Environment.TickCount64 + TransientRetryDelayMs(attempts), attempts);
+    }
+
     // Tear down every linked root: swap _linked empty under Rw, then dispose watchers (off-lock) and the
     // now-unreferenced indexes/ownership. Resets the load-once flag so a re-point reloads fresh.
     private static void DisposeLinkedRoots()
@@ -781,7 +818,7 @@ public static class ServerContext
         {
             List<LinkedRoot> old;
             Rw.EnterWriteLock();
-            try { old = _linked; _linked = new List<LinkedRoot>(); } finally { Rw.ExitWriteLock(); }
+            try { old = _linked; _linked = new List<LinkedRoot>(); _unloaded = Array.Empty<UnloadedLink>(); } finally { Rw.ExitWriteLock(); }
             had = old.Count > 0;
             foreach (var lr in old) lr.Watcher?.Dispose();                      // off-lock: safe drain
             foreach (var lr in old) lr.StopLoadReconcile();
@@ -804,11 +841,11 @@ public static class ServerContext
         try
         {
             long sig = LinkStore.Signature(Root);
-            if (_linksChecked && sig == Volatile.Read(ref _linksSig)) return; // unchanged: the hot path, no lock
+            if (_linksChecked && sig == Volatile.Read(ref _linksSig) && !UnloadedLinkMayLoad()) return; // unchanged: the hot path, no lock
             lock (_linkedGate)
             {
                 sig = LinkStore.Signature(Root);
-                if (_linksChecked && sig == _linksSig) return; // another thread just reconciled it
+                if (_linksChecked && sig == _linksSig && !UnloadedLinkMayLoad()) return; // another thread just reconciled it
                 if (!LinkStore.TryRead(Root, out var desired)) return; // couldn't read (racing the atomic write) - keep set, retry next query
                 ReconcileTo(desired);
                 Volatile.Write(ref _linksSig, sig);
@@ -816,6 +853,28 @@ public static class ServerContext
             }
         }
         catch (Exception ex) { Log.For(Root).Warn($"linked-root reconcile skipped: {ex.Message}"); }
+    }
+
+    // Whether an unloaded linked root is worth another load: its index was written since (the generation moved) or the
+    // read failed transiently and its back-off ran out. One small local read per unloaded root, like MaybeReloadLinked.
+    private static bool UnloadedLinkMayLoad()
+    {
+        var unloaded = _unloaded;
+        if (unloaded.Count == 0) return false;
+        long now = Environment.TickCount64;
+        foreach (var u in unloaded)
+        {
+            if (u.Why == IndexLoadFailure.Transient && now >= u.RetryAtMs) return true;
+            var gen = IndexGeneration.Read(IndexStore.CacheDirPath(u.Root));
+            if (gen is not null && gen != u.Gen) return true;
+        }
+        return false;
+    }
+
+    private static void SetUnloaded(IReadOnlyList<UnloadedLink> unloaded)
+    {
+        Rw.EnterWriteLock();
+        try { _unloaded = unloaded; } finally { Rw.ExitWriteLock(); }
     }
 
     /// <summary>Apply a link change made in THIS session now, not on the next query: an unlinked root's index is closed,
@@ -843,26 +902,45 @@ public static class ServerContext
         var keep = current.Where(lr => desired.Any(d => PathEq(d, lr.Root))).ToList();
         var remove = current.Where(lr => !desired.Any(d => PathEq(d, lr.Root))).ToList();
         var addRoots = desired.Where(d => !current.Any(lr => PathEq(lr.Root, d))).ToList();
-        if (remove.Count == 0 && addRoots.Count == 0) return; // signature changed but the set didn't (e.g. a re-add of the same path)
+        if (remove.Count == 0 && addRoots.Count == 0) // signature changed but the set didn't (e.g. a re-add of the same path)
+        {
+            SetUnloaded(Array.Empty<UnloadedLink>());
+            return;
+        }
 
+        var before = _unloaded;
         var added = new List<LinkedRoot>();
+        var unloaded = new List<UnloadedLink>();
         foreach (var linkedRoot in addRoots)
         {
+            string? gen = null;
             try
             {
-                var gen = IndexGeneration.Read(IndexStore.CacheDirPath(linkedRoot)); // before loading (see MaybeReloadExternal)
-                if (!RepositoryIndexer.TryLoad(linkedRoot, out var t, out var s)) continue; // not indexed yet
-                var own = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(linkedRoot));
+                gen = IndexGeneration.Read(IndexStore.CacheDirPath(linkedRoot)); // before loading (see MaybeReloadExternal)
+                if (LinkLoadFailsForTests?.Invoke(linkedRoot) == true) throw new IOException("test: load failed");
+                if (!RepositoryIndexer.TryLoad(linkedRoot, out var t, out var s, out var why))
+                {
+                    unloaded.Add(Unloaded(linkedRoot, why, gen, before));
+                    continue;
+                }
+                WriteOwnership? own;
+                try { own = WriteOwnership.TryAcquire(IndexStore.CacheDirPath(linkedRoot)); }
+                catch { t.Dispose(); s.Dispose(); throw; }
                 added.Add(new LinkedRoot { Root = linkedRoot, Text = t, Symbols = s, Own = own, Gen = gen });
             }
-            catch (Exception ex) { Log.For(root).Warn($"linked root not loaded: {linkedRoot}: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                Log.For(root).Warn($"linked root not loaded: {linkedRoot}: {ex.Message}");
+                unloaded.Add(Unloaded(linkedRoot, IndexLoadFailure.Transient, gen, before));
+            }
         }
+        if (remove.Count == 0 && added.Count == 0) { SetUnloaded(unloaded); return; } // re-tried roots that still don't load
 
         var next = new List<LinkedRoot>(keep.Count + added.Count);
         next.AddRange(keep);
         next.AddRange(added);
         Rw.EnterWriteLock();
-        try { _linked = next; } finally { Rw.ExitWriteLock(); }
+        try { _linked = next; _unloaded = unloaded; } finally { Rw.ExitWriteLock(); } // one pair: a query never sees a root in neither
 
         foreach (var lr in remove) lr.Watcher?.Dispose();                        // off-lock: safe drain (see note above)
         foreach (var lr in remove) lr.StopLoadReconcile();                       // nothing writes it once it's unlinked
@@ -931,6 +1009,7 @@ public static class ServerContext
                 if (!ShouldAutoReconcile(linkedRoot))
                 {
                     held?.UnionWith(paths); // not written: kept for the next update
+                    if (lr is not null) Interlocked.CompareExchange(ref lr.EventsLostSinceTicks, DateTime.UtcNow.Ticks, 0); // said on every answer
                     wl.SkipBump();
                     Log.For(linkedRoot).Warn("watcher lost events on this linked root; skipped an in-session full rebuild " +
                                              $"(network/large) - run: codecompass update \"{linkedRoot}\"");
@@ -1185,13 +1264,38 @@ public static class ServerContext
         return sb.Append(". Clear with manage_links action=focus.)").ToString();
     }
 
+    // Appended to every unfocused answer while a linked root isn't loaded (see _unloaded): it wasn't searched, so a zero
+    // from it isn't "not there". Under a focus, FocusDisclosure says it for the focused roots and the rest are out of scope.
+    private static string UnloadedLinksNote(HashSet<string>? focus)
+    {
+        var unloaded = _unloaded;
+        if (focus is not null || unloaded.Count == 0) return "";
+        var sb = new System.Text.StringBuilder();
+        var names = RootNameList(unloaded.Select(u => u.Root));
+        for (int i = 0; i < unloaded.Count; i++)
+        {
+            var u = unloaded[i];
+            string why = u.Why switch
+            {
+                IndexLoadFailure.Transient => "its index couldn't be read just now; retrying",
+                IndexLoadFailure.Corrupt => $"its index is damaged; rebuild it with: codecompass index \"{u.Root}\"",
+                IndexLoadFailure.NewerFormat => "it was indexed by a NEWER CodeCompass, which this one can't read; upgrade this install",
+                _ => $"it has no index yet; build it with: codecompass index \"{u.Root}\"",
+            };
+            sb.Append($"\n(Note: linked root {names[i]} was NOT searched: {why}.)");
+        }
+        return sb.ToString();
+    }
+
     // Folder names, unless two share one (C:\a\src and D:\b\src) - then full paths, so the scope is unambiguous.
-    internal static string RootNames(IEnumerable<string> roots)
+    internal static string RootNames(IEnumerable<string> roots) => string.Join(", ", RootNameList(roots));
+
+    private static IReadOnlyList<string> RootNameList(IEnumerable<string> roots)
     {
         var norm = roots.Select(NormalizeRoot).ToList();
         var names = norm.Select(r => Path.GetFileName(r)).ToList();
         bool clash = names.Distinct(StringComparer.OrdinalIgnoreCase).Count() < names.Count;
-        return string.Join(", ", clash ? norm : names);
+        return clash ? norm : names;
     }
 
     /// <summary>
@@ -1232,7 +1336,8 @@ public static class ServerContext
                 // return a bare "no match" over nothing, which would read as "the symbol doesn't exist."
                 return "Focus is set, but none of the focused root(s) are indexed/loaded. Clear it with " +
                        "manage_links action=focus (no path), or build the focused root's index.";
-            string focusNote = FocusDisclosure(all.Count, handles) + EventsLostNote() + HeldBackNote() + StalenessNote(handles);
+            string focusNote = FocusDisclosure(all.Count, handles) + UnloadedLinksNote(focus) + EventsLostNote() + HeldBackNote() +
+                               StalenessNote(handles);
 
             // Every tool funnels through here. An unexpected throw inside op (an analyzer edge case, a corrupt
             // segment surfacing mid-read, an OOM in a semantic pass) would otherwise escape to the MCP framework

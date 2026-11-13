@@ -26,10 +26,16 @@ public class MixedGlobalUsingsTests
             public sealed class Widget { public int Spin() => 1; }
             public static class UseW { public static void All(List<Widget> ws) { foreach (var w in ws) w.Spin(); } }
             """);
-        // A name match no semantic pass resolves (an unknown receiver type): only a repo-wide backfill would list it.
+        // A use through an unknown receiver type binds to nothing: it is backfilled by name in its own file, and said so.
         repo.Write("App/Broken.cs", """
             namespace App;
             public static class Broken { public static void Go(Unknown u) { u.RunJob(); } }
+            """);
+        // A name match the semantic pass resolves to a local, not to any RunJob declaration: only a repo-wide backfill
+        // would list it.
+        repo.Write("App/Other.cs", """
+            namespace App;
+            public static class Other { public static int Go() { var RunJob = 1; RunJob++; return RunJob; } }
             """);
         repo.Write("Legacy/Legacy.csproj", """
             <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
@@ -347,7 +353,9 @@ public class MixedGlobalUsingsTests
         var r = Mcp(repo, "RunJob");
         Assert.Contains("Legacy/Use.cs:5:", r);           // t.RunJob(), lost by the semantic pass
         Assert.Contains("ImplicitUsings", r);
-        Assert.DoesNotContain("App/Broken.cs", r);        // the backfill is that file only, not every .cs file
+        Assert.DoesNotContain("App/Other.cs", r);         // the backfill is that file only, not every .cs file
+        Assert.Contains("App/Broken.cs:2:", r);           // u.RunJob() on an unknown type: by name, and said so
+        Assert.Contains("in App/Broken.cs \"RunJob\" is used through types the semantic model can't resolve", r);
     }
 
     [Fact]
@@ -357,6 +365,7 @@ public class MixedGlobalUsingsTests
         var r = Mcp(repo, "RunJob");
         Assert.Contains("Legacy/Caller.cs:3:", r);        // h.Job.RunJob(): Holder.Job's type is the ambiguous Task
         Assert.Contains("ImplicitUsings", r);
+        Assert.Contains("App/Other.cs:2:", r);            // repo-wide: the probe the code-clash tests say is NOT listed
     }
 
     [Fact]
@@ -366,7 +375,9 @@ public class MixedGlobalUsingsTests
         var r = Mcp(repo, "RunJob");
         Assert.Contains("Legacy/Use.cs:5:", r);           // found semantically
         Assert.DoesNotContain("ImplicitUsings", r);
-        Assert.DoesNotContain("App/Broken.cs", r);
+        Assert.DoesNotContain("App/Other.cs", r);
+        Assert.Contains("App/Broken.cs:2:", r);
+        Assert.Contains("in App/Broken.cs \"RunJob\" is used through types the semantic model can't resolve", r);
     }
 
     [Fact]
@@ -378,7 +389,9 @@ public class MixedGlobalUsingsTests
         var r = Run(cli, "refs", repo.Root, "RunJob");
         Assert.Contains("Legacy/Use.cs:5:", r.Replace('\\', '/'));
         Assert.Contains("ImplicitUsings", r);
-        Assert.DoesNotContain("Broken.cs", r);
+        Assert.DoesNotContain("Other.cs", r);
+        Assert.Contains("App/Broken.cs:2:", r.Replace('\\', '/'));
+        Assert.Contains("\"RunJob\" is used through types the semantic model can't resolve", r);
     }
 
     private static string Run(string cli, params string[] args)

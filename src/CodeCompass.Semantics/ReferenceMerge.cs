@@ -220,6 +220,12 @@ public static class ReferenceMerge
                (declarationClash.Count > 0 ? "shown by name across the C# files" : "shown by name in " + (files.Count == 1 ? "that file" : "those files")) + ".";
     }
 
+    /// <summary>The unresolved-uses caveat (see RoslynCSharpAnalyzer.UnboundFiles), or empty when there are none.</summary>
+    public static string CSharpUnboundNote(string name, IReadOnlyList<string> unboundFilesDisplay) =>
+        unboundFilesDisplay.Count == 0 ? "" :
+        "C# coverage INCOMPLETE - in " + FileList(unboundFilesDisplay) + " \"" + name + "\" is used through types the semantic " +
+        "model can't resolve (from packages, generated code or #if branches it doesn't have), so references there are shown by NAME.";
+
     // Sorted: the files come in the index's candidate order, which two builds of the same tree don't share - so the same
     // set reads the same, five named files included.
     private static string FileList(IReadOnlyList<string> files)
