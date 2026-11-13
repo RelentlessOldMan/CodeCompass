@@ -1,10 +1,13 @@
 <Project>
 
   <!--
-    Versioning: base is 1.0 (bump VersionPrefix by hand for real milestones). The patch number is
-    the git commit count, so it auto-bumps on every check-in; the informational version also carries
-    the short commit SHA so a user's reported version pins the exact commit. Falls back to
-    1.0.0+nogit when git isn't available (e.g. a source drop), so builds never fail on this.
+    Versioning is by date: YEAR.MONTH.DAY.N (2026.11.13.1, no leading zeros), where the date is HEAD's commit date
+    (in the committer's own time zone) and N counts that day's commits on the first-parent line up to HEAD. So every
+    check-in gets a new, higher number, and any build of one commit - here or on the release runner - gets the same
+    one. N jumps when several commits go out in one push (one release, numbered by its last commit). The
+    informational version also carries the short commit SHA so a user's reported version pins the exact commit.
+    Falls back to 0.0.0.0+nogit when git isn't available (e.g. a source drop), so builds never fail on this; a
+    shallow clone undercounts N, so the release checkout takes full history.
 
     AssemblyVersion stays 1.0.0.0 (stable, so assembly binding doesn't churn per commit).
     FileVersion / InformationalVersion carry the real number for the .exe properties and the logs.
@@ -12,11 +15,10 @@
   <PropertyGroup>
     <Company>RelentlessOldMan</Company>
     <Product>CodeCompass</Product>
-    <VersionPrefix>1.0</VersionPrefix>
-    <CCGitCount>0</CCGitCount>
+    <CCVersion>0.0.0.0</CCVersion>
     <CCGitSha>nogit</CCGitSha>
     <!-- We already put the short SHA into InformationalVersion ourselves; stop the SDK from also
-         appending the full commit SHA (yields an ugly "1.0.52+short.full" double-SHA). -->
+         appending the full commit SHA (yields an ugly "2026.11.13.1+short.full" double-SHA). -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
 
     <!-- Pin the full transitive dependency graph in a committed packages.lock.json per project. Without it,
@@ -34,23 +36,33 @@
   <Target Name="CCStampVersion"
           BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo"
           Condition="'$(CCStamped)' != 'true'">
-    <Exec Command="git rev-list --count HEAD" ConsoleToMSBuild="true" ContinueOnError="true"
-          StandardOutputImportance="low" StandardErrorImportance="low">
-      <Output TaskParameter="ConsoleOutput" PropertyName="_CCCount" />
-      <Output TaskParameter="ExitCode" PropertyName="_CCCountRc" />
+    <!-- The days of HEAD and the commits before it: N is how many share HEAD's day. -->
+    <Exec Command="git log --first-parent -n 1000 --format=%25%25cd --date=format:%25%25Y.%25%25m.%25%25d HEAD" ConsoleToMSBuild="true"
+          ContinueOnError="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" ItemName="_CCDay" />
+      <Output TaskParameter="ExitCode" PropertyName="_CCDayRc" />
+    </Exec>
+    <Exec Command="git log -1 --format=%25%25cd --date=format:%25%25Y.%25%25m.%25%25d HEAD" ConsoleToMSBuild="true"
+          ContinueOnError="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_CCHeadDay" />
+      <Output TaskParameter="ExitCode" PropertyName="_CCHeadDayRc" />
     </Exec>
     <Exec Command="git rev-parse --short=8 HEAD" ConsoleToMSBuild="true" ContinueOnError="true"
           StandardOutputImportance="low" StandardErrorImportance="low">
       <Output TaskParameter="ConsoleOutput" PropertyName="_CCSha" />
       <Output TaskParameter="ExitCode" PropertyName="_CCShaRc" />
     </Exec>
+    <ItemGroup>
+      <_CCSameDay Include="@(_CCDay)" Condition="'%(Identity)' == '$(_CCHeadDay)'" />
+    </ItemGroup>
     <PropertyGroup>
-      <CCGitCount Condition="'$(_CCCountRc)' == '0' and '$(_CCCount)' != ''">$(_CCCount)</CCGitCount>
+      <_CCN>@(_CCSameDay->Count())</_CCN>
+      <CCVersion Condition="'$(_CCDayRc)' == '0' and '$(_CCHeadDayRc)' == '0' and '$(_CCHeadDay)' != ''">$([System.Version]::Parse('$(_CCHeadDay).$(_CCN)').ToString())</CCVersion>
       <CCGitSha Condition="'$(_CCShaRc)' == '0' and '$(_CCSha)' != ''">$(_CCSha)</CCGitSha>
-      <Version>$(VersionPrefix).$(CCGitCount)</Version>
-      <AssemblyVersion>$(VersionPrefix).0.0</AssemblyVersion>
-      <FileVersion>$(VersionPrefix).$(CCGitCount).0</FileVersion>
-      <InformationalVersion>$(VersionPrefix).$(CCGitCount)+$(CCGitSha)</InformationalVersion>
+      <Version>$(CCVersion)</Version>
+      <AssemblyVersion>1.0.0.0</AssemblyVersion>
+      <FileVersion>$(CCVersion)</FileVersion>
+      <InformationalVersion>$(CCVersion)+$(CCGitSha)</InformationalVersion>
       <CCStamped>true</CCStamped>
     </PropertyGroup>
   </Target>

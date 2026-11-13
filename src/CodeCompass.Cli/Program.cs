@@ -61,7 +61,7 @@ return args.Length == 0
         _ => Usage(),
     };
 
-// Print the build version (e.g. 1.0.123+a1b2c3d4). Users quote this in bug reports so a
+// Print the build version (e.g. 2026.11.13.1+a1b2c3d4). Users quote this in bug reports so a
 // problem can be pinned to an exact commit.
 static int CmdVersion()
 {

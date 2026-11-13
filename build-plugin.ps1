@@ -58,7 +58,7 @@ $docs = Join-Path $root "docs/CodeCompass.html"
 if (Test-Path $docs) { Copy-Item $docs (Join-Path $root "plugin/CodeCompass.html") -Force }
 
 $size = [math]::Round(((Get-ChildItem $binDir -Recurse | Measure-Object Length -Sum).Sum / 1MB), 1)
-$version = (& $cli version)   # e.g. "CodeCompass 1.0.64+a1b2c3d4"
+$version = (& $cli version)   # e.g. "CodeCompass 2026.11.13.1+a1b2c3d4"
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
     throw "could not read version from the freshly built CLI ($cli) - the plugin manifest can't be stamped."
 }

@@ -12,7 +12,8 @@ of the design decisions - especially the ones learned the hard way while making
 indexing survive very large, partly machine-generated codebases. Where a
 decision has a non-obvious "why", it is written down here, because the reasons
 matter more than the code. The build carries a git-derived version
-(1.0.<commit-count>+<short-sha>, reported by `codecompass version` and in the
+(<year>.<month>.<day>.<n>+<short-sha>: the commit's date and its number that
+day, reported by `codecompass version` and in the
 logs) so a user's report pins an exact commit.
 
 

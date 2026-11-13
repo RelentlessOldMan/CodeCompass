@@ -150,7 +150,7 @@ codecompass selftest <path> [--html <file>] [--json <file>] [--anonymize]   the 
 codecompass cache   [list|gc|clear <path>|clear-all]   inspect/manage the per-user index cache
 codecompass report  <path> [--no-logs]  zip diagnostics + logs for a bug report (never source)
 codecompass logs                      show the log folder and files
-codecompass version                   print the build version (1.0.<commit-count>+<short-sha>)
+codecompass version                   print the build version (<year>.<month>.<day>.<n>+<short-sha>)
 ```
 
 ### Choosing `maxSymbolMb` from data

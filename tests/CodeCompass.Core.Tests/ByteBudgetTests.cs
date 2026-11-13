@@ -56,10 +56,29 @@ public class ByteBudgetTests
 public class BuildInfoTests
 {
     [Fact]
-    public void VersionStartsAtOneDotZero()
+    public void VersionIsTheCommitDate()
     {
-        // Directory.Build.props stamps 1.0.<gitcount>[+sha]; a source drop with no git falls back
-        // to the assembly version. Either way the product line is 1.0.
-        Assert.StartsWith("1.0", BuildInfo.Version);
+        // Directory.Build.props stamps <year>.<month>.<day>.<n>+<sha>: HEAD's commit date (no leading zeros) and its
+        // number that day. A source drop with no git gets 0.0.0.0+nogit.
+        var m = System.Text.RegularExpressions.Regex.Match(BuildInfo.Version, @"^(\d{4}\.\d{1,2}\.\d{1,2})\.(\d+)\+([0-9a-f]{8})$");
+        if (BuildInfo.Version == "0.0.0.0+nogit") return;
+        Assert.True(m.Success, BuildInfo.Version);
+        Assert.True(int.Parse(m.Groups[2].Value) >= 1, BuildInfo.Version);
+
+        var psi = new System.Diagnostics.ProcessStartInfo("git", "log -1 --format=%cd --date=format:%Y.%m.%d " + m.Groups[3].Value)
+        {
+            WorkingDirectory = System.AppContext.BaseDirectory, RedirectStandardOutput = true, RedirectStandardError = true,
+            UseShellExecute = false, CreateNoWindow = true,
+        };
+        string day;
+        try
+        {
+            using var p = System.Diagnostics.Process.Start(psi)!;
+            day = p.StandardOutput.ReadToEnd().Trim();
+            p.WaitForExit();
+            if (p.ExitCode != 0 || day.Length == 0) return; // no git here: the shape is all that can be checked
+        }
+        catch (System.ComponentModel.Win32Exception) { return; }
+        Assert.Equal(System.Version.Parse(day + ".0").ToString(3), m.Groups[1].Value);
     }
 }

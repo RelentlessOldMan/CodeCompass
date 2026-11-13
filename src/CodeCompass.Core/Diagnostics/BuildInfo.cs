@@ -2,7 +2,7 @@ using System.Reflection;
 
 namespace CodeCompass.Core.Diagnostics;
 
-/// <summary>The build's version string (e.g. <c>1.0.123+a1b2c3d4</c>), derived from git at build
+/// <summary>The build's version string (e.g. <c>2026.11.13.1+a1b2c3d4</c>: the commit's date, then its number that day), derived from git at build
 /// time via Directory.Build.props. Logged at startup and reported by <c>codecompass version</c> so a
 /// user's reported version pins the exact commit.</summary>
 public static class BuildInfo
